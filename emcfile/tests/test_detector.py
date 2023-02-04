@@ -67,8 +67,8 @@ def test_det_write(det):
         assert ef.det_isclose(det1.copy(), det2)
 
 
-def test_get_ewald_vec(det_file):
-    det = ef.detector(det_file, norm_flag=False)
+def test_get_ewald_vec(det):
+    np.testing.assert_almost_equal(det.pixel_size, 0.1)
     x = ef.get_ewald_vec(det.coor)
     np.testing.assert_allclose(np.linalg.norm(x), det.ewald_rad, rtol=1e-4)
 
@@ -87,7 +87,6 @@ def test_repr(det_file):
         1 - 1016
         2 - 305
 """
-    print(repr(det))
     assert repr(det) == ans
 
 

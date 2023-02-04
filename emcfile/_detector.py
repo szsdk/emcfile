@@ -58,6 +58,10 @@ class Detector:
         self._norm_flag: Optional[bool] = None
 
     @property
+    def pixel_size(self) -> float:
+        return self.detd / self.ewald_rad
+
+    @property
     def coor_factor(self) -> npt.NDArray[np.float64]:
         return cast(
             npt.NDArray[np.float64],

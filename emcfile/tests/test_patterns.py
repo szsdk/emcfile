@@ -171,7 +171,9 @@ def test_write_photons(suffix, data_list):
         ef.write_photons(data_list, f0.name, overwrite=True)
         t0 = time.time() - t
         logging.info(
-            f"speed[multiple; #patterns={len(data_list)}]: {all_data.nbytes * 1e-9 /t0:.2f} GB/s"
+            "speed[multiple; #patterns=%d]: %.2f GB/s",
+            len(data_list),
+            all_data.nbytes * 1e-9 / t0,
         )
 
         logging.info(f"speed ratio [{suffix}]: {t1 / t0:.3f}")
