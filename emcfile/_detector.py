@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import numpy as np
+import numpy.typing as npt
 from beartype import beartype
 from numpy import ma
 from scipy.interpolate import interp1d
@@ -39,27 +40,28 @@ class PixelType(IntEnum):
 class Detector:
     def __init__(
         self,
-        coor: np.ndarray,
-        factor: np.ndarray,
-        mask: np.ndarray,
+        coor: npt.NDArray[np.float64],
+        factor: npt.NDArray[np.float64],
+        mask: npt.NDArray[np.int16],
         detd: float,
         ewald_rad: float,
         *,
         writeable: bool = False,
     ) -> None:
         self.num_pix = len(factor)
-        self.coor = coor.copy()
-        self.mask = mask.copy()
-        self.factor = factor.copy()
+        self.coor: npt.NDArray[np.float64] = coor.copy()
+        self.mask: npt.NDArray[np.int16] = mask.copy()
+        self.factor: npt.NDArray[np.float64] = factor.copy()
         self.detd = detd
         self.ewald_rad = ewald_rad
         self.setflags(writeable=writeable)
         self._norm_flag: Optional[bool] = None
 
     @property
-    def coor_factor(self) -> np.ndarray:
+    def coor_factor(self) -> npt.NDArray[np.float64]:
         return cast(
-            np.ndarray, np.concatenate([self.coor, self.factor[:, None]], axis=1)
+            npt.NDArray[np.float64],
+            np.concatenate([self.coor, self.factor[:, None]], axis=1),
         )
 
     @property
@@ -120,7 +122,7 @@ class Detector:
             return
         if not isinstance(writeable, bool):
             raise ValueError("Wrong type of writeable")
-        for arr in [self.coor, self.mask, self.factor]:
+        for arr in cast(List[npt.NDArray[Any]], [self.coor, self.mask, self.factor]):
             arr.setflags(write=writeable)
         self._writeable: bool = writeable
         if writeable:
@@ -166,7 +168,12 @@ class Detector:
         else:
             raise ValueError(f"Cannot parse {fname}")
 
-    def __getitem__(self, index: Union[slice, List]) -> Detector:
+    def __getitem__(
+        self,
+        index: Union[
+            slice, List[PixelType], npt.NDArray[np.bool_], npt.NDArray[np.integer[Any]]
+        ],
+    ) -> Detector:
         if isinstance(index, list):
             if len(index) == 0:
                 raise ValueError("0-length input")
@@ -261,8 +268,10 @@ def _from_file(fname: PATH_TYPE) -> Detector:
 
 
 def _init_detector(
-    coor: np.ndarray, mask: np.ndarray, factor: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    coor: npt.NDArray[np.floating[Any]],
+    mask: npt.NDArray[np.integer[Any]],
+    factor: npt.NDArray[np.floating[Any]],
+) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.int16], npt.NDArray[np.float64]]:
     if not (coor.shape[0] == mask.shape[0] == factor.shape[0]):
         raise ValueError("`coor`, `mask`, `factor` should have the same length.")
     if coor.shape[1] == 2:
@@ -270,18 +279,18 @@ def _init_detector(
         new_coor[:, :2] = coor
     else:
         new_coor = coor
-    return new_coor, mask, factor
+    return new_coor.astype(np.float64), mask.astype(np.int16), factor.astype(np.float64)
 
 
 @beartype
 def detector(
     src: Union[Detector, PATH_TYPE, None] = None,
     *,
-    coor: Optional[np.ndarray] = None,
-    mask: Optional[np.ndarray] = None,
-    factor: Optional[np.ndarray] = None,
-    detd: Union[float, int, np.floating, np.integer] = None,
-    ewald_rad: Union[float, int, np.floating, np.integer] = None,
+    coor: Optional[npt.NDArray] = None,
+    mask: Optional[npt.NDArray] = None,
+    factor: Optional[npt.NDArray] = None,
+    detd: Union[float, int, np.floating, np.integer, None] = None,
+    ewald_rad: Union[float, int, np.floating, np.integer, None] = None,
     writeable: bool = False,
     norm_flag: bool = True,
 ) -> Detector:
@@ -306,14 +315,16 @@ def detector(
             and (ewald_rad is not None)
         ):
             coor, mask, factor = _init_detector(coor, mask, factor)
-            det = Detector(coor, factor, mask, detd, ewald_rad, writeable=writeable)
+            det = Detector(
+                coor, factor, mask, float(detd), float(ewald_rad), writeable=writeable
+            )
     elif isinstance(src, Detector):
         det = Detector(
-            src.coor if coor is None else coor,
-            src.factor if factor is None else factor,
-            src.mask if mask is None else mask,
-            src.detd if detd is None else detd,
-            src.ewald_rad if ewald_rad is None else ewald_rad,
+            src.coor if coor is None else coor.astype(np.float64),
+            src.factor if factor is None else factor.astype(np.float64),
+            src.mask if mask is None else mask.astype(np.int16),
+            src.detd if detd is None else float(detd),
+            src.ewald_rad if ewald_rad is None else float(ewald_rad),
             writeable=writeable,
         )
     elif isinstance(src, (str, Path, H5Path)):
@@ -394,7 +405,7 @@ def det_isclose(
     return True
 
 
-def get_ewald_vec(coor: np.ndarray) -> np.ndarray:
+def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
     """
     Calcualte the center of a sphere with a point cloud distributed on it.
 
@@ -409,7 +420,7 @@ def get_ewald_vec(coor: np.ndarray) -> np.ndarray:
         The coordinate of the center.
     """
 
-    def _f(r: np.ndarray, x: np.ndarray) -> float:
+    def _f(r: npt.NDArray[Any], x: npt.NDArray[Any]) -> float:
         a = np.linalg.norm(x - r, axis=1)
         return float(a.std())
 
@@ -431,8 +442,8 @@ def get_ewald_vec(coor: np.ndarray) -> np.ndarray:
 
 
 def xyz_to_cxy(
-    xyz: np.ndarray, ewald_rad: float, detd: float, direction: int
-) -> np.ndarray:
+    xyz: npt.NDArray[Any], ewald_rad: float, detd: float, direction: int
+) -> npt.NDArray[np.float64]:
     is_1d = xyz.ndim == 1
     if is_1d:
         xyz = xyz[None, :]
@@ -441,8 +452,8 @@ def xyz_to_cxy(
 
 
 def cxy_to_xyz(
-    cxy: np.ndarray, ewald_rad: float, detd: float, direction: int
-) -> np.ndarray:
+    cxy: npt.NDArray[Any], ewald_rad: float, detd: float, direction: int
+) -> npt.NDArray[np.float64]:
     is_1d = cxy.ndim == 1
     if is_1d:
         cxy = cxy[None, :]
@@ -479,7 +490,7 @@ class DetRender:
         pix_idx = self._det.mask == 2
         self._mask[self.xy[pix_idx, 0], self.xy[pix_idx, 1]] = 1
         self._mask = self._mask.T.copy()
-        self._count = ma.masked_array(
+        self._count: ma.MaskedArray = ma.masked_array(
             np.zeros((self.frame_shape[1], self.frame_shape[0]), dtype="f8"),
             mask=self._mask,
         )
@@ -488,29 +499,29 @@ class DetRender:
         )
         self._count /= self._count.mean()
 
-    def frame_pixels(self) -> List[np.ndarray]:
+    def frame_pixels(self) -> List[npt.NDArray[np.float64]]:
         et = self.frame_extent()
         return np.meshgrid(
             np.linspace(et[0], et[1], self.frame_shape[1]),
             np.linspace(et[2], et[3], self.frame_shape[0]),
         )
 
-    def render(self, raw_img: np.ndarray) -> np.ndarray:
+    def render(self, raw_img: npt.NDArray[Any]) -> ma.MaskedArray[Any, Any]:
         """
         The right way to visualize the `raw_img` is
         `plt.imshow(img, origin='lower', extent=self.frame_extent())`.
         """
-        img: ma.MaskedArray = ma.masked_array(
+        img: ma.MaskedArray[Any, Any] = ma.masked_array(
             np.zeros((self.frame_shape[1], self.frame_shape[0]), dtype="f8"),
             mask=self._mask,
         )
         np.add.at(img, (self.xy[:, 1], self.xy[:, 0]), raw_img)
         return img / self._count
 
-    def to_cxy(self, xyz: np.ndarray) -> np.ndarray:
+    def to_cxy(self, xyz: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
         return xyz_to_cxy(xyz, self._det.ewald_rad, self._det.detd, self.direction)
 
-    def to_xyz(self, cxy: np.ndarray) -> np.ndarray:
+    def to_xyz(self, cxy: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
         return cxy_to_xyz(cxy, self._det.ewald_rad, self._det.detd, self.direction)
 
     def frame_extent(self) -> Tuple[float, float, float, float]:
@@ -562,7 +573,7 @@ def det_render(det: Detector) -> DetRender:
     return DetRender(det)
 
 
-def grid_position(shape: Tuple[int, ...]) -> List[np.ndarray]:
+def grid_position(shape: Tuple[int, ...]) -> List[npt.NDArray[np.float64]]:
     """
     Parameters
     ----------
@@ -573,7 +584,7 @@ def grid_position(shape: Tuple[int, ...]) -> List[np.ndarray]:
     positions: List
     """
     return cast(
-        List[np.ndarray],
+        List[npt.NDArray[np.float64]],
         np.meshgrid(
             *[np.linspace(-(s - 1) / 2, (s - 1) / 2, s) for s in shape], indexing="ij"
         ),
@@ -581,7 +592,9 @@ def grid_position(shape: Tuple[int, ...]) -> List[np.ndarray]:
 
 
 @beartype
-def get_3ddet_from_shape(shape, det=None, apply_mask=True):
+def get_3ddet_from_shape(
+    shape: Tuple[int, int], det: Detector, apply_mask: bool = True
+) -> Detector:
     detd = det.detd
     ewald_rad = det.ewald_rad
     direction = -int(np.sign(det.coor[:, 2].sum()))

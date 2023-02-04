@@ -52,13 +52,13 @@ class PatternsSOne:
         self._count_multi = count_multi
         self.update_idx()
 
-    def update_idx(self):
+    def update_idx(self) -> None:
         self._ones_idx = np.zeros(self.num_data + 1, dtype="u8")
         np.cumsum(self._ones, out=self._ones_idx[1:])
         self._multi_idx = np.zeros(self.num_data + 1, dtype="u8")
         np.cumsum(self._multi, out=self._multi_idx[1:])
 
-    def check(self):
+    def check(self) -> bool:
         if self.num_data != len(self._multi):
             raise Exception(
                 f"The `multi`{len(self._multi)} has different length with `ones`({self.num_data})"
@@ -84,7 +84,7 @@ class PatternsSOne:
     def __len__(self) -> int:
         return self.num_data
 
-    def sparse_pattern(self, idx: int):
+    def sparse_pattern(self, idx: int) -> SPARSE_PATTERN:
         return SPARSE_PATTERN(
             self._place_ones[self._ones_idx[idx] : self._ones_idx[idx + 1]],
             self._place_multi[self._multi_idx[idx] : self._multi_idx[idx + 1]],

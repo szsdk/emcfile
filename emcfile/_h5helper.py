@@ -6,9 +6,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Generator, Iterator, List, Optional, Tuple, Union, cast
 
-from beartype import beartype
 import h5py
 import numpy as np
+import numpy.typing as npt
+from beartype import beartype
 
 __all__ = [
     "H5Path",
@@ -134,7 +135,7 @@ def read_array(
     *,
     dtype: Any = "f8",  # TODO: replace dtype with npt.DTypeLike
     reshape: Optional[Tuple[int, ...]] = None,
-) -> np.ndarray:
+) -> npt.NDArray[Any]:
     """
     Read an array from file. The file name (`fname`) could be a `str`, a `Path`.
     """
@@ -143,19 +144,19 @@ def read_array(
         raise FileNotFoundError(f)
     if isinstance(f, H5Path):
         with f.open_group("r", "r") as (_, dataptr):
-            return cast(np.ndarray, dataptr[...])
+            return cast(npt.NDArray[Any], dataptr[...])
     elif f.suffix == ".npy":
         ans = np.load(f)
     elif f.suffix in [".bin", ".emc"]:
         ans = np.fromfile(f, dtype)
     else:
         raise Exception(f"Cannot identify file({fname}) suffix.")
-    return cast(np.ndarray, ans.reshape(reshape))
+    return cast(npt.NDArray[Any], ans.reshape(reshape))
 
 
 def write_array(
     fname: PATH_TYPE,
-    arr: np.ndarray,
+    arr: npt.NDArray[Any],
     /,
     *,
     overwrite: bool = False,
@@ -207,6 +208,7 @@ def check_h5path(s: PATH_TYPE) -> bool:
         return True
     return Path(fn_gn[0]).suffix.lower() == ".h5"
 
+
 @beartype
 def h5path(src: PATH_TYPE, group: Optional[str] = None) -> H5Path:
     """
@@ -257,7 +259,9 @@ def check_remove_groups(
             raise ValueError(f"{g} exists in attrs")
 
 
-def _check_exists(group_name, fp, overwrite, verbose):
+def _check_exists(
+    group_name: str, fp: Union[h5py.Group, h5py.File], overwrite: bool, verbose: bool
+) -> bool:
     if group_name not in fp:
         return False
     if verbose:
@@ -267,7 +271,13 @@ def _check_exists(group_name, fp, overwrite, verbose):
     return True
 
 
-def _write_single(group: h5py.Group, k, v, overwrite, verbose):
+def _write_single(
+    group: h5py.Group,
+    k: str,
+    v: Union[dict[str, npt.NDArray[Any]], npt.NDArray[Any]],
+    overwrite: bool,
+    verbose: bool,
+) -> None:
     if isinstance(v, np.ndarray):
         if _check_exists(k, group, overwrite, verbose):
             del group[k]
@@ -278,7 +288,9 @@ def _write_single(group: h5py.Group, k, v, overwrite, verbose):
         group.attrs[k] = v
 
 
-def _write_group(fp: h5py.File, group_name, obj, overwrite, verbose):
+def _write_group(
+    fp: h5py.File, group_name: str, obj: dict[str, Any], overwrite: bool, verbose: bool
+) -> None:
     if not isinstance(obj, dict):
         raise Exception(f"Cannot write type {type(obj)}")
 
@@ -298,7 +310,12 @@ def _write_group(fp: h5py.File, group_name, obj, overwrite, verbose):
         obj["."] = obj_dot
 
 
-def write_obj_h5(fn: Union[str, H5Path], obj, overwrite=False, verbose=False):
+def write_obj_h5(
+    fn: Union[str, H5Path],
+    obj: dict[str, Any],
+    overwrite: bool = False,
+    verbose: bool = False,
+) -> None:
     """Save dict `obj` to a `h5py.File`. The `np.ndarray` values are saved as
     h5 datasets. Others are saved in attributes of h5 group `group_name`.
     Parameters
@@ -313,7 +330,7 @@ def write_obj_h5(fn: Union[str, H5Path], obj, overwrite=False, verbose=False):
         _write_group(fp, f.gn, obj, overwrite, verbose)
 
 
-def _read_group(g):
+def _read_group(g: Union[h5py.File, h5py.Group]) -> dict[str, Any]:
     ans = dict()
     for k, v in g.attrs.items():
         ans[k] = v
@@ -325,7 +342,7 @@ def _read_group(g):
     return ans
 
 
-def read_obj_h5(fn: Union[str, H5Path]):
+def read_obj_h5(fn: Union[str, H5Path]) -> dict[str, Any]:
     """
     The inverse operation of `save_obj`. Read a dictionary from a h5 group.
     Parameters

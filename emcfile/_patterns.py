@@ -26,17 +26,19 @@ PATTENS_TYPE = Tuple[
 
 
 def _get_start_end(
-    num_data: int, start: Optional[int], end: Optional[int]
+    num_data: int,
+    start: Union[None, int, np.integer],
+    end: Union[None, int, np.integer],
 ) -> Tuple[int, int]:
     if start is not None and end is not None:
-        return start, end
+        return int(start), int(end)
     start = 0 if start is None else start
     end = num_data if end is None else end
-    return start, end
+    return int(start), int(end)
 
 
 def _parse_h5_PatternsSOne_v2(
-    path: H5Path, start: Optional[int], end: Optional[int]
+    path: H5Path, start: Union[None, int, np.integer], end: Union[None, int, np.integer]
 ) -> PATTENS_TYPE:
     with path.open_group("r", "r") as (_, fp):
         num_data = fp.attrs["num_data"]
@@ -66,7 +68,7 @@ def _parse_h5_PatternsSOne_v2(
 
 
 def _parse_h5_PatternsSOne_v1(
-    path: H5Path, start: Optional[int], end: Optional[int]
+    path: H5Path, start: Union[None, int, np.integer], end: Union[None, int, np.integer]
 ) -> PATTENS_TYPE:
     with path.open_group("r", "r") as (_, fp):
         num_data = len(fp["place_ones"])
@@ -93,7 +95,7 @@ def _parse_h5_PatternsSOne_v1(
 
 
 def _parse_bin_PatternsSOne(
-    path: Path, start: Optional[int], end: Optional[int]
+    path: Path, start: Union[None, int, np.integer], end: Union[None, int, np.integer]
 ) -> Tuple[int, Tuple[int, int], PatternsSOne]:
     file = PatternsSOneEMC(path)
     start, end = _get_start_end(file.num_data, start, end)
@@ -102,8 +104,8 @@ def _parse_bin_PatternsSOne(
 
 def _parse_file_PatternsSOne(
     path: Union[str, Path, H5Path],
-    start: Optional[int] = None,
-    end: Optional[int] = None,
+    start: Union[None, int, np.integer] = None,
+    end: Union[None, int, np.integer] = None,
 ) -> PatternsSOne:
     f = make_path(path)
     if isinstance(f, H5Path):
