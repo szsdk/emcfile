@@ -24,6 +24,13 @@ def data():
     return den_data
 
 
+@pytest.fixture()
+def data_file(tmp_path_factory, data):
+    fn = tmp_path_factory.mktemp("data") / "photon.emc"
+    data.write(fn)
+    return fn
+
+
 def test_operation(data):
     data.get_mean_count()
     data.nbytes
@@ -143,7 +150,7 @@ def test_io(data):
 
 
 def gen_write_photons():
-    data = ef.patterns("data/photons.emc")[:512]
+    data = ef.patterns(np.random.randint(0, 10, size=(16, 256)))
     for i in 2 ** np.arange(0, 10, 2):
         yield ".emc", [data] * i
         yield ".h5", [data] * i
@@ -171,28 +178,27 @@ def test_write_photons(suffix, data_list):
         assert ef.patterns(f0.name) == all_data
 
 
-def test_pattern_mul():
-    m = ef.patterns("data/photons.emc", end=10)
-    mtx = np.random.rand(m.num_pix, 10)
-    np.testing.assert_almost_equal(m @ mtx, m.todense() @ mtx)
+def test_pattern_mul(data):
+    mtx = np.random.rand(data.num_pix, 10)
+    np.testing.assert_almost_equal(data @ mtx, data.todense() @ mtx)
     mtx = mtx > 0.4
-    np.testing.assert_almost_equal(m @ mtx, m.todense() @ mtx)
+    np.testing.assert_almost_equal(data @ mtx, data.todense() @ mtx)
     mtx = coo_matrix(mtx)
-    np.testing.assert_equal((m @ mtx).todense(), m.todense() @ mtx)
+    np.testing.assert_equal((data @ mtx).todense(), data.todense() @ mtx)
     mtx = csr_matrix(mtx)
-    np.testing.assert_equal((m @ mtx).todense(), m.todense() @ mtx)
+    np.testing.assert_equal((data @ mtx).todense(), data.todense() @ mtx)
 
 
-def test_PatternsSOneEMC():
-    p0 = ef.patterns("data/photons.emc")
-    p1 = ef.PatternsSOneEMC("data/photons.emc")
+def test_PatternsSOneEMC(data_file):
+    p0 = ef.patterns(data_file)
+    p1 = ef.PatternsSOneEMC(data_file)
     np.testing.assert_equal(p0[10], p1[10])
     assert p0[::2] == p1[::2]
 
 
-def test_PatternsSOneEMC_getitem():
+def test_PatternsSOneEMC_getitem(data_file):
     np.random.seed(12)
-    p = Path("data/photons.emc")
+    p = Path(data_file)
     d1 = ef.patterns(p)
     d2 = ef.PatternsSOneEMC(p)
     assert d2.sparsity() == d1.sparsity()
