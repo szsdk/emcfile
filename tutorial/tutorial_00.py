@@ -32,7 +32,7 @@ patterns.num_data, patterns.num_pix
 
 patterns.ones, patterns.multi, patterns.place_ones, patterns.place_multi, patterns.count_multi
 
-[patterns.attrs(g) for g in patterns.ATTRS]
+[getattr(patterns, g) for g in patterns.ATTRS]
 
 # Accessing a single pattern
 

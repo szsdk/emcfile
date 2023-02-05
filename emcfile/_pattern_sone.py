@@ -114,7 +114,7 @@ class PatternsSOne:
 
     @property
     def nbytes(self) -> int:
-        return int(np.sum([self.attrs(i).nbytes for i in PatternsSOne.ATTRS]))
+        return int(np.sum([getattr(self, i).nbytes for i in PatternsSOne.ATTRS]))
 
     def sparsity(self) -> float:
         return self.nbytes / (4 * self.num_data * self.num_pix)
@@ -127,7 +127,7 @@ class PatternsSOne:
         if self.num_pix != d.num_pix:
             return False
         for i in PatternsSOne.ATTRS:
-            if cast(bool, np.any(self.attrs(i) != d.attrs(i))):
+            if cast(bool, np.any(getattr(self, i) != getattr(d, i))):
                 return False
         return True
 
@@ -209,23 +209,6 @@ class PatternsSOne:
     ) -> None:
         return write_photons([self], path, h5version=h5version, overwrite=overwrite)
 
-    def attrs(self, g: str) -> np.ndarray:
-        if g == "ones_idx":
-            return self._ones_idx
-        if g == "multi_idx":
-            return self._multi_idx
-        if g == "ones":
-            return self.ones
-        if g == "multi":
-            return self.multi
-        if g == "place_ones":
-            return self.place_ones
-        if g == "place_multi":
-            return self.place_multi
-        if g == "count_multi":
-            return self.count_multi
-        raise ValueError(f"What is {g}?")
-
     def _get_sparse_ones(self) -> csr_matrix:
         _one = np.ones(1, "i4")
         _one = np.lib.stride_tricks.as_strided(  # type: ignore
@@ -259,7 +242,7 @@ def iter_array_buffer(
     buffer = []
     nbytes = 0
     for a in datas:
-        ag = a.attrs(g)
+        ag = getattr(a, g)
         nbytes += ag.nbytes
         buffer.append(ag)
         if nbytes < buffer_size:
@@ -288,7 +271,7 @@ def _write_bin(datas: list[PatternsSOne], path: Path, overwrite: bool) -> None:
         header.tofile(fptr)
         for g in PatternsSOne.ATTRS:
             for data in datas:
-                data.attrs(g).tofile(fptr)
+                getattr(data, g).tofile(fptr)
 
 
 def _write_h5_v2(
@@ -390,7 +373,7 @@ def vstack(patterns_l: list[PatternsSOne], destroy: bool = False) -> PatternsSOn
         ans = PatternsSOne(
             num_pix,
             *[
-                np.concatenate([d.attrs(g) for d in patterns_l])
+                np.concatenate([getattr(d, g) for d in patterns_l])
                 for g in PatternsSOne.ATTRS
             ],
         )
@@ -399,10 +382,10 @@ def vstack(patterns_l: list[PatternsSOne], destroy: bool = False) -> PatternsSOn
         ans = patterns_l.pop(0)
         while len(patterns_l) > 0:
             pat = patterns_l.pop(0)
-            pat = {g: pat.attrs(g) for g in PatternsSOne.ATTRS}
+            pat = {g: getattr(pat, g) for g in PatternsSOne.ATTRS}
             for g in PatternsSOne.ATTRS:
                 b = pat.pop(g)
-                a = ans.attrs(g)
+                a = getattr(ans, g)
                 a.resize(a.shape[0] + b.shape[0], refcheck=False)
                 a[a.shape[0] - b.shape[0] :] = b[:]
     return ans
