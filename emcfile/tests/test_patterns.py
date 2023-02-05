@@ -55,7 +55,7 @@ def test_readcoomatrix():
 
 def test_getitem(data):
     for i in np.random.choice(data.num_data, 5):
-        assert np.sum(data[i] == 1) == data._ones[i]
+        assert np.sum(data[i] == 1) == data.ones[i]
 
     mask = np.random.rand(data.num_data) < 0.5
     idx = np.where(mask)[0]

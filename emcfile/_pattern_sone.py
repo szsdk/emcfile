@@ -46,39 +46,39 @@ class PatternsSOne:
     ) -> None:
         self.ndim = 2
         self.num_pix = num_pix
-        self._ones = ones
-        self._multi = multi
-        self._place_ones = place_ones
-        self._place_multi = place_multi
-        self._count_multi = count_multi
+        self.ones = ones
+        self.multi = multi
+        self.place_ones = place_ones
+        self.place_multi = place_multi
+        self.count_multi = count_multi
         self.update_idx()
 
     def update_idx(self) -> None:
         self._ones_idx = np.zeros(self.num_data + 1, dtype="u8")
-        np.cumsum(self._ones, out=self._ones_idx[1:])
+        np.cumsum(self.ones, out=self._ones_idx[1:])
         self._multi_idx = np.zeros(self.num_data + 1, dtype="u8")
-        np.cumsum(self._multi, out=self._multi_idx[1:])
+        np.cumsum(self.multi, out=self._multi_idx[1:])
 
     def check(self) -> bool:
-        if self.num_data != len(self._multi):
+        if self.num_data != len(self.multi):
             raise Exception(
-                f"The `multi`{len(self._multi)} has different length with `ones`({self.num_data})"
+                f"The `multi`{len(self.multi)} has different length with `ones`({self.num_data})"
             )
-        ones_total = self._ones.sum()
-        if ones_total != len(self._place_ones):
+        ones_total = self.ones.sum()
+        if ones_total != len(self.place_ones):
             raise Exception(
-                f"The expected length of `place_ones`({len(self._place_ones)}) should be {ones_total}."
-            )
-
-        multi_total = self._multi.sum()
-        if multi_total != len(self._place_multi):
-            raise Exception(
-                f"The expected length of `place_multi`({len(self._place_multi)}) should be {multi_total}."
+                f"The expected length of `place_ones`({len(self.place_ones)}) should be {ones_total}."
             )
 
-        if multi_total != len(self._count_multi):
+        multi_total = self.multi.sum()
+        if multi_total != len(self.place_multi):
             raise Exception(
-                f"The expected length of `place_multi`({len(self._count_multi)}) should be {multi_total}."
+                f"The expected length of `place_multi`({len(self.place_multi)}) should be {multi_total}."
+            )
+
+        if multi_total != len(self.count_multi):
+            raise Exception(
+                f"The expected length of `place_multi`({len(self.count_multi)}) should be {multi_total}."
             )
         return True
 
@@ -87,14 +87,14 @@ class PatternsSOne:
 
     def sparse_pattern(self, idx: int) -> SPARSE_PATTERN:
         return SPARSE_PATTERN(
-            self._place_ones[self._ones_idx[idx] : self._ones_idx[idx + 1]],
-            self._place_multi[self._multi_idx[idx] : self._multi_idx[idx + 1]],
-            self._count_multi[self._multi_idx[idx] : self._multi_idx[idx + 1]],
+            self.place_ones[self._ones_idx[idx] : self._ones_idx[idx + 1]],
+            self.place_multi[self._multi_idx[idx] : self._multi_idx[idx + 1]],
+            self.count_multi[self._multi_idx[idx] : self._multi_idx[idx + 1]],
         )
 
     @property
     def num_data(self) -> int:
-        return len(self._ones)
+        return len(self.ones)
 
     @property
     def shape(self) -> Tuple[int, int]:
@@ -159,9 +159,9 @@ class PatternsSOne:
         if idx >= self.num_data or idx < 0:
             raise IndexError(f"{idx}")
         pattern = np.zeros(self.num_pix, "uint32")
-        pattern[self._place_ones[self._ones_idx[idx] : self._ones_idx[idx + 1]]] = 1
+        pattern[self.place_ones[self._ones_idx[idx] : self._ones_idx[idx + 1]]] = 1
         r = slice(*self._multi_idx[idx : idx + 2])
-        pattern[self._place_multi[r]] = self._count_multi[r]
+        pattern[self.place_multi[r]] = self.count_multi[r]
         return pattern
 
     def _get_subdataset(self, idx: Any) -> PatternsSOne:
@@ -182,9 +182,9 @@ class PatternsSOne:
         self, axis: Optional[int] = None, keepdims: bool = False
     ) -> Union[np.ndarray, int]:
         if axis is None:
-            return len(self._place_ones) + cast(int, np.sum(self._count_multi))
+            return len(self.place_ones) + cast(int, np.sum(self.count_multi))
         elif axis == 1:
-            ans: np.ndarray = self._ones + np.squeeze(
+            ans: np.ndarray = self.ones + np.squeeze(
                 np.asarray(self._get_sparse_multi().sum(axis=1))
             )
             return ans[:, None] if keepdims else ans
@@ -215,35 +215,27 @@ class PatternsSOne:
         if g == "multi_idx":
             return self._multi_idx
         if g == "ones":
-            return self._ones
+            return self.ones
         if g == "multi":
-            return self._multi
+            return self.multi
         if g == "place_ones":
-            return self._place_ones
+            return self.place_ones
         if g == "place_multi":
-            return self._place_multi
+            return self.place_multi
         if g == "count_multi":
-            return self._count_multi
+            return self.count_multi
         raise ValueError(f"What is {g}?")
-
-    @property
-    def ones(self) -> npt.NDArray:
-        return self._ones
-
-    @property
-    def multi(self) -> npt.NDArray:
-        return self._multi
 
     def _get_sparse_ones(self) -> csr_matrix:
         _one = np.ones(1, "i4")
         _one = np.lib.stride_tricks.as_strided(  # type: ignore
-            _one, shape=(self._place_ones.shape[0],), strides=(0,)
+            _one, shape=(self.place_ones.shape[0],), strides=(0,)
         )
-        return csr_matrix((_one, self._place_ones, self._ones_idx), shape=self.shape)
+        return csr_matrix((_one, self.place_ones, self._ones_idx), shape=self.shape)
 
     def _get_sparse_multi(self) -> csr_matrix:
         return csr_matrix(
-            (self._count_multi, self._place_multi, self._multi_idx), shape=self.shape
+            (self.count_multi, self.place_multi, self._multi_idx), shape=self.shape
         )
 
     def todense(self) -> npt.NDArray:
@@ -369,20 +361,18 @@ def _write_h5_v1(
 
         place_ones = fp.create_dataset("place_ones", (data.num_data,), dtype=dt)
 
-        for idx, d in enumerate(
-            np.split(data._place_ones, data._ones_idx[1:-1]), start
-        ):
+        for idx, d in enumerate(np.split(data.place_ones, data._ones_idx[1:-1]), start):
             place_ones[idx] = d
 
         place_multi = fp.create_dataset("place_multi", (data.num_data,), dtype=dt)
         for idx, d in enumerate(
-            np.split(data._place_multi, data._multi_idx[1:-1]), start
+            np.split(data.place_multi, data._multi_idx[1:-1]), start
         ):
             place_multi[idx] = d
 
         count_multi = fp.create_dataset("count_multi", (data.num_data,), dtype=dt)
         for idx, d in enumerate(
-            np.split(data._count_multi, data._multi_idx[1:-1]), start
+            np.split(data.count_multi, data._multi_idx[1:-1]), start
         ):
             count_multi[idx] = d
         fp.attrs["version"] = "1"
