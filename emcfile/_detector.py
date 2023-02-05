@@ -574,6 +574,27 @@ def grid_position(shape: Tuple[int, ...]) -> List[npt.NDArray[np.float64]]:
 def get_3ddet_from_shape(
     shape: Tuple[int, int], det: Detector, apply_mask: bool = True
 ) -> Detector:
+    """
+    This fucntion resample the given detector `det` into a new detector  whose pixels
+    are aligned in a grid with shape `shape`.
+
+    Parameters
+    ----------
+    shape : Tuple[int, int]
+        The shape of new detector
+
+    det : Detector
+        The original detector
+
+    apply_mask : bool
+        If it is true, a pixel in the new detector is marked as bad if it out of range
+        (q.min(), q.max()) where q is the radii of pixels in `det`.
+
+    Returns
+    -------
+    Detector
+
+    """
     detd = det.detd
     ewald_rad = det.ewald_rad
     direction = -int(np.sign(det.coor[:, 2].sum()))
