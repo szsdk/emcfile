@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Tuple, Union
 
 import numpy as np
 from beartype import beartype
 from scipy.sparse import coo_matrix
 
-from emcfile import PATH_TYPE, H5Path, PatternsSOne, PatternsSOneEMC, make_path, vstack
+from emcfile import (
+    PATH_TYPE,
+    H5Path,
+    PatternsSOne,
+    PatternsSOneEMC,
+    PatternsSOneH5,
+    make_path,
+)
 
 __all__ = ["patterns"]
 
@@ -40,31 +47,9 @@ def _get_start_end(
 def _parse_h5_PatternsSOne_v2(
     path: H5Path, start: Union[None, int, np.integer], end: Union[None, int, np.integer]
 ) -> PATTENS_TYPE:
-    with path.open_group("r", "r") as (_, fp):
-        num_data = fp.attrs["num_data"]
-        start, end = _get_start_end(num_data, start, end)
-        num_pix = fp.attrs["num_pix"]
-        ones = fp["ones"][...]
-        multi = fp["multi"][...]
-        so = ones[:start].sum()
-        se = so + ones[start:end].sum()
-        place_ones = fp["place_ones"][so:se]
-        so = multi[:start].sum()
-        se = so + multi[start:end].sum()
-        place_multi = fp["place_multi"][so:se]
-        count_multi = fp["count_multi"][so:se]
-    ones = ones[start:end]
-    multi = multi[start:end]
-    return (
-        num_data,
-        (start, end),
-        num_pix,
-        ones,
-        multi,
-        place_ones,
-        place_multi,
-        count_multi,
-    )
+    file = PatternsSOneH5(path)
+    start, end = _get_start_end(file.num_data, start, end)
+    return file.num_data, (start, end), file[start:end]
 
 
 def _parse_h5_PatternsSOne_v1(
@@ -111,13 +96,10 @@ def _parse_file_PatternsSOne(
     if isinstance(f, H5Path):
         header = PatternsSOne.file_header(f)
         if header.version == "1":
-            parser = _parse_h5_PatternsSOne_v1
-        elif header.version == "2":
-            parser = _parse_h5_PatternsSOne_v2
-        else:
-            raise Exception()
-        num_data, offset, *data = parser(f, start, end)
-        dataset = PatternsSOne(*data)  # type: ignore
+            num_data, offset, *data = _parse_h5_PatternsSOne_v1(f, start, end)
+            return PatternsSOne(*data)  # type: ignore
+        # if header.version == "2":
+        num_data, offset, dataset = _parse_h5_PatternsSOne_v2(f, start, end)
     elif isinstance(f, Path):
         num_data, offset, dataset = _parse_bin_PatternsSOne(f, start, end)
 

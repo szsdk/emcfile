@@ -4,10 +4,10 @@ from pathlib import Path
 
 import numpy as np
 
-from ._h5helper import H5Path, h5path
+from ._h5helper import H5Path, h5path, make_path
 from ._pattern_sone import PatternsSOne
 
-__all__ = ["PatternsSOneEMC", "PatternsSOneH5"]
+__all__ = ["PatternsSOneEMC", "PatternsSOneH5", "file_patterns"]
 _log = logging.getLogger(__name__)
 
 I4 = np.dtype("i4").itemsize
@@ -174,3 +174,16 @@ class PatternsSOneH5(PatternsSOneFile):
 
     def _read_patterns(self, idx_con):
         return read_patterns_h5(self._fn, idx_con, self._ones_idx, self._multi_idx)
+
+
+def file_patterns(fn):
+    p = make_path(fn)
+    if isinstance(p, H5Path):
+        ish5 = True
+    else:
+        with open(p, "rb") as fp:
+            ish5 = fp.read(8) == b"\x89HDF\r\n\x1a\n"
+    if ish5:
+        return PatternsSOneH5(h5path(fn))
+    else:
+        return PatternsSOneEMC(fn)

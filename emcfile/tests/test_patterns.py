@@ -210,15 +210,12 @@ def test_PatternsSOneFile(file_class, file, request):
     assert p0[::2] == p1[::2]
 
 
-@pytest.mark.parametrize(
-    "file_class, file",
-    [(ef.PatternsSOneEMC, "data_emc"), (ef.PatternsSOneH5, "data_h5")],
-)
-def test_PatternsSOneFile_getitem(file_class, file, request):
+@pytest.mark.parametrize("file", ["data_emc", "data_h5"])
+def test_PatternsSOneFile_getitem(file, request):
     np.random.seed(12)
     p = Path(request.getfixturevalue(file))
     d1 = ef.patterns(p)
-    d2 = file_class(p)
+    d2 = ef.file_patterns(p)
     assert d2.sparsity() == d1.sparsity()
     np.testing.assert_equal(d2[3], d1[3])
     idx = np.random.rand(d1.num_data) > 0.5
