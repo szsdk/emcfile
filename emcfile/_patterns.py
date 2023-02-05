@@ -46,7 +46,7 @@ def _get_start_end(
 
 def _parse_h5_PatternsSOne_v2(
     path: H5Path, start: Union[None, int, np.integer], end: Union[None, int, np.integer]
-) -> PATTENS_TYPE:
+) -> Tuple[int, Tuple[int, int], PatternsSOne]:
     file = PatternsSOneH5(path)
     start, end = _get_start_end(file.num_data, start, end)
     return file.num_data, (start, end), file[start:end]
@@ -128,7 +128,7 @@ def dense_to_PatternsSOne(arr: np.ndarray) -> PatternsSOne:
     )
 
 
-def coo_to_SOne_kernel(coo):
+def coo_to_SOne_kernel(coo: coo_matrix) -> PatternsSOne:
     coo = coo.copy()
     idx = coo.data == 1
     c = coo_matrix((np.ones(idx.sum(), "i4"), (coo.row[idx], coo.col[idx])), coo.shape)

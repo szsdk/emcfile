@@ -533,31 +533,6 @@ class DetRender:
         dx, dy = self.frame_shape
         return xmin, xmin + dx, ymin, ymin + dy
 
-    def plot_rings(self, ax, **kargs) -> None:
-        """
-        Plot some rings on a given matplotlib axes.
-        matplotlib is needed
-
-        Parameters
-        ----------
-        ax :
-            The axes
-        **kargs
-            Arguments for contour plot
-        """
-        contour_params = dict(
-            extent=self.frame_extent(),
-            colors="C1",
-            linestyles="dashed",
-            linewidths=1,
-        )
-        contour_params.update(kargs)
-        pixel_xy = np.array(self.frame_pixels()) - 0.5
-        r = np.linalg.norm(self.to_xyz(pixel_xy.reshape(2, -1).T), axis=1)
-        r = r.reshape(pixel_xy.shape[1], pixel_xy.shape[2])
-        CS = ax.contour(r, **contour_params)
-        ax.clabel(CS, CS.levels, inline=True)
-
 
 @beartype
 def det_render(det: Detector) -> DetRender:

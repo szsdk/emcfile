@@ -3,10 +3,11 @@ from __future__ import annotations
 import logging
 from collections import namedtuple
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union, cast
 
 import h5py
 import numpy as np
+import numpy.typing as npt
 from scipy.sparse import coo_matrix, csr_matrix
 
 from emcfile import PATH_TYPE, H5Path, check_remove_groups, make_path
@@ -226,11 +227,11 @@ class PatternsSOne:
         raise ValueError(f"What is {g}?")
 
     @property
-    def ones(self):
+    def ones(self) -> npt.NDArray:
         return self._ones
 
     @property
-    def multi(self):
+    def multi(self) -> npt.NDArray:
         return self._multi
 
     def _get_sparse_ones(self) -> csr_matrix:
@@ -245,7 +246,7 @@ class PatternsSOne:
             (self._count_multi, self._place_multi, self._multi_idx), shape=self.shape
         )
 
-    def todense(self) -> np.ndarray:
+    def todense(self) -> npt.NDArray:
         """
         To dense ndarray
         """
@@ -256,17 +257,19 @@ class PatternsSOne:
             ),
         )
 
-    def __matmul__(self, mtx):
+    def __matmul__(self, mtx: npt.ArrayLike) -> npt.NDArray:
         return self._get_sparse_ones() * mtx + self._get_sparse_multi() * mtx
 
 
-def iter_array_buffer(datas, buffer_size, g):
+def iter_array_buffer(
+    datas: List[PatternsSOne], buffer_size: int, g: str
+) -> Iterable[npt.NDArray]:
     buffer = []
     nbytes = 0
     for a in datas:
-        a = a.attrs(g)
-        nbytes += a.nbytes
-        buffer.append(a)
+        ag = a.attrs(g)
+        nbytes += ag.nbytes
+        buffer.append(ag)
         if nbytes < buffer_size:
             continue
         if len(buffer) == 1:
@@ -385,7 +388,7 @@ def _write_h5_v1(
         fp.attrs["version"] = "1"
 
 
-def vstack(patterns_l: List[PatternsSOne], destroy=False) -> PatternsSOne:
+def vstack(patterns_l: List[PatternsSOne], destroy: bool = False) -> PatternsSOne:
     "stack pattern sets together"
     num_pix = patterns_l[0].num_pix
     for d in patterns_l:

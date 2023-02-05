@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+import numpy.typing as npt
 
 from ._h5helper import H5Path, h5path, make_path
 from ._pattern_sone import PatternsSOne
@@ -13,7 +14,7 @@ _log = logging.getLogger(__name__)
 I4 = np.dtype("i4").itemsize
 
 
-def concat_continous(a):
+def concat_continous(a) -> npt.NDArray:
     """
     Example
         input [0, 1, 3, 4, 6]
@@ -73,6 +74,14 @@ def read_patterns(fn: Path, idx_con, ones_idx: np.ndarray, multi_idx: np.ndarray
 
 
 class PatternsSOneFile:
+    ones: npt.NDArray[np.int32]
+    multi: npt.NDArray[np.int32]
+    place_ones: npt.NDArray[np.int32]
+    place_multi: npt.NDArray[np.int32]
+    count_multi: npt.NDArray[np.int32]
+    num_data: int
+    num_pix: int
+
     def sparsity(self) -> float:
         nbytes = (
             self.ones.nbytes
@@ -83,7 +92,7 @@ class PatternsSOneFile:
 
     def __getitem__(self, idx):
         if isinstance(idx, (int, np.integer)):
-            idx_con = [(idx, idx + 1)]
+            idx_con = np.array([[idx, idx + 1]])
             ans = np.zeros(self.num_pix, np.int32)
             place_ones, place_multi, count_multi = self._read_patterns(idx_con)
             ans[place_ones] = 1
@@ -133,15 +142,16 @@ class PatternsSOneEMC(PatternsSOneFile):
         return read_patterns(self._fn, idx_con, self._ones_idx, self._multi_idx)
 
 
-def read_indexed_array_h5(fin, idx_con, arr_idx):
-    ans = []
+def read_indexed_array_h5(
+    fin, idx_con: npt.NDArray, arr_idx: npt.NDArray
+) -> npt.NDArray:
     if len(idx_con) == 1:
         s, e = idx_con[0]
         e = arr_idx[e]
         s = arr_idx[s]
-        ans = fin[s:e]
-        return ans
+        return fin[s:e]
 
+    ans = []
     for s, e in idx_con:
         e = arr_idx[e]
         s = arr_idx[s]
@@ -176,7 +186,7 @@ class PatternsSOneH5(PatternsSOneFile):
         return read_patterns_h5(self._fn, idx_con, self._ones_idx, self._multi_idx)
 
 
-def file_patterns(fn):
+def file_patterns(fn) -> PatternsSOneFile:
     p = make_path(fn)
     if isinstance(p, H5Path):
         ish5 = True
