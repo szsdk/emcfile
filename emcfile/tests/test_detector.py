@@ -56,7 +56,7 @@ def test_det_write(det):
             with pytest.raises(FileExistsError):
                 det1.write(f / f"det{suffix}")
             det2 = ef.detector(f / f"det{suffix}", norm_flag=False)
-            ef.detector(**det2.to_dict())
+            ef.detector(det2)
         assert ef.det_isclose(det1.copy(), det2)
 
 

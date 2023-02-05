@@ -57,13 +57,14 @@ patterns.write("test_pattern.emc", overwrite=True)
 
 p_emc = ef.patterns("test_pattern.emc")
 
-# Write patterns to group 'patterns' in a .h5 file
+# Concatenate two patterns and write the result to group 'patterns' in a .h5 file
 
-patterns.write("test_pattern.h5::patterns", overwrite=True)
+np.concatenate([p_emc] * 2).write("test_pattern.h5::patterns", overwrite=True)
 
 # Read patterns from the .h5 file
 
 p_h5 = ef.patterns("test_pattern.h5::patterns")
+assert p_h5.num_data == 2 * p_emc.num_data
 
 # ## Detector
 

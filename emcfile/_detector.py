@@ -132,23 +132,6 @@ class Detector:
         if writeable:
             self._norm_flag = None
 
-    def to_dict(self) -> dict[str, Any]:
-        """
-        Convert the detecotr to a dictionary
-
-        Returns
-        -------
-        dict[str, Any]
-
-        """
-        return {
-            "coor": self.coor.copy(),
-            "factor": self.factor.copy(),
-            "mask": self.mask.copy(),
-            "detd": self.detd,
-            "ewald_rad": self.ewald_rad,
-        }
-
     def copy(self) -> Detector:
         return Detector(
             coor=self.coor,
@@ -159,7 +142,13 @@ class Detector:
         )
 
     def deepcopy(self) -> Detector:
-        return Detector(**self.to_dict())
+        return Detector(
+            coor=self.coor.copy(),
+            factor=self.factor.copy(),
+            mask=self.mask.copy(),
+            detd=self.detd,
+            ewald_rad=self.ewald_rad,
+        )
 
     def write(self, fname: Union[str, Path, H5Path], overwrite: bool = False) -> None:
         fn = make_path(fname)
