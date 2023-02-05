@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections import namedtuple
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple, Union, cast
+from typing import Any, Iterable, Optional, Tuple, Union, cast
 
 import h5py
 import numpy as np
@@ -135,7 +135,7 @@ class PatternsSOne:
     def file_header(
         filename: PATH_TYPE,
     ) -> PATTERNS_HEADER:
-        header: Dict[str, Any] = {"file": str(filename)}
+        header: dict[str, Any] = {"file": str(filename)}
         f = make_path(filename)
         if isinstance(f, H5Path):
             with f.open_group("r", "r") as (_, fp):

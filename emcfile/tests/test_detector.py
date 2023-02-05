@@ -4,13 +4,6 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import pytest
 
-try:
-    import matplotlib.pylab as plt
-
-    PLT_IMPORTED = True
-except ModuleNotFoundError:
-    PLT_IMPORTED = False
-
 import emcfile as ef
 
 

@@ -4,7 +4,7 @@ import logging
 from enum import IntEnum
 from functools import reduce
 from pathlib import Path
-from typing import Any, Dict, Optional, Union, cast
+from typing import Any, Optional, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -110,7 +110,7 @@ class Detector:
         return nf
 
     @property
-    def flags(self) -> Dict[str, Any]:
+    def flags(self) -> dict[str, Any]:
         return {"writeable": self._writeable}
 
     def setflags(self, writeable: Optional[bool] = None) -> None:
@@ -132,13 +132,13 @@ class Detector:
         if writeable:
             self._norm_flag = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """
         Convert the detecotr to a dictionary
 
         Returns
         -------
-        Dict[str, Any]
+        dict[str, Any]
 
         """
         return {
