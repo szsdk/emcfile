@@ -144,3 +144,4 @@ notebook
 docs/
 *.emc
 *.h5
+*.ipynb
