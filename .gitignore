@@ -142,4 +142,5 @@ cython_debug/
 notebook
 
 docs/
-data/
+*.emc
+*.h5
