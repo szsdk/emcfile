@@ -4,7 +4,7 @@ import logging
 from enum import IntEnum
 from functools import reduce
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, Optional, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -126,7 +126,7 @@ class Detector:
             return
         if not isinstance(writeable, bool):
             raise ValueError("Wrong type of writeable")
-        for arr in cast(List[npt.NDArray[Any]], [self.coor, self.mask, self.factor]):
+        for arr in cast(list[npt.NDArray[Any]], [self.coor, self.mask, self.factor]):
             arr.setflags(write=writeable)
         self._writeable: bool = writeable
         if writeable:
@@ -175,7 +175,7 @@ class Detector:
     def __getitem__(
         self,
         index: Union[
-            slice, List[PixelType], npt.NDArray[np.bool_], npt.NDArray[np.integer[Any]]
+            slice, list[PixelType], npt.NDArray[np.bool_], npt.NDArray[np.integer[Any]]
         ],
     ) -> Detector:
         if isinstance(index, list):
@@ -275,7 +275,7 @@ def _init_detector(
     coor: npt.NDArray[np.floating[Any]],
     mask: npt.NDArray[np.integer[Any]],
     factor: npt.NDArray[np.floating[Any]],
-) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.int16], npt.NDArray[np.float64]]:
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int16], npt.NDArray[np.float64]]:
     if not (coor.shape[0] == mask.shape[0] == factor.shape[0]):
         raise ValueError("`coor`, `mask`, `factor` should have the same length.")
     if coor.shape[1] == 2:
@@ -503,7 +503,7 @@ class DetRender:
         )
         self._count /= self._count.mean()
 
-    def frame_pixels(self) -> List[npt.NDArray[np.float64]]:
+    def frame_pixels(self) -> list[npt.NDArray[np.float64]]:
         et = self.frame_extent()
         return np.meshgrid(
             np.linspace(et[0], et[1], self.frame_shape[1]),
@@ -528,7 +528,7 @@ class DetRender:
     def to_xyz(self, cxy: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
         return cxy_to_xyz(cxy, self._det.ewald_rad, self._det.detd, self.direction)
 
-    def frame_extent(self) -> Tuple[float, float, float, float]:
+    def frame_extent(self) -> tuple[float, float, float, float]:
         xmin, ymin = self.cxy.min(axis=0)
         dx, dy = self.frame_shape
         return xmin, xmin + dx, ymin, ymin + dy
@@ -552,18 +552,18 @@ def det_render(det: Detector) -> DetRender:
     return DetRender(det)
 
 
-def grid_position(shape: Tuple[int, ...]) -> List[npt.NDArray[np.float64]]:
+def grid_position(shape: tuple[int, ...]) -> list[npt.NDArray[np.float64]]:
     """
     Parameters
     ----------
-    shape : Tuple[int]
+    shape : tuple[int]
 
     Returns
     -------
-    positions: List
+    positions: list
     """
     return cast(
-        List[npt.NDArray[np.float64]],
+        list[npt.NDArray[np.float64]],
         np.meshgrid(
             *[np.linspace(-(s - 1) / 2, (s - 1) / 2, s) for s in shape], indexing="ij"
         ),
@@ -572,7 +572,7 @@ def grid_position(shape: Tuple[int, ...]) -> List[npt.NDArray[np.float64]]:
 
 @beartype
 def get_3ddet_from_shape(
-    shape: Tuple[int, int], det: Detector, apply_mask: bool = True
+    shape: tuple[int, int], det: Detector, apply_mask: bool = True
 ) -> Detector:
     """
     This fucntion resample the given detector `det` into a new detector  whose pixels
@@ -580,7 +580,7 @@ def get_3ddet_from_shape(
 
     Parameters
     ----------
-    shape : Tuple[int, int]
+    shape : tuple[int, int]
         The shape of new detector
 
     det : Detector

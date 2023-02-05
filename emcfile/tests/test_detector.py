@@ -137,10 +137,3 @@ def test_det_render(det):
     )
     detr.frame_extent()
     detr.frame_pixels()
-
-
-@pytest.mark.skipif(not PLT_IMPORTED, reason="Cannot import matplotlib")
-def test_plot_rings(det):
-    detr = ef.det_render(det)
-    fig, ax = plt.subplots()
-    detr.plot_rings(ax)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Tuple, Union
+from typing import Union
 
 import numpy as np
 from beartype import beartype
@@ -20,9 +20,9 @@ from emcfile import (
 __all__ = ["patterns"]
 
 _log = logging.getLogger(__name__)
-PATTENS_TYPE = Tuple[
+PATTENS_TYPE = tuple[
     int,
-    Tuple[int, int],
+    tuple[int, int],
     int,
     np.ndarray,
     np.ndarray,
@@ -36,7 +36,7 @@ def _get_start_end(
     num_data: int,
     start: Union[None, int, np.integer],
     end: Union[None, int, np.integer],
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     if start is not None and end is not None:
         return int(start), int(end)
     start = 0 if start is None else start
@@ -46,7 +46,7 @@ def _get_start_end(
 
 def _parse_h5_PatternsSOne_v2(
     path: H5Path, start: Union[None, int, np.integer], end: Union[None, int, np.integer]
-) -> Tuple[int, Tuple[int, int], PatternsSOne]:
+) -> tuple[int, tuple[int, int], PatternsSOne]:
     file = PatternsSOneH5(path)
     start, end = _get_start_end(file.num_data, start, end)
     return file.num_data, (start, end), file[start:end]
@@ -81,7 +81,7 @@ def _parse_h5_PatternsSOne_v1(
 
 def _parse_bin_PatternsSOne(
     path: Path, start: Union[None, int, np.integer], end: Union[None, int, np.integer]
-) -> Tuple[int, Tuple[int, int], PatternsSOne]:
+) -> tuple[int, tuple[int, int], PatternsSOne]:
     file = PatternsSOneEMC(path)
     start, end = _get_start_end(file.num_data, start, end)
     return file.num_data, (start, end), file[start:end]

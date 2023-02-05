@@ -4,7 +4,7 @@ import logging
 import os
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Generator, Iterator, List, Optional, Tuple, Union, cast
+from typing import Any, Generator, Iterator, Optional, Union, cast
 
 import h5py
 import numpy as np
@@ -28,7 +28,7 @@ __all__ = [
 _log = logging.getLogger(__name__)
 
 
-def parse_h5path(fname: Union[str, Path]) -> Tuple[Path, str]:
+def parse_h5path(fname: Union[str, Path]) -> tuple[Path, str]:
     if not check_h5path(fname):
         raise ValueError(f"{fname} is not a valid h5path")
 
@@ -43,7 +43,7 @@ def parse_h5path(fname: Union[str, Path]) -> Tuple[Path, str]:
 @contextmanager
 def h5group(
     fname: str, *args: Any, add: bool = True, **kargs: Any
-) -> Iterator[Tuple[h5py.File, h5py.Group]]:
+) -> Iterator[tuple[h5py.File, h5py.Group]]:
     """
     Parse a string to a tuple (fptr:h5py.File, group:h5py.Group)
 
@@ -108,7 +108,7 @@ class H5Path:
         track_order: Optional[bool] = None,
         *args: Any,
         **kargs: Any,
-    ) -> Generator[Tuple[h5py.File, h5py.Group], None, None]:
+    ) -> Generator[tuple[h5py.File, h5py.Group], None, None]:
         """
         group_mode : [r|a]
         """
@@ -134,7 +134,7 @@ def read_array(
     /,
     *,
     dtype: Any = "f8",  # TODO: replace dtype with npt.DTypeLike
-    reshape: Optional[Tuple[int, ...]] = None,
+    reshape: Optional[tuple[int, ...]] = None,
 ) -> npt.NDArray[Any]:
     """
     Read an array from file. The file name (`fname`) could be a `str`, a `Path`.
@@ -246,7 +246,7 @@ def make_path(s: PATH_TYPE) -> Union[Path, H5Path]:
 
 
 def check_remove_groups(
-    fp: Union[h5py.Group, h5py.File], groups: List[str], overwrite: bool
+    fp: Union[h5py.Group, h5py.File], groups: list[str], overwrite: bool
 ) -> None:
     attrs = fp.attrs.keys()
     for g in groups:

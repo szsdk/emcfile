@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections import namedtuple
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, Iterable, Optional, Tuple, Union, cast
 
 import h5py
 import numpy as np
@@ -262,7 +262,7 @@ class PatternsSOne:
 
 
 def iter_array_buffer(
-    datas: List[PatternsSOne], buffer_size: int, g: str
+    datas: list[PatternsSOne], buffer_size: int, g: str
 ) -> Iterable[npt.NDArray]:
     buffer = []
     nbytes = 0
@@ -285,7 +285,7 @@ def iter_array_buffer(
             yield np.concatenate(buffer)
 
 
-def _write_bin(datas: List[PatternsSOne], path: Path, overwrite: bool) -> None:
+def _write_bin(datas: list[PatternsSOne], path: Path, overwrite: bool) -> None:
     if path.exists() and not overwrite:
         raise Exception(f"{path} exists")
     num_data = np.sum([data.num_data for data in datas])
@@ -300,7 +300,7 @@ def _write_bin(datas: List[PatternsSOne], path: Path, overwrite: bool) -> None:
 
 
 def _write_h5_v2(
-    datas: List[PatternsSOne], path: H5Path, overwrite: bool, buffer_size: int
+    datas: list[PatternsSOne], path: H5Path, overwrite: bool, buffer_size: int
 ) -> None:
     num_ones = np.sum([d.ones.sum() for d in datas])
     num_multi = np.sum([d.multi.sum() for d in datas])
@@ -326,7 +326,7 @@ def _write_h5_v2(
 
 
 def write_photons(
-    datas: List[PatternsSOne],
+    datas: list[PatternsSOne],
     path: PATH_TYPE,
     *,
     h5version: str = "2",
@@ -388,7 +388,7 @@ def _write_h5_v1(
         fp.attrs["version"] = "1"
 
 
-def vstack(patterns_l: List[PatternsSOne], destroy: bool = False) -> PatternsSOne:
+def vstack(patterns_l: list[PatternsSOne], destroy: bool = False) -> PatternsSOne:
     "stack pattern sets together"
     num_pix = patterns_l[0].num_pix
     for d in patterns_l:
