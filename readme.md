@@ -5,7 +5,8 @@ detector files.
 
 ## Installation
 Dependencies:
-- numpy
+- python >= 3.9
+- numpy >= 1.20
 - h5py
 - scipy
 - beartype
