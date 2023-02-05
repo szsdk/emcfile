@@ -18,6 +18,11 @@ This package can be divided into three parts roughly:
 - pattern file related classes and functions
 
 The tutorial, `tutorial/tutorial_00.py`, is recommended as the starting point of this package.
+You could use [jupytext](https://github.com/mwouts/jupytext) to generate a jupyter notebook file
+for a more interactive experience with the following command
+```bash
+jupytext tutorial_00.py -o tutorial_00.ipynb
+```
 
 ## Conventions
 ### Patterns

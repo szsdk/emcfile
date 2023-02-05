@@ -145,3 +145,4 @@ docs/
 *.emc
 *.h5
 *.ipynb
+*.dat
