@@ -75,7 +75,14 @@ def read_patterns(
                 seek_start + place_ones.nbytes + place_multi.nbytes + count_multi.nbytes
             )
             _log.error(
-                f"START: {seek_start}, place_ones: {place_ones.nbytes}, place_multi: {place_multi.nbytes}, count_multi: {count_multi.nbytes}, total={total}; filesize = {fn.stat().st_size}; e0: {e0}"
+                "START: %d, place_ones: %d, place_multi: %d, count_multi: %d, total=%d; filesize = %d; e0: %d",
+                seek_start,
+                place_ones.nbytes,
+                place_multi.nbytes,
+                count_multi.nbytes,
+                total,
+                fn.stat().st_size,
+                e0,
             )
             raise ValueError(f"Error when parsing {fn}")
     return place_ones, place_multi, count_multi
@@ -221,7 +228,7 @@ def file_patterns(fn: Union[str, Path, H5Path]) -> PatternsSOneFile:
         return PatternsSOneH5(p)
 
     with open(p, "rb") as fp:
-        ish5 = fp.read(8) == b"\x89HDF\r\n\x1a\n"
+        ish5 = fp.read(8) == b"\x89HDF\r\n\x1a\n"  # magic number for HDF5
     if ish5:
         return PatternsSOneH5(h5path(fn))
     else:
