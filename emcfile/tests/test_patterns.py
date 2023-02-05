@@ -25,8 +25,15 @@ def data():
 
 
 @pytest.fixture()
-def data_file(tmp_path_factory, data):
+def data_emc(tmp_path_factory, data):
     fn = tmp_path_factory.mktemp("data") / "photon.emc"
+    data.write(fn)
+    return fn
+
+
+@pytest.fixture()
+def data_h5(tmp_path_factory, data):
+    fn = tmp_path_factory.mktemp("data") / "photon.h5::patterns"
     data.write(fn)
     return fn
 
@@ -191,18 +198,27 @@ def test_pattern_mul(data):
     np.testing.assert_equal((data @ mtx).todense(), data.todense() @ mtx)
 
 
-def test_PatternsSOneEMC(data_file):
-    p0 = ef.patterns(data_file)
-    p1 = ef.PatternsSOneEMC(data_file)
+@pytest.mark.parametrize(
+    "file_class, file",
+    [(ef.PatternsSOneEMC, "data_emc"), (ef.PatternsSOneH5, "data_h5")],
+)
+def test_PatternsSOneFile(file_class, file, request):
+    data_fn = request.getfixturevalue(file)
+    p0 = ef.patterns(data_fn)
+    p1 = file_class(data_fn)
     np.testing.assert_equal(p0[10], p1[10])
     assert p0[::2] == p1[::2]
 
 
-def test_PatternsSOneEMC_getitem(data_file):
+@pytest.mark.parametrize(
+    "file_class, file",
+    [(ef.PatternsSOneEMC, "data_emc"), (ef.PatternsSOneH5, "data_h5")],
+)
+def test_PatternsSOneFile_getitem(file_class, file, request):
     np.random.seed(12)
-    p = Path(data_file)
+    p = Path(request.getfixturevalue(file))
     d1 = ef.patterns(p)
-    d2 = ef.PatternsSOneEMC(p)
+    d2 = file_class(p)
     assert d2.sparsity() == d1.sparsity()
     np.testing.assert_equal(d2[3], d1[3])
     idx = np.random.rand(d1.num_data) > 0.5

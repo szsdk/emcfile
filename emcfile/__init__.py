@@ -23,7 +23,7 @@ from ._h5helper import (
     write_obj_h5,
 )
 from ._pattern_sone import PATTERNS_HEADER, PatternsSOne, vstack, write_photons
-from ._pattern_sone_file import PatternsSOneEMC
+from ._pattern_sone_file import PatternsSOneEMC, PatternsSOneH5
 from ._patterns import patterns
 
 __all__ = [
@@ -53,6 +53,7 @@ __all__ = [
     "vstack",
     "write_photons",
     "PatternsSOneEMC",
+    "PatternsSOneH5",
 ]
 
 __pdoc__ = {"tests": False}
