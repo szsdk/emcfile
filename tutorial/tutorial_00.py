@@ -29,6 +29,8 @@ patterns[1]
 
 patterns[:2]
 
+patterns[:, :2]
+
 
 # ### IO of Patterns
 
@@ -64,6 +66,9 @@ det = ef.detector(
     ewald_rad=ewald_rad,
     norm_flag=False,
 )
+det
+
+det[[ef.PixelType.GOOD]]
 
 # ### IO of `Detector`
 
