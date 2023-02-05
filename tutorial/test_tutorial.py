@@ -6,7 +6,6 @@ import pytest
 scripts = Path(__file__).parent.glob("tutorial*.py")
 
 
-@pytest.mark.slow
 @pytest.mark.parametrize("script", scripts)
 def test_script_execution(script):
     try:

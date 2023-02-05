@@ -25,6 +25,9 @@ SPARSE_PATTERN = namedtuple(
 )
 
 
+HANDLED_FUNCTIONS = {}
+
+
 class PatternsSOne:
     """
     The class for dragonfly photon dataset. The main difference between this
@@ -221,19 +224,46 @@ class PatternsSOne:
             (self.count_multi, self.place_multi, self._multi_idx), shape=self.shape
         )
 
-    def todense(self) -> npt.NDArray:
+    def todense(self) -> npt.NDArray[np.int32]:
         """
         To dense ndarray
         """
         return cast(
-            npt.NDArray,
+            npt.NDArray[np.int32],
             np.squeeze(
                 self._get_sparse_ones().todense() + self._get_sparse_multi().todense()
             ),
         )
 
+    def __array__(self):
+        return self.todense()
+
     def __matmul__(self, mtx: npt.ArrayLike) -> npt.NDArray:
         return self._get_sparse_ones() * mtx + self._get_sparse_multi() * mtx
+
+    def __array_function__(self, func, types, args, kwargs):
+
+        if func not in HANDLED_FUNCTIONS:
+
+            return NotImplemented
+
+        # Note: this allows subclasses that don't override
+
+        # __array_function__ to handle PatternsSOne objects.
+
+        if not all(issubclass(t, self.__class__) for t in types):
+            return NotImplemented
+        return HANDLED_FUNCTIONS[func](*args, **kwargs)
+
+
+def implements(np_function):
+    "Register an __array_function__ implementation for PatternsSOne objects."
+
+    def decorator(func):
+        HANDLED_FUNCTIONS[np_function] = func
+        return func
+
+    return decorator
 
 
 def iter_array_buffer(
@@ -361,7 +391,10 @@ def _write_h5_v1(
         fp.attrs["version"] = "1"
 
 
-def vstack(patterns_l: list[PatternsSOne], destroy: bool = False) -> PatternsSOne:
+@implements(np.concatenate)
+def concatenate_PatternsSOne(
+    patterns_l: list[PatternsSOne], casting="safe"
+) -> PatternsSOne:
     "stack pattern sets together"
     num_pix = patterns_l[0].num_pix
     for d in patterns_l:
@@ -369,7 +402,7 @@ def vstack(patterns_l: list[PatternsSOne], destroy: bool = False) -> PatternsSOn
             raise ValueError(
                 "The numbers of pixels of each pattern are not consistent."
             )
-    if not destroy:
+    if casting == "safe":
         ans = PatternsSOne(
             num_pix,
             *[
@@ -378,7 +411,7 @@ def vstack(patterns_l: list[PatternsSOne], destroy: bool = False) -> PatternsSOn
             ],
         )
         ans.check()
-    else:
+    elif casting == "destroy":
         ans = patterns_l.pop(0)
         while len(patterns_l) > 0:
             pat = patterns_l.pop(0)
@@ -388,4 +421,6 @@ def vstack(patterns_l: list[PatternsSOne], destroy: bool = False) -> PatternsSOn
                 a = getattr(ans, g)
                 a.resize(a.shape[0] + b.shape[0], refcheck=False)
                 a[a.shape[0] - b.shape[0] :] = b[:]
+    else:
+        raise Exception(casting)
     return ans

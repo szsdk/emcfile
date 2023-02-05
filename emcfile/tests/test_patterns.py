@@ -68,19 +68,19 @@ def test_getitem(data):
         assert np.all(subdata1[_] == data[idx[_]])
 
 
-def test_vstack(data):
+def test_concatenate(data):
     patterns = [ef.patterns(data.num_pix)] + [
         deepcopy(data[i * 10 : (i + 1) * 10]) for i in range(5)
     ]
-    ans = ef.vstack(patterns)
+    ans = np.concatenate(patterns)
     assert data[:50] == ans
-    ans = ef.vstack(patterns, destroy=True)
+    ans = np.concatenate(patterns, casting="destroy")
     assert data[:50] == ans
 
     patterns = [ef.patterns(np.full((10000, 1000), 2)) for _ in range(2)]
     process = Process()
     m0 = process.memory_info().rss
-    ans = ef.vstack(patterns, destroy=True)
+    ans = np.concatenate(patterns, casting="destroy")
     gc.collect()
     m1 = process.memory_info().rss
     assert (m1 - m0) < ans.nbytes * 0.9
@@ -169,7 +169,7 @@ def test_write_photons(suffix, data_list):
         suffix=suffix
     ) as f1:
         t = time.time()
-        all_data = ef.vstack(data_list)
+        all_data = np.concatenate(data_list)
         all_data.write(f1.name, overwrite=True)
         t1 = time.time() - t
         logging.info(f"speed[single]: {all_data.nbytes * 1e-9 /t1:.2f} GB/s")
@@ -189,7 +189,7 @@ def test_write_photons(suffix, data_list):
 
 def test_pattern_mul(data):
     mtx = np.random.rand(data.num_pix, 10)
-    np.testing.assert_almost_equal(data @ mtx, data.todense() @ mtx)
+    np.testing.assert_almost_equal(data @ mtx, np.asarray(data) @ mtx)
     mtx = mtx > 0.4
     np.testing.assert_almost_equal(data @ mtx, data.todense() @ mtx)
     mtx = coo_matrix(mtx)
