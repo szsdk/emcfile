@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Union
 
 import numpy as np
+import numpy.typing as npt
 from beartype import beartype
 from scipy.sparse import coo_matrix
 
@@ -24,11 +25,11 @@ PATTENS_TYPE = tuple[
     int,
     tuple[int, int],
     int,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
+    npt.NDArray,
+    npt.NDArray,
+    npt.NDArray,
+    npt.NDArray,
+    npt.NDArray,
 ]
 
 
@@ -109,7 +110,7 @@ def _parse_file_PatternsSOne(
     return dataset
 
 
-def dense_to_PatternsSOne(arr: np.ndarray) -> PatternsSOne:
+def dense_to_PatternsSOne(arr: npt.NDArray) -> PatternsSOne:
     idx = arr == 1
     ones = idx.sum(axis=1)
     place_ones = idx.nonzero()[1]
@@ -148,7 +149,7 @@ def coo_to_SOne_kernel(coo: coo_matrix) -> PatternsSOne:
 
 @beartype
 def patterns(
-    src: Union[PATH_TYPE, np.ndarray, coo_matrix, int, np.integer],
+    src: Union[PATH_TYPE, npt.NDArray, coo_matrix, int, np.integer],
     /,
     *,
     start: Union[None, int, np.integer] = None,
@@ -159,7 +160,7 @@ def patterns(
 
     Parameters
     ----------
-    src : Union[str, Path, np.ndarray, coo_matrix]
+    src : Union[str, Path, npt.NDArray, coo_matrix]
 
     start : Optional[int]
         The starting pattern index

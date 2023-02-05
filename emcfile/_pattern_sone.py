@@ -8,7 +8,7 @@ from typing import Any, Iterable, Optional, Tuple, Union, cast
 import h5py
 import numpy as np
 import numpy.typing as npt
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import csr_matrix
 
 from emcfile import PATH_TYPE, H5Path, check_remove_groups, make_path
 
@@ -38,11 +38,11 @@ class PatternsSOne:
     def __init__(
         self,
         num_pix: int,
-        ones: np.ndarray,
-        multi: np.ndarray,
-        place_ones: np.ndarray,
-        place_multi: np.ndarray,
-        count_multi: np.ndarray,
+        ones: npt.NDArray,
+        multi: npt.NDArray,
+        place_ones: npt.NDArray,
+        place_multi: npt.NDArray,
+        count_multi: npt.NDArray,
     ) -> None:
         self.ndim = 2
         self.num_pix = num_pix
@@ -155,7 +155,7 @@ class PatternsSOne:
                 header["num_pix"] = np.fromfile(fin, dtype=np.int32, count=1)[0]
         return PATTERNS_HEADER(**header)
 
-    def _get_pattern(self, idx: int) -> np.ndarray:
+    def _get_pattern(self, idx: int) -> npt.NDArray:
         if idx >= self.num_data or idx < 0:
             raise IndexError(f"{idx}")
         pattern = np.zeros(self.num_pix, "uint32")
@@ -180,11 +180,11 @@ class PatternsSOne:
 
     def sum(
         self, axis: Optional[int] = None, keepdims: bool = False
-    ) -> Union[np.ndarray, int]:
+    ) -> Union[npt.NDArray, int]:
         if axis is None:
             return len(self.place_ones) + cast(int, np.sum(self.count_multi))
         elif axis == 1:
-            ans: np.ndarray = self.ones + np.squeeze(
+            ans: npt.NDArray = self.ones + np.squeeze(
                 np.asarray(self._get_sparse_multi().sum(axis=1))
             )
             return ans[:, None] if keepdims else ans
@@ -194,7 +194,7 @@ class PatternsSOne:
             return ans[None, :] if keepdims else ans
         raise ValueError(f"Do not support axis={axis}.")
 
-    def __getitem__(self, *idx: Any) -> Union[PatternsSOne, np.ndarray]:
+    def __getitem__(self, *idx: Any) -> Union[PatternsSOne, npt.NDArray]:
         if len(idx) == 1 and isinstance(idx[0], (int, np.integer)):
             return self._get_pattern(int(idx[0]))
         else:
@@ -226,7 +226,7 @@ class PatternsSOne:
         To dense ndarray
         """
         return cast(
-            np.ndarray,
+            npt.NDArray,
             np.squeeze(
                 self._get_sparse_ones().todense() + self._get_sparse_multi().todense()
             ),
