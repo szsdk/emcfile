@@ -38,6 +38,10 @@ def det_file(tmp_path_factory, det):
     return fn
 
 
+def test_det_operation(det):
+    np.array(det)
+
+
 def test_det_read(det_file):
     ef.detector(det_file, norm_flag=False)
     with pytest.raises(Exception):

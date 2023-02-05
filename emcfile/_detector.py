@@ -38,11 +38,19 @@ class PixelType(IntEnum):
 
 
 class Detector:
+    dtype = np.dtype(
+        [
+            ("coor", "f8", 3),
+            ("factor", "f4"),
+            ("mask", "i4"),
+        ]
+    )
+
     def __init__(
         self,
         coor: npt.NDArray[np.float64],
         factor: npt.NDArray[np.float64],
-        mask: npt.NDArray[np.int16],
+        mask: npt.NDArray[np.int32],
         detd: float,
         ewald_rad: float,
         *,
@@ -50,7 +58,7 @@ class Detector:
     ) -> None:
         self.num_pix = len(factor)
         self.coor: npt.NDArray[np.float64] = coor.copy()
-        self.mask: npt.NDArray[np.int16] = mask.copy()
+        self.mask: npt.NDArray[np.int32] = mask.copy()
         self.factor: npt.NDArray[np.float64] = factor.copy()
         self.detd = detd
         self.ewald_rad = ewald_rad
@@ -182,6 +190,13 @@ class Detector:
             self.ewald_rad,
         )
 
+    def __array__(self):
+        ans = np.empty(self.num_pix, dtype=self.dtype)
+        ans["coor"] = self.coor
+        ans["factor"] = self.factor
+        ans["mask"] = self.mask
+        return ans
+
 
 def _from_asciidet(fname: Path) -> Detector:
     with fname.open() as fp:
@@ -191,16 +206,10 @@ def _from_asciidet(fname: Path) -> Detector:
     det = np.genfromtxt(
         fname,
         skip_header=1,
-        dtype=[
-            ("qx", "f8"),
-            ("qy", "f8"),
-            ("qz", "f8"),
-            ("factor", "f4"),
-            ("mask", "i4"),
-        ],
+        dtype=Detector.dtype,
     )
     return Detector(
-        np.array([det["qx"], det["qy"], det["qz"]]).T,
+        det["coor"],
         det["factor"],
         det["mask"],
         detd,
@@ -264,7 +273,7 @@ def _init_detector(
     coor: npt.NDArray[np.floating[Any]],
     mask: npt.NDArray[np.integer[Any]],
     factor: npt.NDArray[np.floating[Any]],
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int16], npt.NDArray[np.float64]]:
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int32], npt.NDArray[np.float64]]:
     if not (coor.shape[0] == mask.shape[0] == factor.shape[0]):
         raise ValueError("`coor`, `mask`, `factor` should have the same length.")
     if coor.shape[1] == 2:
@@ -272,7 +281,7 @@ def _init_detector(
         new_coor[:, :2] = coor
     else:
         new_coor = coor
-    return new_coor.astype(np.float64), mask.astype(np.int16), factor.astype(np.float64)
+    return new_coor.astype(np.float64), mask.astype(np.int32), factor.astype(np.float64)
 
 
 @beartype
@@ -315,7 +324,7 @@ def detector(
         det = Detector(
             src.coor if coor is None else coor.astype(np.float64),
             src.factor if factor is None else factor.astype(np.float64),
-            src.mask if mask is None else mask.astype(np.int16),
+            src.mask if mask is None else mask.astype(np.int32),
             src.detd if detd is None else float(detd),
             src.ewald_rad if ewald_rad is None else float(ewald_rad),
             writeable=writeable,
@@ -477,7 +486,7 @@ class DetRender:
         self.direction = -int(np.sign(det.coor[:, 2].sum()))
         # TODO decide the direction with `get_ewald_vec`
         self.cxy = self.to_cxy(self._det.coor)
-        self.xy = np.round(self.cxy - self.cxy.min(axis=0)).astype("i4")
+        self.xy = np.round(self.cxy - self.cxy.min(axis=0)).astype(np.int32)
         self.frame_shape = self.xy.max(axis=0) + 1
         self._mask = np.zeros(self.frame_shape, dtype="u1")
         pix_idx = self._det.mask == 2
