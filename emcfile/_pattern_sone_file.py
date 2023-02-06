@@ -161,17 +161,17 @@ class PatternsSOneEMC(PatternsSOneFile):
             fin.seek(1024)
             self.ones = np.fromfile(fin, dtype=np.int32, count=self.num_data)
             self.multi = np.fromfile(fin, dtype=np.int32, count=self.num_data)
-        self._ones_idx = np.zeros(self.num_data + 1, dtype="u8")
-        np.cumsum(self.ones, out=self._ones_idx[1:])
-        self._multi_idx = np.zeros(self.num_data + 1, dtype="u8")
-        np.cumsum(self.multi, out=self._multi_idx[1:])
+        self.ones_idx = np.zeros(self.num_data + 1, dtype="u8")
+        np.cumsum(self.ones, out=self.ones_idx[1:])
+        self.multi_idx = np.zeros(self.num_data + 1, dtype="u8")
+        np.cumsum(self.multi, out=self.multi_idx[1:])
         self.ndim = 2
         self.shape = (self.num_data, self.num_pix)
 
     def _read_patterns(
         self, idx_con: npt.NDArray
     ) -> tuple[npt.NDArray[np.int32], npt.NDArray[np.int32], npt.NDArray[np.int32]]:
-        return read_patterns(self._fn, idx_con, self._ones_idx, self._multi_idx)
+        return read_patterns(self._fn, idx_con, self.ones_idx, self.multi_idx)
 
 
 def read_indexed_array_h5(
@@ -209,17 +209,17 @@ class PatternsSOneH5(PatternsSOneFile):
             self.num_pix = gp.attrs["num_pix"]
             self.ones = gp["ones"][...]
             self.multi = gp["multi"][...]
-        self._ones_idx = np.zeros(self.num_data + 1, dtype="u8")
-        np.cumsum(self.ones, out=self._ones_idx[1:])
-        self._multi_idx = np.zeros(self.num_data + 1, dtype="u8")
-        np.cumsum(self.multi, out=self._multi_idx[1:])
+        self.ones_idx = np.zeros(self.num_data + 1, dtype="u8")
+        np.cumsum(self.ones, out=self.ones_idx[1:])
+        self.multi_idx = np.zeros(self.num_data + 1, dtype="u8")
+        np.cumsum(self.multi, out=self.multi_idx[1:])
         self.ndim = 2
         self.shape = (self.num_data, self.num_pix)
 
     def _read_patterns(
         self, idx_con: npt.NDArray
     ) -> tuple[npt.NDArray[np.int32], npt.NDArray[np.int32], npt.NDArray[np.int32]]:
-        return read_patterns_h5(self._fn, idx_con, self._ones_idx, self._multi_idx)
+        return read_patterns_h5(self._fn, idx_con, self.ones_idx, self.multi_idx)
 
 
 def file_patterns(fn: Union[str, Path, H5Path]) -> PatternsSOneFile:

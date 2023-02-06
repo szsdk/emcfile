@@ -57,10 +57,10 @@ class PatternsSOne:
         self.update_idx()
 
     def update_idx(self) -> None:
-        self._ones_idx = np.zeros(self.num_data + 1, dtype="u8")
-        np.cumsum(self.ones, out=self._ones_idx[1:])
-        self._multi_idx = np.zeros(self.num_data + 1, dtype="u8")
-        np.cumsum(self.multi, out=self._multi_idx[1:])
+        self.ones_idx = np.zeros(self.num_data + 1, dtype="u8")
+        np.cumsum(self.ones, out=self.ones_idx[1:])
+        self.multi_idx = np.zeros(self.num_data + 1, dtype="u8")
+        np.cumsum(self.multi, out=self.multi_idx[1:])
 
     def check(self) -> bool:
         if self.num_data != len(self.multi):
@@ -90,9 +90,9 @@ class PatternsSOne:
 
     def sparse_pattern(self, idx: int) -> SPARSE_PATTERN:
         return SPARSE_PATTERN(
-            self.place_ones[self._ones_idx[idx] : self._ones_idx[idx + 1]],
-            self.place_multi[self._multi_idx[idx] : self._multi_idx[idx + 1]],
-            self.count_multi[self._multi_idx[idx] : self._multi_idx[idx + 1]],
+            self.place_ones[self.ones_idx[idx] : self.ones_idx[idx + 1]],
+            self.place_multi[self.multi_idx[idx] : self.multi_idx[idx + 1]],
+            self.count_multi[self.multi_idx[idx] : self.multi_idx[idx + 1]],
         )
 
     @property
@@ -162,8 +162,8 @@ class PatternsSOne:
         if idx >= self.num_data or idx < 0:
             raise IndexError(f"{idx}")
         pattern = np.zeros(self.num_pix, "uint32")
-        pattern[self.place_ones[self._ones_idx[idx] : self._ones_idx[idx + 1]]] = 1
-        r = slice(*self._multi_idx[idx : idx + 2])
+        pattern[self.place_ones[self.ones_idx[idx] : self.ones_idx[idx + 1]]] = 1
+        r = slice(*self.multi_idx[idx : idx + 2])
         pattern[self.place_multi[r]] = self.count_multi[r]
         return pattern
 
@@ -217,11 +217,11 @@ class PatternsSOne:
         _one = np.lib.stride_tricks.as_strided(  # type: ignore
             _one, shape=(self.place_ones.shape[0],), strides=(0,)
         )
-        return csr_matrix((_one, self.place_ones, self._ones_idx), shape=self.shape)
+        return csr_matrix((_one, self.place_ones, self.ones_idx), shape=self.shape)
 
     def _get_sparse_multi(self) -> csr_matrix:
         return csr_matrix(
-            (self.count_multi, self.place_multi, self._multi_idx), shape=self.shape
+            (self.count_multi, self.place_multi, self.multi_idx), shape=self.shape
         )
 
     def todense(self) -> npt.NDArray[np.int32]:
@@ -374,18 +374,18 @@ def _write_h5_v1(
 
         place_ones = fp.create_dataset("place_ones", (data.num_data,), dtype=dt)
 
-        for idx, d in enumerate(np.split(data.place_ones, data._ones_idx[1:-1]), start):
+        for idx, d in enumerate(np.split(data.place_ones, data.ones_idx[1:-1]), start):
             place_ones[idx] = d
 
         place_multi = fp.create_dataset("place_multi", (data.num_data,), dtype=dt)
         for idx, d in enumerate(
-            np.split(data.place_multi, data._multi_idx[1:-1]), start
+            np.split(data.place_multi, data.multi_idx[1:-1]), start
         ):
             place_multi[idx] = d
 
         count_multi = fp.create_dataset("count_multi", (data.num_data,), dtype=dt)
         for idx, d in enumerate(
-            np.split(data.count_multi, data._multi_idx[1:-1]), start
+            np.split(data.count_multi, data.multi_idx[1:-1]), start
         ):
             count_multi[idx] = d
         fp.attrs["version"] = "1"

@@ -61,7 +61,7 @@ def test_det_write(det):
                 det1.write(f / f"det{suffix}")
             det2 = ef.detector(f / f"det{suffix}", norm_flag=False)
             ef.detector(det2)
-        assert ef.det_isclose(det1.copy(), det2)
+        assert ef.det_isclose(det1, det2)
 
 
 def test_get_ewald_vec(det):
@@ -102,16 +102,6 @@ def test_get_2ddet(det):
 
 def test_get_3ddet_from_shape(det):
     ef.get_3ddet_from_shape((100, 100), det)
-
-
-def test_set_flags(det_file):
-    det = ef.detector(det_file, norm_flag=True, writeable=False)
-    old_flags = det.flags
-    det.setflags()
-    assert old_flags == det.flags
-    assert not det.flags["writeable"]
-    assert det.norm_flag
-    assert det.norm_flag  # Check ndim cache is set correctly.
 
 
 def test_cxy_xyz_conversion(det):

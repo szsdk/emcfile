@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import logging
 from enum import IntEnum
 from functools import reduce
@@ -53,8 +54,6 @@ class Detector:
         mask: npt.NDArray[np.int32],
         detd: float,
         ewald_rad: float,
-        *,
-        writeable: bool = False,
     ) -> None:
         self.num_pix = len(factor)
         self.coor: npt.NDArray[np.float64] = coor.copy()
@@ -62,7 +61,6 @@ class Detector:
         self.factor: npt.NDArray[np.float64] = factor.copy()
         self.detd = detd
         self.ewald_rad = ewald_rad
-        self.setflags(writeable=writeable)
         self._norm_flag: Optional[bool] = None
 
     @property
@@ -81,9 +79,7 @@ class Detector:
         return 2 * int(np.max(np.linalg.norm(self.coor, axis=1))) + 3
 
     def norm(self) -> None:
-        self.factor.setflags(write=True)
         self.factor /= self.factor.mean()
-        self.factor.setflags(write=self.flags["writeable"])
         self._norm_flag = None
 
     def __repr__(self) -> str:
@@ -112,51 +108,7 @@ class Detector:
     def norm_flag(self) -> bool:
         if self._norm_flag is not None:
             return self._norm_flag
-        nf = bool(np.isclose(self.factor.mean(), 1.0))
-        if not self.flags["writeable"]:
-            self._norm_flag = nf
-        return nf
-
-    @property
-    def flags(self) -> dict[str, Any]:
-        return {"writeable": self._writeable}
-
-    def setflags(self, writeable: Optional[bool] = None) -> None:
-        """
-        Set the writeablility
-
-        Parameters
-        ----------
-        writeable : Optional[bool]
-
-        """
-        if writeable is None:
-            return
-        if not isinstance(writeable, bool):
-            raise ValueError("Wrong type of writeable")
-        for arr in cast(list[npt.NDArray[Any]], [self.coor, self.mask, self.factor]):
-            arr.setflags(write=writeable)
-        self._writeable: bool = writeable
-        if writeable:
-            self._norm_flag = None
-
-    def copy(self) -> Detector:
-        return Detector(
-            coor=self.coor,
-            factor=self.factor,
-            mask=self.mask,
-            detd=self.detd,
-            ewald_rad=self.ewald_rad,
-        )
-
-    def deepcopy(self) -> Detector:
-        return Detector(
-            coor=self.coor.copy(),
-            factor=self.factor.copy(),
-            mask=self.mask.copy(),
-            detd=self.detd,
-            ewald_rad=self.ewald_rad,
-        )
+        return bool(np.isclose(self.factor.mean(), 1.0))
 
     def write(self, fname: Union[str, Path, H5Path], overwrite: bool = False) -> None:
         fn = make_path(fname)
@@ -293,7 +245,6 @@ def detector(
     factor: Optional[npt.NDArray] = None,
     detd: Union[float, int, np.floating, np.integer, None] = None,
     ewald_rad: Union[float, int, np.floating, np.integer, None] = None,
-    writeable: bool = False,
     norm_flag: bool = True,
 ) -> Detector:
     """
@@ -318,7 +269,7 @@ def detector(
         ):
             coor, mask, factor = _init_detector(coor, mask, factor)
             det = Detector(
-                coor, factor, mask, float(detd), float(ewald_rad), writeable=writeable
+                coor, factor, mask, float(detd), float(ewald_rad)
             )
     elif isinstance(src, Detector):
         det = Detector(
@@ -327,11 +278,9 @@ def detector(
             src.mask if mask is None else mask.astype(np.int32),
             src.detd if detd is None else float(detd),
             src.ewald_rad if ewald_rad is None else float(ewald_rad),
-            writeable=writeable,
         )
     elif isinstance(src, (str, Path, H5Path)):
         det = _from_file(src)
-        det.setflags(writeable=writeable)
 
     if det is None:
         raise Exception(f"Can not parse {src}({type(src)}")
@@ -360,14 +309,12 @@ def get_2ddet(det: Detector, /, *, inplace: bool = False) -> Detector:
     if inplace:
         ans = det
     else:
-        ans = det.deepcopy()
-    ans.setflags(writeable=True)
+        ans = deepcopy(det)
     ans.coor[:, :2] = xyz_to_cxy(
         ans.coor, det.ewald_rad, det.detd, -int(np.sign(det.coor[:, 2].sum()))
     )
 
     ans.coor[:, 2] = 0.0
-    ans.setflags(writeable=False)
     return ans
 
 
