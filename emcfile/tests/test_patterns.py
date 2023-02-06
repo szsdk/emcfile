@@ -199,13 +199,13 @@ def test_pattern_mul(data):
 
 
 @pytest.mark.parametrize(
-    "file_class, file",
-    [(ef.PatternsSOneEMC, "data_emc"), (ef.PatternsSOneH5, "data_h5")],
+    "file",
+    ["data_emc", "data_h5"],
 )
-def test_PatternsSOneFile(file_class, file, request):
+def test_PatternsSOneFile(file, request):
     data_fn = request.getfixturevalue(file)
     p0 = ef.patterns(data_fn)
-    p1 = file_class(data_fn)
+    p1 = ef.file_patterns(data_fn)
     np.testing.assert_equal(p0[10], p1[10])
     assert p0[::2] == p1[::2]
 
