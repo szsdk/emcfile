@@ -1,3 +1,4 @@
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -124,3 +125,9 @@ def test_det_render(det):
     )
     detr.frame_extent()
     detr.frame_pixels()
+
+
+def test_concatenate(det):
+    det_sym = deepcopy(det)
+    det_sym.coor *= np.array([-1, -1, 1])
+    assert np.concatenate([det, det_sym]).num_pix == 2 * det.num_pix

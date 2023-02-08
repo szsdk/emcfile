@@ -149,6 +149,43 @@ class Detector:
         ans["mask"] = self.mask
         return ans
 
+    def __array_function__(self, func, types, args, kwargs):
+
+        if func not in HANDLED_FUNCTIONS:
+
+            return NotImplemented
+
+        # Note: this allows subclasses that don't override
+
+        # __array_function__ to handle Detector objects.
+
+        if not all(issubclass(t, self.__class__) for t in types):
+            return NotImplemented
+        return HANDLED_FUNCTIONS[func](*args, **kwargs)
+
+
+HANDLED_FUNCTIONS = {}
+
+
+def implements(np_function):
+    "Register an __array_function__ implementation for PatternsSOne objects."
+
+    def decorator(func):
+        HANDLED_FUNCTIONS[np_function] = func
+        return func
+
+    return decorator
+
+
+@implements(np.concatenate)
+def concatenate_Detector(dets: list[Detector]) -> Detector:
+    ewald_rad = dets[0].ewald_rad
+    np.testing.assert_array_equal([d.ewald_rad for d in dets], dets[0].ewald_rad)
+    detd = dets[0].detd
+    np.testing.assert_array_equal([d.detd for d in dets], dets[0].detd)
+    data = np.concatenate([np.asarray(d) for d in dets], axis=0)
+    return Detector(data["coor"], data["factor"], data["mask"], detd, ewald_rad)
+
 
 def _from_asciidet(fname: Path) -> Detector:
     with fname.open() as fp:
@@ -268,9 +305,7 @@ def detector(
             and (ewald_rad is not None)
         ):
             coor, mask, factor = _init_detector(coor, mask, factor)
-            det = Detector(
-                coor, factor, mask, float(detd), float(ewald_rad)
-            )
+            det = Detector(coor, factor, mask, float(detd), float(ewald_rad))
     elif isinstance(src, Detector):
         det = Detector(
             src.coor if coor is None else coor.astype(np.float64),
