@@ -10,8 +10,7 @@ import numpy as np
 import numpy.typing as npt
 from scipy.sparse import csr_matrix
 
-from emcfile import PATH_TYPE, H5Path, check_remove_groups, make_path
-
+from ._h5helper import PATH_TYPE, H5Path, check_remove_groups, make_path
 from ._misc import pretty_size
 
 _log = logging.getLogger(__name__)
