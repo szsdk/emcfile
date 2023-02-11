@@ -149,7 +149,7 @@ def coo_to_SOne_kernel(coo: coo_matrix) -> PatternsSOne:
 
 @beartype
 def patterns(
-    src: Union[PATH_TYPE, npt.NDArray, coo_matrix, int, np.integer],
+    src: Union[PATH_TYPE, npt.NDArray, coo_matrix, int, np.integer, PatternsSOne],
     /,
     *,
     start: Union[None, int, np.integer] = None,
@@ -160,21 +160,32 @@ def patterns(
 
     Parameters
     ----------
-    src : Union[str, Path, npt.NDArray, coo_matrix]
+    src : Union[PATH_TYPE, npt.NDArray, coo_matrix, int, np.integer, PatternsSOne]
+        Create a PatternsSOne object from a source file, a dense numpy array, a coo sparse matrix,
+        an integer or another `PatternsSOne` file.
 
-    start : Optional[int]
+    start : Union[None, int, np.integer]
         The starting pattern index
 
-    end : Optional[int]
+    end : Union[None, int, np.integer]
         The end pattern index
 
     Returns
     -------
     PatternsSOne:
+        Created pattern set.
+
+    Raises
+    -------
+    Exception:
+        If the source cannot be parsed or the start and end indices are provided for dense numpy array.
     """
+
     if isinstance(src, (str, Path, H5Path)):
         ans = _parse_file_PatternsSOne(src, start=start, end=end)
         return ans
+    if isinstance(src, PatternsSOne):
+        return src[start:end]
     elif isinstance(src, (int, np.integer)):
         return PatternsSOne(
             int(src),

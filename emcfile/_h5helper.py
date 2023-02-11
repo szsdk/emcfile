@@ -133,7 +133,7 @@ def read_array(
     fname: PATH_TYPE,
     /,
     *,
-    dtype: Any = "f8",  # TODO: replace dtype with npt.DTypeLike
+    dtype: npt.DTypeLike = np.float64,
     reshape: Optional[tuple[int, ...]] = None,
 ) -> npt.NDArray[Any]:
     """

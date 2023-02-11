@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import logging
+from copy import deepcopy
 from enum import IntEnum
 from functools import reduce
 from pathlib import Path
@@ -250,11 +250,8 @@ def _from_file(fname: PATH_TYPE) -> Detector:
         raise FileNotFoundError(f"Detector file, {fname}, does not exist.")
     if isinstance(f, H5Path):
         return _from_h5det(f)
-    if isinstance(f, Path):
-        if f.suffix == ".dat":
-            return _from_asciidet(f)
-        else:
-            raise NotImplementedError()
+    if isinstance(f, Path) and (f.suffix == ".dat"):
+        return _from_asciidet(f)
     raise ValueError(f"do not know how to handle {f} detector file")
 
 
@@ -285,16 +282,47 @@ def detector(
     norm_flag: bool = True,
 ) -> Detector:
     """
-    This is the interface function for Detector.
+    This is the interface function for `Detector`. It create a Detector object from
+    a source or from provided coordinates, mask, factor, and other parameters.
 
     Parameters
     ----------
-    src : Union[Detector, str, Path, None]
-        If src is a Detector, this function return another copy of the input.
+    src : Union[Detector, PATH_TYPE, None]
+        Source from which to create the Detector. Can be None, Detector object, or file path.
+        If src is a Detector, this function return another copy of the input, the data of the
+        output `Detector` could be rewritten by over given arguments, such as `coor`.
         If src is a file(a str or a Path), read the detector form it.
-        The file format could be '.h5', '.dat', '.ini', '.cfg'.
+        The file format could be '.h5', '.dat', '.emc'.
         If src is None, all parameters for a Detector should be given.
+        Default is None.
+
+    coor : Optional[npt.NDArray]
+        Coordinates of the detector.
+
+    mask : Optional[npt.NDArray]
+        Mask of the detector.
+
+    factor : Optional[npt.NDArray]
+        Factor of the detector.
+
+    detd : Union[float, int, np.floating, np.integer, None]
+        Detector distance.
+
+    ewald_rad : Union[float, int, np.floating, np.integer, None]
+        Ewald radius.
+
+    norm_flag : bool
+        Flag to indicate whether to normalize the detector. Default is True.
+
+    Returns
+    -------
+    Detector: Created detector object.
+
+    Raises
+    -------
+    Exception: If the source cannot be parsed.
     """
+
     det = None
     if src is None:
         if (

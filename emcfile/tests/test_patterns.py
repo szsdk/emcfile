@@ -2,7 +2,6 @@ import gc
 import logging
 import tempfile
 import time
-from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -38,19 +37,33 @@ def data_h5(tmp_path_factory, data):
     return fn
 
 
+@pytest.fixture()
+def data_h5_v1(tmp_path_factory, data):
+    fn = tmp_path_factory.mktemp("data") / "photon.h5::patterns"
+    data.write(fn, h5version="1")
+    return fn
+
+
 def test_operation(data):
     data.get_mean_count()
     data.nbytes
     data.sparsity()
 
 
-def test_readcoomatrix():
+def gen_pattern_inputs():
     np.random.seed(123)
     dense = (5 * np.random.rand(400, 128**2) ** 5).astype("i4")
-    p2 = ef.patterns(dense)  # reading dense form
+    ref = ef.patterns(dense)
+    yield ref, ref
+    yield dense, ref
     co = coo_matrix(dense)
-    p = ef.patterns(co)  # reading coo_matrix form
-    assert p == p2
+    yield co, ref
+
+
+@pytest.mark.parametrize("inp, ref", gen_pattern_inputs())
+def test_patterns(inp, ref):
+    p = ef.patterns(inp)
+    assert p == ref
 
 
 def test_getitem(data):
@@ -70,7 +83,7 @@ def test_getitem(data):
 
 def test_concatenate(data):
     patterns = [ef.patterns(data.num_pix)] + [
-        deepcopy(data[i * 10 : (i + 1) * 10]) for i in range(5)
+        ef.patterns(data, start=i * 10, end=(i + 1) * 10) for i in range(5)
     ]
     ans = np.concatenate(patterns)
     assert data[:50] == ans
@@ -109,26 +122,23 @@ def test_empty():
     assert empty_data.num_data == 0
 
 
-def test_io(data):
-    with tempfile.NamedTemporaryFile(suffix=".emc") as f:
-        with pytest.raises(Exception):
-            data.write(Path(f.name))
+@pytest.mark.parametrize(
+    "suffix, kargs",
+    [
+        (".emc", dict()),
+        (".h5", dict(h5version="1")),
+        (".h5", dict(h5version="2")),
+    ],
+)
+def test_fileio(suffix, kargs, data):
+    with tempfile.NamedTemporaryFile(suffix=suffix) as f:
         t0 = time.time()
-        data.write(Path(f.name), overwrite=True)
-        logging.info(f"Writing {data.num_data} patterns to emc file: {time.time()-t0}")
-
-        t0 = time.time()
-        d_read = ef.patterns(f.name)
+        data.write(f.name, overwrite=True, **kargs)
         logging.info(
-            f"Reading {data.num_data} patterns from emc file: {time.time()-t0}"
-        )
-        assert d_read == data
-
-    with tempfile.NamedTemporaryFile(suffix=".h5") as f:
-        t0 = time.time()
-        data.write(f.name, overwrite=True, h5version="1")
-        logging.info(
-            f"Writing {data.num_data} patterns to h5 file(v1): {time.time()-t0}"
+            "Writing %d patterns to %s file(%s): {time.time()-t0}",
+            data.num_data,
+            suffix,
+            kargs,
         )
 
         start = data.num_data // 3
@@ -138,21 +148,6 @@ def test_io(data):
         logging.info(
             f"Reading {d_read.num_data} patterns from h5 file(v1): {time.time()-t0}"
         )
-        d_read.offset = (0, d_read.num_data)
-        assert d_read == data[start:end]
-
-    with tempfile.NamedTemporaryFile(suffix=".h5") as f:
-        t0 = time.time()
-        data.write(ef.h5path(f.name, "data"), overwrite=True, h5version="2")
-        logging.info(
-            f"Writing {data.num_data} patterns to h5 file(v2): {time.time()-t0}"
-        )
-        t0 = time.time()
-        d_read = ef.patterns(ef.h5path(f.name, "data"), start=start, end=end)
-        logging.info(
-            f"Reading {d_read.num_data} patterns from h5 file(v2): {time.time()-t0}"
-        )
-        d_read.offset = (0, d_read.num_data)
         assert d_read == data[start:end]
 
 
@@ -198,18 +193,6 @@ def test_pattern_mul(data):
     np.testing.assert_equal((data @ mtx).todense(), data.todense() @ mtx)
 
 
-@pytest.mark.parametrize(
-    "file",
-    ["data_emc", "data_h5"],
-)
-def test_PatternsSOneFile(file, request):
-    data_fn = request.getfixturevalue(file)
-    p0 = ef.patterns(data_fn)
-    p1 = ef.file_patterns(data_fn)
-    np.testing.assert_equal(p0[10], p1[10])
-    assert p0[::2] == p1[::2]
-
-
 @pytest.mark.parametrize("file", ["data_emc", "data_h5"])
 def test_PatternsSOneFile_getitem(file, request):
     np.random.seed(12)
@@ -218,6 +201,7 @@ def test_PatternsSOneFile_getitem(file, request):
     d2 = ef.file_patterns(p)
     assert d2.sparsity() == d1.sparsity()
     np.testing.assert_equal(d2[3], d1[3])
+    assert d2[::2] == d1[::2]
     idx = np.random.rand(d1.num_data) > 0.5
     assert d2[idx] == d1[idx]
     idx = np.where(idx)[0]
