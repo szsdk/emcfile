@@ -16,10 +16,6 @@ from ._misc import pretty_size
 
 _log = logging.getLogger(__name__)
 
-PATTERNS_HEADER = namedtuple(
-    "PATTERNS_HEADER", ["version", "num_data", "num_pix", "file"]
-)
-
 SPARSE_PATTERN = namedtuple(
     "SPARSE_PATTERN", ["place_ones", "place_multi", "count_multi"]
 )
@@ -134,30 +130,6 @@ class PatternsSOne:
                 return False
         return True
 
-    @staticmethod
-    def file_header(
-        filename: PATH_TYPE,
-    ) -> PATTERNS_HEADER:
-        header: dict[str, Any] = {"file": str(filename)}
-        f = make_path(filename)
-        if isinstance(f, H5Path):
-            with f.open_group("r", "r") as (_, fp):
-                header["version"] = fp.attrs.get("version", "1")
-                if header["version"] == "1":
-                    header["num_data"] = len(fp["place_ones"])
-                    header["num_pix"] = fp["num_pix"][:][0]
-                elif header["version"] == "2":
-                    header["num_data"] = fp.attrs["num_data"]
-                    header["num_pix"] = fp.attrs["num_pix"]
-                else:
-                    raise ValueError("Cannot decide the version of the input h5 file.")
-        elif isinstance(f, Path):
-            header["version"] = "sparse one"
-            with f.open("rb") as fin:
-                header["num_data"] = np.fromfile(fin, dtype=np.int32, count=1)[0]
-                header["num_pix"] = np.fromfile(fin, dtype=np.int32, count=1)[0]
-        return PATTERNS_HEADER(**header)
-
     def _get_pattern(self, idx: int) -> npt.NDArray:
         if idx >= self.num_data or idx < 0:
             raise IndexError(f"{idx}")
@@ -210,7 +182,7 @@ class PatternsSOne:
         h5version: str = "2",
         overwrite: bool = False,
     ) -> None:
-        return write_photons([self], path, h5version=h5version, overwrite=overwrite)
+        return write_patterns([self], path, h5version=h5version, overwrite=overwrite)
 
     def _get_sparse_ones(self) -> csr_matrix:
         _one = np.ones(1, "i4")
@@ -330,7 +302,7 @@ def _write_h5_v2(
                 n += a.shape[0]
 
 
-def write_photons(
+def write_patterns(
     datas: list[PatternsSOne],
     path: PATH_TYPE,
     *,

@@ -22,7 +22,7 @@ from ._h5helper import (
     write_array,
     write_obj_h5,
 )
-from ._pattern_sone import PATTERNS_HEADER, PatternsSOne, write_photons
+from ._pattern_sone import PatternsSOne, write_patterns
 from ._pattern_sone_file import PatternsSOneEMC, PatternsSOneH5, file_patterns
 from ._patterns import patterns
 
@@ -48,9 +48,8 @@ __all__ = [
     "write_obj_h5",
     "read_obj_h5",
     "patterns",
-    "PATTERNS_HEADER",
     "PatternsSOne",
-    "write_photons",
+    "write_patterns",
     "PatternsSOneEMC",
     "PatternsSOneH5",
     "file_patterns",

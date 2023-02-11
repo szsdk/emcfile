@@ -151,15 +151,15 @@ def test_fileio(suffix, kargs, data):
         assert d_read == data[start:end]
 
 
-def gen_write_photons():
+def gen_write_patterns():
     data = ef.patterns(np.random.randint(0, 10, size=(16, 256)))
     for i in 2 ** np.arange(0, 10, 2):
         yield ".emc", [data] * i
         yield ".h5", [data] * i
 
 
-@pytest.mark.parametrize("suffix, data_list", gen_write_photons())
-def test_write_photons(suffix, data_list):
+@pytest.mark.parametrize("suffix, data_list", gen_write_patterns())
+def test_write_patterns(suffix, data_list):
     with tempfile.NamedTemporaryFile(suffix=suffix) as f0, tempfile.NamedTemporaryFile(
         suffix=suffix
     ) as f1:
@@ -170,7 +170,7 @@ def test_write_photons(suffix, data_list):
         logging.info(f"speed[single]: {all_data.nbytes * 1e-9 /t1:.2f} GB/s")
 
         t = time.time()
-        ef.write_photons(data_list, f0.name, overwrite=True)
+        ef.write_patterns(data_list, f0.name, overwrite=True)
         t0 = time.time() - t
         logging.info(
             "speed[multiple; #patterns=%d]: %.2f GB/s",

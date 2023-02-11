@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections import namedtuple
 from pathlib import Path
-from typing import Union
+from typing import Any, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -88,6 +89,35 @@ def _parse_bin_PatternsSOne(
     return file.num_data, (start, end), file[start:end]
 
 
+PATTERNS_HEADER = namedtuple(
+    "PATTERNS_HEADER", ["version", "num_data", "num_pix", "file"]
+)
+
+
+def PatternsSOne_file_header(
+    filename: PATH_TYPE,
+) -> PATTERNS_HEADER:
+    header: dict[str, Any] = {"file": str(filename)}
+    f = make_path(filename)
+    if isinstance(f, H5Path):
+        with f.open_group("r", "r") as (_, fp):
+            header["version"] = fp.attrs.get("version", "1")
+            if header["version"] == "1":
+                header["num_data"] = len(fp["place_ones"])
+                header["num_pix"] = fp["num_pix"][:][0]
+            elif header["version"] == "2":
+                header["num_data"] = fp.attrs["num_data"]
+                header["num_pix"] = fp.attrs["num_pix"]
+            else:
+                raise ValueError("Cannot decide the version of the input h5 file.")
+    elif isinstance(f, Path):
+        header["version"] = "sparse one"
+        with f.open("rb") as fin:
+            header["num_data"] = np.fromfile(fin, dtype=np.int32, count=1)[0]
+            header["num_pix"] = np.fromfile(fin, dtype=np.int32, count=1)[0]
+    return PATTERNS_HEADER(**header)
+
+
 def _parse_file_PatternsSOne(
     path: Union[str, Path, H5Path],
     start: Union[None, int, np.integer] = None,
@@ -95,7 +125,7 @@ def _parse_file_PatternsSOne(
 ) -> PatternsSOne:
     f = make_path(path)
     if isinstance(f, H5Path):
-        header = PatternsSOne.file_header(f)
+        header = PatternsSOne_file_header(f)
         if header.version == "1":
             num_data, offset, *data = _parse_h5_PatternsSOne_v1(f, start, end)
             return PatternsSOne(*data)  # type: ignore
