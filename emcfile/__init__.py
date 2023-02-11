@@ -23,7 +23,7 @@ from ._h5helper import (
 )
 from ._pattern_sone import PatternsSOne, write_patterns
 from ._pattern_sone_file import PatternsSOneEMC, PatternsSOneH5, file_patterns
-from ._patterns import patterns
+from ._patterns import PATTERNS_HEADER, patterns, patterns_header
 
 __all__ = [
     "det_render",
@@ -50,6 +50,8 @@ __all__ = [
     "write_patterns",
     "PatternsSOneEMC",
     "PatternsSOneH5",
+    "PATTERNS_HEADER",
+    "patterns_header",
     "file_patterns",
 ]
 

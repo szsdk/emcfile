@@ -94,7 +94,7 @@ PATTERNS_HEADER = namedtuple(
 )
 
 
-def PatternsSOne_file_header(
+def patterns_header(
     filename: PATH_TYPE,
 ) -> PATTERNS_HEADER:
     header: dict[str, Any] = {"file": str(filename)}
@@ -125,7 +125,8 @@ def _parse_file_PatternsSOne(
 ) -> PatternsSOne:
     f = make_path(path)
     if isinstance(f, H5Path):
-        header = PatternsSOne_file_header(f)
+
+        header = patterns_header(f)
         if header.version == "1":
             num_data, offset, *data = _parse_h5_PatternsSOne_v1(f, start, end)
             return PatternsSOne(*data)  # type: ignore
