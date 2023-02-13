@@ -5,7 +5,7 @@ from copy import deepcopy
 from enum import IntEnum
 from functools import reduce
 from pathlib import Path
-from typing import Any, Optional, Union, cast
+from typing import Any, Optional, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -69,10 +69,7 @@ class Detector:
 
     @property
     def coor_factor(self) -> npt.NDArray[np.float64]:
-        return cast(
-            npt.NDArray[np.float64],
-            np.concatenate([self.coor, self.factor[:, None]], axis=1),
-        )
+        return (np.concatenate([self.coor, self.factor[:, None]], axis=1),)
 
     @property
     def den_size(self) -> int:
@@ -546,7 +543,6 @@ class DetRender:
             return xmin * r, (xmin + dx) * r, ymin * r, (ymin + dy) * r
 
 
-
 @beartype
 def det_render(det: Detector) -> DetRender:
     """
@@ -575,11 +571,8 @@ def grid_position(shape: tuple[int, ...]) -> list[npt.NDArray[np.float64]]:
     -------
     positions: list
     """
-    return cast(
-        list[npt.NDArray[np.float64]],
-        np.meshgrid(
-            *[np.linspace(-(s - 1) / 2, (s - 1) / 2, s) for s in shape], indexing="ij"
-        ),
+    return np.meshgrid(
+        *[np.linspace(-(s - 1) / 2, (s - 1) / 2, s) for s in shape], indexing="ij"
     )
 
 

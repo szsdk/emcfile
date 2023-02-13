@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections import namedtuple
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -22,9 +22,9 @@ from emcfile import (
 __all__ = ["patterns"]
 
 _log = logging.getLogger(__name__)
-PATTENS_TYPE = tuple[
+PATTENS_TYPE = Tuple[
     int,
-    tuple[int, int],
+    Tuple[int, int],
     int,
     npt.NDArray,
     npt.NDArray,
