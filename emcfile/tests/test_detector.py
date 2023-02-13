@@ -109,8 +109,8 @@ def test_cxy_xyz_conversion(det):
     from emcfile._detector import cxy_to_xyz, xyz_to_cxy
 
     direction = 1 if det.coor[:, 2].sum() < 0 else -1
-    cxy = xyz_to_cxy(det.coor, det.ewald_rad, det.detd * 2, direction)
-    xyz = cxy_to_xyz(cxy, det.ewald_rad, det.detd * 2, direction)
+    cxy = xyz_to_cxy(det.coor, det.ewald_rad, direction)
+    xyz = cxy_to_xyz(cxy, det.ewald_rad, direction)
     np.testing.assert_almost_equal(xyz, det.coor, decimal=4)
 
 

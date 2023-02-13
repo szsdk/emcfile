@@ -374,7 +374,7 @@ def get_2ddet(det: Detector, /, *, inplace: bool = False) -> Detector:
     else:
         ans = deepcopy(det)
     ans.coor[:, :2] = xyz_to_cxy(
-        ans.coor, det.ewald_rad, det.detd, -int(np.sign(det.coor[:, 2].sum()))
+        ans.coor, det.ewald_rad, -int(np.sign(det.coor[:, 2].sum()))
     )
 
     ans.coor[:, 2] = 0.0
@@ -454,23 +454,23 @@ def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
 
 
 def xyz_to_cxy(
-    xyz: npt.NDArray[Any], ewald_rad: float, detd: float, direction: int
+    xyz: npt.NDArray[Any], ewald_rad: float, direction: int
 ) -> npt.NDArray[np.float64]:
     is_1d = xyz.ndim == 1
     if is_1d:
         xyz = xyz[None, :]
-    ans = xyz[:, :2] * detd / (ewald_rad + direction * xyz[:, 2][:, None])
+    ans = xyz[:, :2] * ewald_rad / (ewald_rad + direction * xyz[:, 2][:, None])
     return ans.ravel() if is_1d else ans
 
 
 def cxy_to_xyz(
-    cxy: npt.NDArray[Any], ewald_rad: float, detd: float, direction: int
+    cxy: npt.NDArray[Any], ewald_rad: float, direction: int
 ) -> npt.NDArray[np.float64]:
     is_1d = cxy.ndim == 1
     if is_1d:
         cxy = cxy[None, :]
+    cxy = cxy / ewald_rad
     xyz = np.empty((cxy.shape[0], 3))
-    cxy = cxy / detd
     cr = 1 / np.sqrt(1 + np.linalg.norm(cxy, axis=1) ** 2)
     xyz[:, :2] = ewald_rad * cxy * cr.reshape(-1, 1)
     xyz[:, 2] = direction * ewald_rad * (cr - 1)
@@ -531,15 +531,20 @@ class DetRender:
         return img / self._count
 
     def to_cxy(self, xyz: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
-        return xyz_to_cxy(xyz, self._det.ewald_rad, self._det.detd, self.direction)
+        return xyz_to_cxy(xyz, self._det.ewald_rad, self.direction)
 
     def to_xyz(self, cxy: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
-        return cxy_to_xyz(cxy, self._det.ewald_rad, self._det.detd, self.direction)
+        return cxy_to_xyz(cxy, self._det.ewald_rad, self.direction)
 
-    def frame_extent(self) -> tuple[float, float, float, float]:
+    def frame_extent(self, pixel_unit=True) -> tuple[float, float, float, float]:
         xmin, ymin = self.cxy.min(axis=0)
         dx, dy = self.frame_shape
-        return xmin, xmin + dx, ymin, ymin + dy
+        if pixel_unit:
+            return xmin, xmin + dx, ymin, ymin + dy
+        else:
+            r = self._det.detd / self._det.ewald_rad
+            return xmin * r, (xmin + dx) * r, ymin * r, (ymin + dy) * r
+
 
 
 @beartype
@@ -609,7 +614,7 @@ def get_3ddet_from_shape(
     if direction == 0:
         direction = 1
     coor = cxy_to_xyz(
-        np.array(grid_position(shape)).reshape(2, -1).T, ewald_rad, detd, direction
+        np.array(grid_position(shape)).reshape(2, -1).T, ewald_rad, direction
     )
 
     det_r = np.linalg.norm(det.coor[:, :2], axis=1)
