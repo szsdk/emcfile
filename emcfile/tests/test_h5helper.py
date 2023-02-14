@@ -1,3 +1,4 @@
+from contextlib import nullcontext as does_not_raise
 import tempfile
 from pathlib import Path
 
@@ -55,3 +56,27 @@ def test_obj_h5():
         obj = {"name": "sz", "age": 27, ".": np.random.rand(3, 5)}
         ef.write_obj_h5(obj_path, obj, overwrite=True, verbose=True)
         assert _compare_dict(ef.read_obj_h5(obj_path), obj)
+
+
+@pytest.fixture(
+    params=[
+        ("numpy.npy", np.random.rand(10)),
+        ("g.h5::group", np.random.rand(10)),
+        ("g.bin", np.random.rand(32)),
+        ("g.h5::gro", None),
+        ("g.npy", None),
+    ]
+)
+def cases_read_array(request, tmp_path):
+    fn = tmp_path / request.param[0]
+    result = request.param[1]
+    if request.param[1] is None:
+        return fn, result, pytest.raises(FileNotFoundError)
+    ef.write_array(fn, result)
+    return fn, result, does_not_raise()
+
+
+def test_read_array(cases_read_array):
+    filename, result, expectation = cases_read_array
+    with expectation:
+        np.testing.assert_array_equal(ef.read_array(filename), result)

@@ -134,7 +134,6 @@ def read_array(
     /,
     *,
     dtype: npt.DTypeLike = np.float64,
-    reshape: Optional[tuple[int, ...]] = None,
 ) -> npt.NDArray[Any]:
     """
     Read an array from file. The file name (`fname`) could be a `str`, a `Path`.
@@ -151,7 +150,7 @@ def read_array(
         ans = np.fromfile(f, dtype)
     else:
         raise Exception(f"Cannot identify file({fname}) suffix.")
-    return cast(npt.NDArray[Any], ans.reshape(reshape))
+    return cast(npt.NDArray[Any], ans)
 
 
 def write_array(
@@ -164,9 +163,9 @@ def write_array(
     compression_opts: Union[None, str, int] = None,
 ) -> None:
     f = make_path(fname)
+    if f.exists() and not overwrite:
+        raise FileExistsError(f"{f} exists.")
     if isinstance(f, H5Path):
-        if f.exists() and not overwrite:
-            raise FileExistsError(f"{f} exists.")
         with f.open("a") as fp:
             if f.gn in fp:
                 del fp[f.gn]
@@ -186,8 +185,6 @@ def write_array(
             _log.warning(
                 "The compression_opts parameter is ignored. This is used only for HDF5 files."
             )  # pragma: no cover
-        if f.exists() and not overwrite:
-            raise FileExistsError(f"{f} exists.")
         if f.suffix == ".npy":
             np.save(f, arr)
             return
