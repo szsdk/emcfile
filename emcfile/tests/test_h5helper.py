@@ -1,5 +1,5 @@
-from contextlib import nullcontext as does_not_raise
 import tempfile
+from contextlib import nullcontext as does_not_raise
 from pathlib import Path
 
 import numpy as np

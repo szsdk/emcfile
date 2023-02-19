@@ -56,8 +56,8 @@ def gen_pattern_inputs():
     ref = ef.patterns(dense)
     yield ref, ref
     yield dense, ref
-    co = coo_matrix(dense)
-    yield co, ref
+    yield coo_matrix(dense), ref
+    yield csr_matrix(dense), ref
 
 
 @pytest.mark.parametrize("inp, ref", gen_pattern_inputs())

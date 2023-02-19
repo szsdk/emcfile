@@ -8,16 +8,12 @@ from typing import Any, Tuple, Union
 import numpy as np
 import numpy.typing as npt
 from beartype import beartype
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, spmatrix
 
-from emcfile import (
-    PATH_TYPE,
-    H5Path,
-    PatternsSOne,
-    PatternsSOneEMC,
-    PatternsSOneH5,
-    make_path,
-)
+from ._h5helper import PATH_TYPE, H5Path, make_path
+from ._misc import divide_range
+from ._pattern_sone import PatternsSOne
+from ._pattern_sone_file import PatternsSOneEMC, PatternsSOneH5
 
 __all__ = ["patterns"]
 
@@ -125,7 +121,6 @@ def _parse_file_PatternsSOne(
 ) -> PatternsSOne:
     f = make_path(path)
     if isinstance(f, H5Path):
-
         header = patterns_header(f)
         if header.version == "1":
             num_data, offset, *data = _parse_h5_PatternsSOne_v1(f, start, end)
@@ -180,36 +175,54 @@ def coo_to_SOne_kernel(coo: coo_matrix) -> PatternsSOne:
 
 @beartype
 def patterns(
-    src: Union[PATH_TYPE, npt.NDArray, coo_matrix, int, np.integer, PatternsSOne],
+    src: Union[PATH_TYPE, npt.NDArray, spmatrix, int, np.integer, PatternsSOne],
     /,
     *,
     start: Union[None, int, np.integer] = None,
     end: Union[None, int, np.integer] = None,
 ) -> PatternsSOne:
     """
-    The interface function for read pattern set from file or converting from a dense numpy array.
+    The interface function for reading a pattern set from a file, converting from a array, or
+    building an empty `PatternsSOne` with a given number of pixels.
 
     Parameters
     ----------
-    src : Union[PATH_TYPE, npt.NDArray, coo_matrix, int, np.integer, PatternsSOne]
-        Create a PatternsSOne object from a source file, a dense numpy array, a coo sparse matrix,
-        an integer or another `PatternsSOne` file.
+    src : Union[pathlib.Path, numpy.ndarray, scipy.sparse.spmatrix, int, numpy.integer, PatternsSOne]
+        The source of the pattern set. Can be a file path, a dense numpy array,
+        a sparse matrix, an integer, or another `PatternsSOne` object.
 
-    start : Union[None, int, np.integer]
-        The starting pattern index
+    start : Union[None, int, numpy.integer]
+        The starting pattern index. Defaults to `None`.
 
-    end : Union[None, int, np.integer]
-        The end pattern index
+    end : Union[None, int, numpy.integer]
+        The ending pattern index. Defaults to `None`.
 
     Returns
     -------
-    PatternsSOne:
-        Created pattern set.
+    my_module.PatternsSOne
+        The created pattern set.
 
     Raises
-    -------
-    Exception:
-        If the source cannot be parsed or the start and end indices are provided for dense numpy array.
+    ------
+    Exception
+        If the source cannot be parsed, or if the start and end indices are provided
+        for a dense numpy array.
+
+    Notes
+    -----
+    The function converts the input pattern set to a `PatternsSOne` object, which is a custom data
+    structure used in our module to store and manipulate patterns. The function accepts the
+    following types of input:
+
+    - A file path: The function reads the binary pattern data from the specified file and
+      creates a `PatternsSOne` object.
+    - A dense numpy array: The function converts the numpy array to a `PatternsSOne` object.
+    - A sparse matrix: The function converts the sparse matrix to a `PatternsSOne` object. If
+      the matrix is not in COO format, it is divided into smaller chunks for processing.
+    - An integer: The function creates a new `PatternsSOne` object with the specified number of
+      pixels and no binary data.
+    - Another `PatternsSOne` object: The function returns a subset or a copy of the input object,
+      starting from index `start` and ending at index `end`.
     """
 
     if isinstance(src, (str, Path, H5Path)):
@@ -232,5 +245,12 @@ def patterns(
         return dense_to_PatternsSOne(src)
     elif isinstance(src, coo_matrix):
         return coo_to_SOne_kernel(src)
+    elif isinstance(src, spmatrix):
+        return np.concatenate(
+            [
+                patterns(np.asarray((src[a:b]).todense()))
+                for a, b in divide_range(0, src.shape[0], src.shape[0] // 1024 + 1)
+            ]
+        )
     else:
         raise Exception()
