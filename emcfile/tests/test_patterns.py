@@ -207,3 +207,13 @@ def test_PatternsSOneFile_getitem(file, request):
     idx = np.where(idx)[0]
     assert d2[idx] == d1[idx]
     assert d2[np.array([], dtype=np.int32)].num_data == 0
+
+
+def test_index(data):
+    idx = np.arange(data.shape[1])
+    idx[0], idx[-1] = idx[-1], idx[0]
+    p = data[:, idx]
+    assert p.check_indices_ordered() is False
+    p.ensure_indices_ordered()
+    assert p.check_indices_ordered() is True
+    assert np.all(np.asarray(p.todense()) == np.asarray(data.todense())[:, idx])

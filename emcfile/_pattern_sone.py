@@ -19,7 +19,6 @@ SPARSE_PATTERN = namedtuple(
     "SPARSE_PATTERN", ["place_ones", "place_multi", "count_multi"]
 )
 
-
 HANDLED_FUNCTIONS = {}
 
 
@@ -225,6 +224,29 @@ class PatternsSOne:
         if not all(issubclass(t, self.__class__) for t in types):
             return NotImplemented
         return HANDLED_FUNCTIONS[func](*args, **kwargs)
+
+    def check_indices_ordered(self) -> bool:
+        a = np.subtract(self.place_multi[1:], self.place_multi[:-1], dtype=int)
+        a[self.multi_idx[1:-1] - 1] = 1
+        if np.any(a <= 0):
+            return False
+        a = np.subtract(self.place_ones[1:], self.place_ones[:-1], dtype=int)
+        a[self.ones_idx[1:-1] - 1] = 1
+        if np.any(a <= 0):
+            return False
+        return True
+
+    def ensure_indices_ordered(self) -> None:
+        if self.check_indices_ordered():
+            return
+        for i in range(self.num_data):
+            s, e = self.ones_idx[i], self.ones_idx[i + 1]
+            t = np.argsort(self.place_ones[s:e])
+            self.place_ones[s:e] = self.place_ones[s:e][t]
+            s, e = self.multi_idx[i], self.multi_idx[i + 1]
+            t = np.argsort(self.place_multi[s:e])
+            self.place_multi[s:e] = self.place_multi[s:e][t]
+            self.count_multi[s:e] = self.count_multi[s:e][t]
 
 
 def implements(np_function):
