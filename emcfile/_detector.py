@@ -69,7 +69,7 @@ class Detector:
 
     @property
     def coor_factor(self) -> npt.NDArray[np.float64]:
-        return (np.concatenate([self.coor, self.factor[:, None]], axis=1),)
+        return np.concatenate([self.coor, self.factor[:, None]], axis=1)
 
     @property
     def den_size(self) -> int:

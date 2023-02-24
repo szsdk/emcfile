@@ -41,6 +41,9 @@ def det_file(tmp_path_factory, det):
 
 def test_det_operation(det):
     np.array(det)
+    np.testing.assert_array_equal(
+        det.coor_factor, np.concatenate([det.coor, det.factor[:, None]], axis=1)
+    )
 
 
 def test_det_read(det_file):
