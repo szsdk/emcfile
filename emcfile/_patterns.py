@@ -13,7 +13,7 @@ from scipy.sparse import coo_matrix, spmatrix
 from ._h5helper import PATH_TYPE, H5Path, make_path
 from ._misc import divide_range
 from ._pattern_sone import PatternsSOne
-from ._pattern_sone_file import PatternsSOneEMC, PatternsSOneH5
+from ._pattern_sone_file import PatternsSOneEMC, PatternsSOneH5, file_patterns
 
 __all__ = ["patterns"]
 
@@ -40,14 +40,6 @@ def _get_start_end(
     start = 0 if start is None else start
     end = num_data if end is None else end
     return int(start), int(end)
-
-
-def _parse_h5_PatternsSOne_v2(
-    path: H5Path, start: Union[None, int, np.integer], end: Union[None, int, np.integer]
-) -> tuple[int, tuple[int, int], PatternsSOne]:
-    file = PatternsSOneH5(path)
-    start, end = _get_start_end(file.num_data, start, end)
-    return file.num_data, (start, end), file[start:end]
 
 
 def _parse_h5_PatternsSOne_v1(
@@ -77,43 +69,6 @@ def _parse_h5_PatternsSOne_v1(
     )
 
 
-def _parse_bin_PatternsSOne(
-    path: Path, start: Union[None, int, np.integer], end: Union[None, int, np.integer]
-) -> tuple[int, tuple[int, int], PatternsSOne]:
-    file = PatternsSOneEMC(path)
-    start, end = _get_start_end(file.num_data, start, end)
-    return file.num_data, (start, end), file[start:end]
-
-
-PATTERNS_HEADER = namedtuple(
-    "PATTERNS_HEADER", ["version", "num_data", "num_pix", "file"]
-)
-
-
-def patterns_header(
-    filename: PATH_TYPE,
-) -> PATTERNS_HEADER:
-    header: dict[str, Any] = {"file": str(filename)}
-    f = make_path(filename)
-    if isinstance(f, H5Path):
-        with f.open_group("r", "r") as (_, fp):
-            header["version"] = fp.attrs.get("version", "1")
-            if header["version"] == "1":
-                header["num_data"] = len(fp["place_ones"])
-                header["num_pix"] = fp["num_pix"][:][0]
-            elif header["version"] == "2":
-                header["num_data"] = fp.attrs["num_data"]
-                header["num_pix"] = fp.attrs["num_pix"]
-            else:
-                raise ValueError("Cannot decide the version of the input h5 file.")
-    elif isinstance(f, Path):
-        header["version"] = "sparse one"
-        with f.open("rb") as fin:
-            header["num_data"] = np.fromfile(fin, dtype=np.int32, count=1)[0]
-            header["num_pix"] = np.fromfile(fin, dtype=np.int32, count=1)[0]
-    return PATTERNS_HEADER(**header)
-
-
 def _parse_file_PatternsSOne(
     path: Union[str, Path, H5Path],
     start: Union[None, int, np.integer] = None,
@@ -121,19 +76,19 @@ def _parse_file_PatternsSOne(
 ) -> PatternsSOne:
     f = make_path(path)
     if isinstance(f, H5Path):
-        header = patterns_header(f)
-        if header.version == "1":
+        with f.open_group("r", "r") as (_, fp):
+            version = fp.attrs.get("version", "1")
+        # header = patterns_header(f)
+        # if header.version == "1":
+        if version == "1":
             num_data, offset, *data = _parse_h5_PatternsSOne_v1(f, start, end)
             return PatternsSOne(*data)  # type: ignore
-        # if header.version == "2":
-        num_data, offset, dataset = _parse_h5_PatternsSOne_v2(f, start, end)
-    elif isinstance(f, Path):
-        num_data, offset, dataset = _parse_bin_PatternsSOne(f, start, end)
+    d = file_patterns(path)[start:end]
 
     _log.info(
-        f"read dataset ({num_data} frames, {dataset.num_pix} pixels, {dataset.get_mean_count():.2f} photons/frame) from {path}"
+        f"read d ({d.num_data} frames, {d.num_pix} pixels, {d.get_mean_count():.2f} photons/frame) from {path}"
     )
-    return dataset
+    return d
 
 
 def dense_to_PatternsSOne(arr: npt.NDArray) -> PatternsSOne:

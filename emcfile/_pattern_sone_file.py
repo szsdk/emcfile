@@ -230,6 +230,6 @@ def file_patterns(fn: Union[str, Path, H5Path]) -> PatternsSOneFile:
     with open(p, "rb") as fp:
         ish5 = fp.read(8) == b"\x89HDF\r\n\x1a\n"  # magic number for HDF5
     if ish5:
-        return PatternsSOneH5(h5path(fn))
+        return PatternsSOneH5(h5path(p, "/"))
     else:
         return PatternsSOneEMC(p)
