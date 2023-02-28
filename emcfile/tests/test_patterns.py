@@ -193,7 +193,7 @@ def test_pattern_mul(data):
     np.testing.assert_equal((data @ mtx).todense(), data.todense() @ mtx)
 
 
-@pytest.mark.parametrize("file", ["data_emc", "data_h5"])
+@pytest.mark.parametrize("file", ["data_emc", "data_h5", "data_h5_v1"])
 def test_PatternsSOneFile_getitem(file, request):
     np.random.seed(12)
     p = Path(request.getfixturevalue(file))

@@ -42,55 +42,6 @@ def _get_start_end(
     return int(start), int(end)
 
 
-def _parse_h5_PatternsSOne_v1(
-    path: H5Path, start: Union[None, int, np.integer], end: Union[None, int, np.integer]
-) -> PATTENS_TYPE:
-    with path.open_group("r", "r") as (_, fp):
-        num_data = len(fp["place_ones"])
-        start, end = _get_start_end(num_data, start, end)
-        num_pix = fp["num_pix"][:][0]
-        place_ones = fp["place_ones"][start:end]
-        ones = np.array([len(i) for i in place_ones])
-        place_ones = np.concatenate(place_ones)
-        place_multi = fp["place_multi"][start:end]
-        multi = np.array([len(i) for i in place_multi])
-        place_multi = np.concatenate(place_multi)
-        count_multi = fp["count_multi"][start:end]
-        count_multi = np.concatenate(count_multi)
-    return (
-        num_data,
-        (start, end),
-        num_pix,
-        ones,
-        multi,
-        place_ones,
-        place_multi,
-        count_multi,
-    )
-
-
-def _parse_file_PatternsSOne(
-    path: Union[str, Path, H5Path],
-    start: Union[None, int, np.integer] = None,
-    end: Union[None, int, np.integer] = None,
-) -> PatternsSOne:
-    f = make_path(path)
-    if isinstance(f, H5Path):
-        with f.open_group("r", "r") as (_, fp):
-            version = fp.attrs.get("version", "1")
-        # header = patterns_header(f)
-        # if header.version == "1":
-        if version == "1":
-            num_data, offset, *data = _parse_h5_PatternsSOne_v1(f, start, end)
-            return PatternsSOne(*data)  # type: ignore
-    d = file_patterns(path)[start:end]
-
-    _log.info(
-        f"read d ({d.num_data} frames, {d.num_pix} pixels, {d.get_mean_count():.2f} photons/frame) from {path}"
-    )
-    return d
-
-
 def dense_to_PatternsSOne(arr: npt.NDArray) -> PatternsSOne:
     idx = arr == 1
     ones = idx.sum(axis=1)
@@ -181,8 +132,7 @@ def patterns(
     """
 
     if isinstance(src, (str, Path, H5Path)):
-        ans = _parse_file_PatternsSOne(src, start=start, end=end)
-        return ans
+        return file_patterns(src)[start:end]
     if isinstance(src, PatternsSOne):
         return src[start:end]
     elif isinstance(src, (int, np.integer)):

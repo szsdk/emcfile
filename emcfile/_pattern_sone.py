@@ -212,9 +212,7 @@ class PatternsSOne:
         return self._get_sparse_ones() * mtx + self._get_sparse_multi() * mtx
 
     def __array_function__(self, func, types, args, kwargs):
-
         if func not in HANDLED_FUNCTIONS:
-
             return NotImplemented
 
         # Note: this allows subclasses that don't override
@@ -340,6 +338,9 @@ def write_patterns(
         if h5version == "1":
             if len(datas) > 1:
                 raise NotImplementedError()
+            _log.warning(
+                'This format has performance issue. h5version = "2" is recommended.'
+            )
             return _write_h5_v1(datas[0], f, overwrite)
         elif h5version == "2":
             return _write_h5_v2(datas, f, overwrite, buffer_size)
@@ -362,7 +363,7 @@ def _write_h5_v1(
             ["num_pix", "ones", "multi", "place_ones", "place_multi", "count_multi"],
             overwrite,
         )
-        num_pix = fp.create_dataset("num_pix", (1,))
+        num_pix = fp.create_dataset("num_pix", (1,), dtype=np.int32)
         num_pix[0] = data.num_pix
 
         place_ones = fp.create_dataset("place_ones", (data.num_data,), dtype=dt)
