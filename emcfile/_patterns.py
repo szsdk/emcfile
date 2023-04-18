@@ -82,11 +82,11 @@ def coo_to_SOne_kernel(coo: coo_matrix) -> PatternsSOne:
 def _from_sparse_patterns(src):
     return PatternsSOne(
         num_pix=src[0].num_pix,
-        ones=np.array([len(s.place_ones) for s in src]),
-        multi=np.array([len(s.place_multi) for s in src]),
-        place_ones=np.concatenate([s.place_ones for s in src]),
-        place_multi=np.concatenate([s.place_multi for s in src]),
-        count_multi=np.concatenate([s.count_multi for s in src]),
+        ones=np.array([len(s.place_ones) for s in src]).astype(np.uint32),
+        multi=np.array([len(s.place_multi) for s in src]).astype(np.uint32),
+        place_ones=np.concatenate([s.place_ones for s in src]).astype(np.uint32),
+        place_multi=np.concatenate([s.place_multi for s in src]).astype(np.uint32),
+        count_multi=np.concatenate([s.count_multi for s in src]).astype(np.int32),
     )
 
 
