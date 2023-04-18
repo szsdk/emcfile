@@ -16,7 +16,7 @@ from ._misc import pretty_size
 _log = logging.getLogger(__name__)
 
 SPARSE_PATTERN = namedtuple(
-    "SPARSE_PATTERN", ["place_ones", "place_multi", "count_multi", "num_pix"]
+    "SPARSE_PATTERN", ["num_pix", "place_ones", "place_multi", "count_multi"]
 )
 
 HANDLED_FUNCTIONS = {}
@@ -84,10 +84,10 @@ class PatternsSOne:
 
     def sparse_pattern(self, idx: int) -> SPARSE_PATTERN:
         return SPARSE_PATTERN(
+            self.num_pix,
             self.place_ones[self.ones_idx[idx] : self.ones_idx[idx + 1]],
             self.place_multi[self.multi_idx[idx] : self.multi_idx[idx + 1]],
             self.count_multi[self.multi_idx[idx] : self.multi_idx[idx + 1]],
-            self.num_pix
         )
 
     @property
