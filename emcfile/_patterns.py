@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections import namedtuple
 from pathlib import Path
-from typing import Any, Tuple, Union
+from typing import Any, Tuple, Union, List
 
 import numpy as np
 import numpy.typing as npt
@@ -12,7 +12,7 @@ from scipy.sparse import coo_matrix, spmatrix
 
 from ._h5helper import PATH_TYPE, H5Path, make_path
 from ._misc import divide_range
-from ._pattern_sone import PatternsSOne
+from ._pattern_sone import PatternsSOne, SPARSE_PATTERN
 from ._pattern_sone_file import PatternsSOneEMC, PatternsSOneH5, file_patterns
 
 __all__ = ["patterns"]
@@ -79,9 +79,28 @@ def coo_to_SOne_kernel(coo: coo_matrix) -> PatternsSOne:
     )
 
 
+def _from_sparse_patterns(src):
+    return PatternsSOne(
+        num_pix=src[0].num_pix,
+        ones=np.array([len(s.place_ones) for s in src]),
+        multi=np.array([len(s.place_multi) for s in src]),
+        place_ones=np.concatenate([s.place_ones for s in src]),
+        place_multi=np.concatenate([s.place_multi for s in src]),
+        count_multi=np.concatenate([s.count_multi for s in src]),
+    )
+
+
 @beartype
 def patterns(
-    src: Union[PATH_TYPE, npt.NDArray, spmatrix, int, np.integer, PatternsSOne],
+    src: Union[
+        PATH_TYPE,
+        npt.NDArray,
+        spmatrix,
+        int,
+        np.integer,
+        PatternsSOne,
+        List[SPARSE_PATTERN],
+    ],
     /,
     *,
     start: Union[None, int, np.integer] = None,
@@ -93,7 +112,8 @@ def patterns(
 
     Parameters
     ----------
-    src : Union[pathlib.Path, numpy.ndarray, scipy.sparse.spmatrix, int, numpy.integer, PatternsSOne]
+    src : Union[pathlib.Path, numpy.ndarray, scipy.sparse.spmatrix, int, numpy.integer,
+                PatternsSOne, List[SPARSE_PATTERN]]
         The source of the pattern set. Can be a file path, a dense numpy array,
         a sparse matrix, an integer, or another `PatternsSOne` object.
 
@@ -157,5 +177,7 @@ def patterns(
                 for a, b in divide_range(0, src.shape[0], src.shape[0] // 1024 + 1)
             ]
         )
+    elif isinstance(src, list) and isinstance(src[0], SPARSE_PATTERN):
+        return _from_sparse_patterns(src)
     else:
         raise Exception()

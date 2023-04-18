@@ -44,6 +44,10 @@ def data_h5_v1(tmp_path_factory, data):
     return fn
 
 
+def test_from_sparse_patterns(data):
+    assert data[:10] == ef.patterns([data.sparse_pattern(i) for i in range(10)])
+
+
 def test_operation(data):
     data.get_mean_count()
     data.nbytes
