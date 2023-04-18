@@ -21,7 +21,7 @@ from ._h5helper import (
     write_array,
     write_obj_h5,
 )
-from ._pattern_sone import PatternsSOne, write_patterns
+from ._pattern_sone import PatternsSOne, write_patterns, SPARSE_PATTERN
 from ._pattern_sone_file import PatternsSOneEMC, PatternsSOneH5, file_patterns
 from ._patterns import patterns
 
@@ -37,6 +37,7 @@ __all__ = [
     "PixelType",
     "H5Path",
     "PATH_TYPE",
+    "SPARSE_PATTERN",
     "check_h5path",
     "h5group",
     "write_array",
