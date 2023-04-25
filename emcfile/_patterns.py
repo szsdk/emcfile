@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import logging
-from collections import namedtuple
 from pathlib import Path
-from typing import Any, Tuple, Union, List
+from typing import Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
 from beartype import beartype
 from scipy.sparse import coo_matrix, spmatrix
 
-from ._h5helper import PATH_TYPE, H5Path, make_path
+from ._h5helper import PATH_TYPE, H5Path
 from ._misc import divide_range
 from ._pattern_sone import PatternsSOne, SPARSE_PATTERN
-from ._pattern_sone_file import PatternsSOneEMC, PatternsSOneH5, file_patterns
+from ._pattern_sone_file import file_patterns
 
 __all__ = ["patterns"]
 
@@ -99,7 +98,7 @@ def patterns(
         int,
         np.integer,
         PatternsSOne,
-        List[SPARSE_PATTERN],
+        list[SPARSE_PATTERN],
     ],
     /,
     *,
@@ -113,7 +112,7 @@ def patterns(
     Parameters
     ----------
     src : Union[pathlib.Path, numpy.ndarray, scipy.sparse.spmatrix, int, numpy.integer,
-                PatternsSOne, List[SPARSE_PATTERN]]
+                PatternsSOne, list[SPARSE_PATTERN]]
         The source of the pattern set. Can be a file path, a dense numpy array,
         a sparse matrix, an integer, or another `PatternsSOne` object.
 
