@@ -51,8 +51,6 @@ __all__ = [
     "write_patterns",
     "PatternsSOneEMC",
     "PatternsSOneH5",
-    "PATTERNS_HEADER",
-    "patterns_header",
     "file_patterns",
 ]
 
