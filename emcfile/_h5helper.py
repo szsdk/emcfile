@@ -203,7 +203,7 @@ def check_h5path(s: PATH_TYPE) -> bool:
         return False
     if lf == 2:
         return True
-    return Path(fn_gn[0]).suffix.lower() == ".h5"
+    return (Path(fn_gn[0]).suffix.lower() == ".h5") or h5py.is_hdf5(fn_gn[0])
 
 
 @beartype
