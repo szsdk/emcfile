@@ -291,10 +291,8 @@ class PatternsSOneH5V1(PatternsSOneFile):
 def file_patterns(fn: Union[str, Path, H5Path]) -> PatternsSOneFile:
     p = make_path(fn)
     if not isinstance(p, H5Path):
-        with open(p, "rb") as fp:
-            if fp.read(8) == b"\x89HDF\r\n\x1a\n":  # magic number for HDF5
-                p = h5path(p, "/")
-
+        if h5py.is_hdf5(p):
+            p = h5path(p, "/")
     if not isinstance(p, H5Path):
         return PatternsSOneEMC(p)
     with p.open_group() as (_, gp):
