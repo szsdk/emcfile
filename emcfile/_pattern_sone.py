@@ -152,6 +152,46 @@ class PatternsSOne:
             sm.data,
         )
 
+    @staticmethod
+    def ones(shape):
+        # In []: np.resize(np.arange(3),3*3)
+        # Out[]: array([0, 1, 2, 0, 1, 2, 0, 1, 2])
+        num_data, num_pix = shape
+        return PatternsSOne(
+            num_pix,
+            np.full(num_data, num_pix),
+            np.zeros(num_data),
+            np.resize(np.arange(num_pix), num_pix * num_data),
+            np.array([], dtype=np.uint32),
+            np.array([], dtype=np.uint32),
+        )
+
+    @staticmethod
+    def zeros(shape):
+        num_data, num_pix = shape
+        return PatternsSOne(
+            num_pix,
+            np.zeros(num_data, dtype=np.uint32),
+            np.zeros(num_data, dtype=np.uint32),
+            np.array([], dtype=np.uint32),
+            np.array([], dtype=np.uint32),
+            np.array([], dtype=np.uint32),
+        )
+
+    def __pow__(self, n: int) -> PatternsSOne:
+        if not isinstance(n, int):
+            raise TypeError(f"n should be int, not {type(n)}")
+        if n == 0:
+            return PatternsSOne.ones((self.num_data, self.num_pix))
+        return PatternsSOne(
+            self.num_pix,
+            self.ones,
+            self.multi,
+            self.place_ones,
+            self.place_multi,
+            self.count_multi**n,
+        )
+
     def sum(
         self, axis: Optional[int] = None, keepdims: bool = False, dtype=None
     ) -> Union[npt.NDArray, int, float]:

@@ -14,46 +14,68 @@ import emcfile as ef
 from emcfile.tests.utils import temp_seed
 
 
-@pytest.fixture()
-def data():
-    num_data, num_pix = 1000, 4096
+def gen_dense(num_data, num_pix):
     with temp_seed(123):
-        dense = (10 * np.random.rand(num_data, num_pix) ** 5).astype(int)
-    den_data = ef.patterns(dense)
-    np.testing.assert_almost_equal(den_data.get_mean_count(), np.sum(dense) / num_data)
-    np.testing.assert_equal(den_data.todense(), dense)
-    return den_data
+        return (10 * np.random.rand(num_data, num_pix) ** 5).astype(int)
 
 
 @pytest.fixture()
-def data_emc(tmp_path_factory, data):
+def big_dense():
+    return gen_dense(1000, 4096)
+
+
+@pytest.fixture()
+def big_data(big_dense):
+    return ef.patterns(big_dense)
+
+
+def test_get_mean_count(big_data, big_dense):
+    np.testing.assert_almost_equal(big_data.get_mean_count(), big_dense.sum(1).mean())
+
+
+def test_todense(big_data, big_dense):
+    np.testing.assert_equal(big_data.todense(), big_dense)
+
+
+@pytest.fixture()
+def small_dense():
+    return gen_dense(32, 4)
+
+
+@pytest.fixture()
+def small_data(small_dense):
+    return ef.patterns(small_dense)
+
+
+@pytest.fixture()
+def data_emc(tmp_path_factory, big_data):
     fn = tmp_path_factory.mktemp("data") / "photon.emc"
-    data.write(fn)
+    big_data.write(fn)
     return fn
 
 
 @pytest.fixture()
-def data_h5(tmp_path_factory, data):
+def data_h5(tmp_path_factory, big_data):
     fn = tmp_path_factory.mktemp("data") / "photon.h5::patterns"
-    data.write(fn)
+    big_data.write(fn)
     return fn
 
 
 @pytest.fixture()
-def data_h5_v1(tmp_path_factory, data):
+def data_h5_v1(tmp_path_factory, big_data):
     fn = tmp_path_factory.mktemp("data") / "photon.h5::patterns"
-    data.write(fn, h5version="1")
+    big_data.write(fn, h5version="1")
     return fn
 
 
-def test_from_sparse_patterns(data):
-    assert data[:10] == ef.patterns([data.sparse_pattern(i) for i in range(10)])
+def test_from_sparse_patterns(big_data):
+    assert big_data[:10] == ef.patterns([big_data.sparse_pattern(i) for i in range(10)])
 
 
-def test_operation(data):
-    data.get_mean_count()
-    data.nbytes
-    data.sparsity()
+def test_operation(big_data):
+    big_data.get_mean_count()
+    big_data.nbytes
+    big_data.sparsity()
 
 
 def gen_pattern_inputs():
@@ -72,29 +94,29 @@ def test_patterns(inp, ref):
     assert p == ref
 
 
-def test_getitem(data):
-    for i in np.random.choice(data.num_data, 5):
-        assert np.sum(data[i] == 1) == data.ones[i]
+def test_getitem(big_data):
+    for i in np.random.choice(big_data.num_data, 5):
+        assert np.sum(big_data[i] == 1) == big_data.ones[i]
 
-    mask = np.random.rand(data.num_data) < 0.5
+    mask = np.random.rand(big_data.num_data) < 0.5
     idx = np.where(mask)[0]
     t0 = time.time()
-    subdata1 = data[mask]
-    subdata2 = data[idx]
+    subdata1 = big_data[mask]
+    subdata2 = big_data[idx]
     logging.info(f"Select dataset: {(time.time()-t0)/2}s")
     assert subdata1 == subdata2
     for _ in np.random.choice(subdata1.num_data, 5):
-        assert np.all(subdata1[_] == data[idx[_]])
+        assert np.all(subdata1[_] == big_data[idx[_]])
 
 
-def test_concatenate(data):
-    patterns = [ef.patterns(data.num_pix)] + [
-        ef.patterns(data, start=i * 10, end=(i + 1) * 10) for i in range(5)
+def test_concatenate(big_data):
+    patterns = [ef.patterns(big_data.num_pix)] + [
+        ef.patterns(big_data, start=i * 10, end=(i + 1) * 10) for i in range(5)
     ]
     ans = np.concatenate(patterns)
-    assert data[:50] == ans
+    assert big_data[:50] == ans
     ans = np.concatenate(patterns, casting="destroy")
-    assert data[:50] == ans
+    assert big_data[:50] == ans
 
     patterns = [ef.patterns(np.full((10000, 1000), 2)) for _ in range(2)]
     process = Process()
@@ -107,18 +129,17 @@ def test_concatenate(data):
 
 
 # This fixture is not used in the test, but it is used in the test_sum
-def gen_sum_inputs(num_data: int = 30, num_pix: int = 4):
-    with temp_seed(123):
-        dense = (10 * np.random.rand(num_data, num_pix) ** 5).astype(int)
-    data = ef.patterns(dense)
+def gen_sum_inputs():
     for axis, keepdims, dtype in itertools.product(
         [None, 0, 1], [False, True], [int, float, None]
     ):
-        yield axis, keepdims, dtype, data, dense
+        yield axis, keepdims, dtype, "small_data", "small_dense"
 
 
 @pytest.mark.parametrize("axis, keepdims, dtype, data, dense", gen_sum_inputs())
-def test_sum(axis, keepdims, dtype, data, dense):
+def test_sum(axis, keepdims, dtype, data, dense, request):
+    data = request.getfixturevalue(data)
+    dense = request.getfixturevalue(dense)
     np.testing.assert_almost_equal(
         data.sum(axis=axis, keepdims=keepdims, dtype=dtype),
         dense.sum(axis=axis, keepdims=keepdims, dtype=dtype),
@@ -140,25 +161,25 @@ def test_empty():
         (".h5", dict(h5version="2")),
     ],
 )
-def test_fileio(suffix, kargs, data):
+def test_fileio(suffix, kargs, big_data):
     with tempfile.NamedTemporaryFile(suffix=suffix) as f:
         t0 = time.time()
-        data.write(f.name, overwrite=True, **kargs)
+        big_data.write(f.name, overwrite=True, **kargs)
         logging.info(
             "Writing %d patterns to %s file(%s): {time.time()-t0}",
-            data.num_data,
+            big_data.num_data,
             suffix,
             kargs,
         )
 
-        start = data.num_data // 3
+        start = big_data.num_data // 3
         end = start * 2
         t0 = time.time()
         d_read = ef.patterns(f.name, start=start, end=end)
         logging.info(
             f"Reading {d_read.num_data} patterns from h5 file(v1): {time.time()-t0}"
         )
-        assert d_read == data[start:end]
+        assert d_read == big_data[start:end]
 
 
 def gen_write_patterns():
@@ -192,15 +213,15 @@ def test_write_patterns(suffix, data_list):
         assert ef.patterns(f0.name) == all_data
 
 
-def test_pattern_mul(data):
-    mtx = np.random.rand(data.num_pix, 10)
-    np.testing.assert_almost_equal(data @ mtx, np.asarray(data) @ mtx)
+def test_pattern_mul(big_data):
+    mtx = np.random.rand(big_data.num_pix, 10)
+    np.testing.assert_almost_equal(big_data @ mtx, np.asarray(big_data) @ mtx)
     mtx = mtx > 0.4
-    np.testing.assert_almost_equal(data @ mtx, data.todense() @ mtx)
+    np.testing.assert_almost_equal(big_data @ mtx, big_data.todense() @ mtx)
     mtx = coo_matrix(mtx)
-    np.testing.assert_equal((data @ mtx).todense(), data.todense() @ mtx)
+    np.testing.assert_equal((big_data @ mtx).todense(), big_data.todense() @ mtx)
     mtx = csr_matrix(mtx)
-    np.testing.assert_equal((data @ mtx).todense(), data.todense() @ mtx)
+    np.testing.assert_equal((big_data @ mtx).todense(), big_data.todense() @ mtx)
 
 
 @pytest.mark.parametrize("file", ["data_emc", "data_h5", "data_h5_v1"])
@@ -219,11 +240,28 @@ def test_PatternsSOneFile_getitem(file, request):
     assert d2[np.array([], dtype=np.int32)].num_data == 0
 
 
-def test_index(data):
-    idx = np.arange(data.shape[1])
+def test_index(big_data, big_dense):
+    idx = np.arange(big_data.shape[1])
     idx[0], idx[-1] = idx[-1], idx[0]
-    p = data[:, idx]
+    p = big_data[:, idx]
     assert p.check_indices_ordered() is False
     p.ensure_indices_ordered()
     assert p.check_indices_ordered() is True
-    assert np.all(np.asarray(p.todense()) == np.asarray(data.todense())[:, idx])
+    assert np.all(np.asarray(p.todense()) == big_dense[:, idx])
+
+
+@pytest.mark.parametrize("n", range(3))
+def test_pow(n, request):
+    data = request.getfixturevalue("small_data")
+    dense = request.getfixturevalue("small_dense")
+    np.testing.assert_equal(dense**n, (data**n).todense())
+
+
+@pytest.mark.parametrize("shape", [(10, 3), (10, 0)])
+def test_ones(shape):
+    np.testing.assert_equal(ef.PatternsSOne.ones(shape).todense(), np.ones(shape))
+
+
+@pytest.mark.parametrize("shape", [(10, 3), (10, 0)])
+def test_zeros(shape):
+    np.testing.assert_equal(ef.PatternsSOne.zeros(shape).todense(), np.zeros(shape))
