@@ -1,4 +1,5 @@
 import gc
+import itertools
 import logging
 import tempfile
 import time
@@ -10,13 +11,14 @@ from psutil import Process
 from scipy.sparse import coo_matrix, csr_matrix
 
 import emcfile as ef
+from emcfile.tests.utils import temp_seed
 
 
 @pytest.fixture()
 def data():
-    np.random.seed(123)
     num_data, num_pix = 1000, 4096
-    dense = (10 * np.random.rand(num_data, num_pix) ** 5).astype(int)
+    with temp_seed(123):
+        dense = (10 * np.random.rand(num_data, num_pix) ** 5).astype(int)
     den_data = ef.patterns(dense)
     np.testing.assert_almost_equal(den_data.get_mean_count(), np.sum(dense) / num_data)
     np.testing.assert_equal(den_data.todense(), dense)
@@ -55,8 +57,8 @@ def test_operation(data):
 
 
 def gen_pattern_inputs():
-    np.random.seed(123)
-    dense = (5 * np.random.rand(400, 128**2) ** 5).astype("i4")
+    with temp_seed(123):
+        dense = (5 * np.random.rand(400, 128**2) ** 5).astype("i4")
     ref = ef.patterns(dense)
     yield ref, ref
     yield dense, ref
@@ -104,18 +106,22 @@ def test_concatenate(data):
     assert len(patterns) == 0
 
 
-def test_sum():
-    num_data, num_pix = 30, 4
-    dense = (10 * np.random.rand(num_data, num_pix) ** 5).astype(int)
+# This fixture is not used in the test, but it is used in the test_sum
+def gen_sum_inputs(num_data: int = 30, num_pix: int = 4):
+    with temp_seed(123):
+        dense = (10 * np.random.rand(num_data, num_pix) ** 5).astype(int)
     data = ef.patterns(dense)
-    np.testing.assert_equal(data.sum(), dense.sum())
-    np.testing.assert_equal(data.sum(axis=1), dense.sum(axis=1))
-    np.testing.assert_equal(
-        data.sum(axis=1, keepdims=True), dense.sum(axis=1, keepdims=True)
-    )
-    np.testing.assert_equal(data.sum(axis=0), dense.sum(axis=0))
-    np.testing.assert_equal(
-        data.sum(axis=0, keepdims=True), dense.sum(axis=0, keepdims=True)
+    for axis, keepdims, dtype in itertools.product(
+        [None, 0, 1], [False, True], [int, float, None]
+    ):
+        yield axis, keepdims, dtype, data, dense
+
+
+@pytest.mark.parametrize("axis, keepdims, dtype, data, dense", gen_sum_inputs())
+def test_sum(axis, keepdims, dtype, data, dense):
+    np.testing.assert_almost_equal(
+        data.sum(axis=axis, keepdims=keepdims, dtype=dtype),
+        dense.sum(axis=axis, keepdims=keepdims, dtype=dtype),
     )
 
 
@@ -199,14 +205,14 @@ def test_pattern_mul(data):
 
 @pytest.mark.parametrize("file", ["data_emc", "data_h5", "data_h5_v1"])
 def test_PatternsSOneFile_getitem(file, request):
-    np.random.seed(12)
     p = Path(request.getfixturevalue(file))
     d1 = ef.patterns(p)
     d2 = ef.file_patterns(p)
     assert d2.sparsity() == d1.sparsity()
     np.testing.assert_equal(d2[3], d1[3])
     assert d2[::2] == d1[::2]
-    idx = np.random.rand(d1.num_data) > 0.5
+    with temp_seed(12):
+        idx = np.random.rand(d1.num_data) > 0.5
     assert d2[idx] == d1[idx]
     idx = np.where(idx)[0]
     assert d2[idx] == d1[idx]

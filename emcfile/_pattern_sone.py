@@ -153,18 +153,22 @@ class PatternsSOne:
         )
 
     def sum(
-        self, axis: Optional[int] = None, keepdims: bool = False
-    ) -> Union[npt.NDArray, int]:
+        self, axis: Optional[int] = None, keepdims: bool = False, dtype=None
+    ) -> Union[npt.NDArray, int, float]:
         if axis is None:
-            return len(self.place_ones) + cast(int, np.sum(self.count_multi))
+            return len(self.place_ones) + np.sum(self.count_multi, dtype=dtype)
         elif axis == 1:
             ans: npt.NDArray = self.ones + np.squeeze(
-                np.asarray(self._get_sparse_multi().sum(axis=1))
+                np.asarray(self._get_sparse_multi().sum(axis=1, dtype=dtype))
             )
             return ans[:, None] if keepdims else ans
         elif axis == 0:
-            ans = np.squeeze(np.asarray(self._get_sparse_ones().sum(axis=0)))
-            ans = ans + np.squeeze(np.asarray(self._get_sparse_multi().sum(axis=0)))
+            ans = np.squeeze(
+                np.asarray(self._get_sparse_ones().sum(axis=0, dtype=dtype))
+            )
+            ans = ans + np.squeeze(
+                np.asarray(self._get_sparse_multi().sum(axis=0, dtype=dtype))
+            )
             return ans[None, :] if keepdims else ans
         raise ValueError(f"Do not support axis={axis}.")
 
