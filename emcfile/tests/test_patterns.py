@@ -240,6 +240,14 @@ def test_PatternsSOneFile_getitem(file, request):
     assert d2[np.array([], dtype=np.int32)].num_data == 0
 
 
+@pytest.mark.parametrize("file", ["data_emc", "data_h5", "data_h5_v1"])
+def test_PatternsSOneFile_spase_pattern(file, request):
+    p = Path(request.getfixturevalue(file))
+    d1 = ef.patterns(p, end=10)
+    d2 = ef.file_patterns(p)
+    assert d1 == ef.patterns([d2.sparse_pattern(i) for i in range(10)])
+
+
 def test_index(big_data, big_dense):
     idx = np.arange(big_data.shape[1])
     idx[0], idx[-1] = idx[-1], idx[0]
