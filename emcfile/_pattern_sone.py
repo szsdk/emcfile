@@ -3,7 +3,18 @@ from __future__ import annotations
 import logging
 from collections import namedtuple
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple, Union, cast, overload
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Optional,
+    Tuple,
+    TypeVar,
+    Union,
+    cast,
+    overload,
+)
 
 import h5py
 import numpy as np
@@ -21,6 +32,9 @@ SPARSE_PATTERN = namedtuple(
 
 HANDLED_FUNCTIONS: Dict[Callable, Callable] = {}
 
+T1 = TypeVar("T1", bound=npt.NBitBase)
+T2 = TypeVar("T2", bound=npt.NBitBase)
+
 
 class PatternsSOne:
     """
@@ -35,13 +49,13 @@ class PatternsSOne:
     def __init__(
         self,
         num_pix: int,
-        ones: npt.NDArray,
-        multi: npt.NDArray,
-        place_ones: npt.NDArray,
-        place_multi: npt.NDArray,
-        count_multi: npt.NDArray,
+        ones: npt.NDArray[np.uint32],
+        multi: npt.NDArray[np.uint32],
+        place_ones: npt.NDArray[np.uint32],
+        place_multi: npt.NDArray[np.uint32],
+        count_multi: npt.NDArray[np.int32],
     ) -> None:
-        self.ndim = 2
+        self.ndim: int = 2
         self.num_pix = num_pix
         self.ones = ones
         self.multi = multi
@@ -171,13 +185,13 @@ class PatternsSOne:
         axis: Optional[int] = None,
         keepdims: bool = False,
         dtype: npt.DTypeLike = None,
-    ) -> Union[npt.NDArray, int, float]:
+    ) -> Union[npt.NDArray[Any], np.integer[T1], np.floating[T2], int, float]:
         if axis is None:
             return cast(
                 int, len(self.place_ones) + np.sum(self.count_multi, dtype=dtype)
             )
         elif axis == 1:
-            ans: npt.NDArray = self.ones + np.squeeze(
+            ans: npt.NDArray[Any] = self.ones + np.squeeze(
                 np.asarray(self._get_sparse_multi().sum(axis=1, dtype=dtype))
             )
             return ans[:, None] if keepdims else ans
@@ -192,14 +206,18 @@ class PatternsSOne:
         raise ValueError(f"Do not support axis={axis}.")
 
     @overload
-    def __getitem__(self, index: Union[int, np.integer]) -> npt.NDArray:
+    def __getitem__(self, index: int) -> npt.NDArray[np.uint32]:
         ...
 
     @overload
-    def __getitem__(self, index: Union[slice, npt.NDArray]) -> PatternsSOne:
+    def __getitem__(
+        self, index: Union[slice, npt.NDArray[np.integer[T1]]]
+    ) -> PatternsSOne:
         ...
 
-    def __getitem__(self, *idx):
+    def __getitem__(
+        self, *idx: Union[int, slice, npt.NDArray[np.integer[T1]]]
+    ) -> Union[npt.NDArray[np.uint32], PatternsSOne]:
         if len(idx) == 1 and isinstance(idx[0], (int, np.integer)):
             return self._get_pattern(int(idx[0]))
         else:
@@ -240,8 +258,11 @@ class PatternsSOne:
     def __array__(self) -> npt.NDArray[np.int32]:
         return self.todense()
 
-    def __matmul__(self, mtx: npt.ArrayLike) -> npt.NDArray:
-        return self._get_sparse_ones() * mtx + self._get_sparse_multi() * mtx
+    def __matmul__(self, mtx: npt.NDArray[Any]) -> npt.NDArray[Any]:
+        return cast(
+            npt.NDArray[Any],
+            self._get_sparse_ones() * mtx + self._get_sparse_multi() * mtx,
+        )
 
     def __array_function__(self, func, types, args, kwargs):
         if func not in HANDLED_FUNCTIONS:
@@ -291,7 +312,7 @@ def implements(np_function):
 
 def iter_array_buffer(
     datas: list[PatternsSOne], buffer_size: int, g: str
-) -> Iterable[npt.NDArray]:
+) -> Iterable[npt.NDArray[np.integer[T1]]]:
     buffer = []
     nbytes = 0
     for a in datas:
@@ -437,7 +458,8 @@ def concatenate_PatternsSOne(
             ],
         )
         ans.check()
-    elif casting == "destroy":
+        return ans
+    if casting == "destroy":
         ans = patterns_l.pop(0)
         while len(patterns_l) > 0:
             pat = patterns_l.pop(0)
@@ -447,26 +469,35 @@ def concatenate_PatternsSOne(
                 a = getattr(ans, g)
                 a.resize(a.shape[0] + b.shape[0], refcheck=False)
                 a[a.shape[0] - b.shape[0] :] = b[:]
-    else:
-        raise Exception(casting)
-    return ans
+        return ans
+    raise Exception(casting)
 
 
-@implements(np.ones)
-def _ones(shape: Tuple[int, int], dtype=int, order="None") -> PatternsSOne:
+def _full(shape: Tuple[int, int], val: int) -> PatternsSOne:
     num_data, num_pix = shape
     return PatternsSOne(
         num_pix,
-        np.full(num_data, num_pix),
-        np.zeros(num_data),
-        np.resize(np.arange(num_pix), num_pix * num_data),
+        np.zeros(num_data, dtype=np.uint32),
+        np.full(num_data, num_pix, dtype=np.uint32),
         np.array([], dtype=np.uint32),
-        np.array([], dtype=np.uint32),
+        np.resize(np.arange(num_pix, dtype=np.uint32), num_pix * num_data),
+        np.full(num_pix * num_data, val, dtype=np.int32),
     )
 
 
-@implements(np.zeros)
-def _zeros(shape: Tuple[int, int], dtype=int, order="None") -> PatternsSOne:
+def _ones(shape: Tuple[int, int]) -> PatternsSOne:
+    num_data, num_pix = shape
+    return PatternsSOne(
+        num_pix,
+        np.full(num_data, num_pix, dtype=np.uint32),
+        np.zeros(num_data, dtype=np.uint32),
+        np.resize(np.arange(num_pix, dtype=np.uint32), num_pix * num_data),
+        np.array([], dtype=np.uint32),
+        np.array([], dtype=np.int32),
+    )
+
+
+def _zeros(shape: Tuple[int, int]) -> PatternsSOne:
     num_data, num_pix = shape
     return PatternsSOne(
         num_pix,

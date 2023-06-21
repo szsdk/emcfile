@@ -266,16 +266,24 @@ def test_pow(n, request):
 
 
 @pytest.mark.parametrize("shape", [(10, 3), (10, 0)])
+def test_zeros(shape):
+    np.testing.assert_equal(
+        ef.patterns((shape, 0)).todense(),
+        np.zeros(shape),
+    )
+
+
+@pytest.mark.parametrize("shape", [(10, 3), (10, 0)])
 def test_ones(shape):
     np.testing.assert_equal(
-        np.ones(shape, like=ef.PatternsSOne.__new__(ef.PatternsSOne)).todense(),
+        ef.patterns((shape, 1)).todense(),
         np.ones(shape),
     )
 
 
 @pytest.mark.parametrize("shape", [(10, 3), (10, 0)])
-def test_zeros(shape):
+def test_full(shape):
     np.testing.assert_equal(
-        np.zeros(shape, like=ef.PatternsSOne.__new__(ef.PatternsSOne)).todense(),
-        np.zeros(shape),
+        ef.patterns((shape, 2)).todense(),
+        np.full(shape, 2),
     )

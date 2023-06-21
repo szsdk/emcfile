@@ -11,7 +11,7 @@ from scipy.sparse import coo_matrix, spmatrix
 
 from ._h5helper import PATH_TYPE, H5Path
 from ._misc import divide_range
-from ._pattern_sone import SPARSE_PATTERN, PatternsSOne
+from ._pattern_sone import SPARSE_PATTERN, PatternsSOne, _full, _ones, _zeros
 from ._pattern_sone_file import file_patterns
 
 __all__ = ["patterns"]
@@ -96,7 +96,7 @@ def patterns(
         npt.NDArray,
         spmatrix,
         int,
-        np.integer,
+        tuple[tuple[int, int], int],
         PatternsSOne,
         list[SPARSE_PATTERN],
     ],
@@ -163,6 +163,15 @@ def patterns(
             np.empty((0,), np.uint32),
             np.empty((0,), np.int32),
         )
+    elif (
+        isinstance(src, tuple) and isinstance(src[0], tuple) and isinstance(src[1], int)
+    ):
+        if src[1] == 0:
+            return _zeros(src[0])
+        elif src[1] == 1:
+            return _ones(src[0])
+        else:
+            return _full(src[0], src[1])
     elif isinstance(src, np.ndarray) and np.issubdtype(src.dtype, np.integer):
         if start is not None or end is not None:
             raise Exception()

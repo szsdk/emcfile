@@ -5,11 +5,10 @@ from copy import deepcopy
 from enum import IntEnum
 from functools import reduce
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional, TypeVar, Union
 
 import numpy as np
 import numpy.typing as npt
-from beartype import beartype
 from numpy import ma
 from scipy.interpolate import interp1d
 from scipy.optimize import minimize
@@ -30,6 +29,9 @@ __all__ = [
 ]
 
 _log = logging.getLogger(__name__)
+
+T1 = TypeVar("T1", bound=npt.NBitBase)
+T2 = TypeVar("T2", bound=npt.NBitBase)
 
 
 class PixelType(IntEnum):
@@ -139,17 +141,15 @@ class Detector:
             self.ewald_rad,
         )
 
-    def __array__(self) -> npt.NDArray:
-        ans = np.empty(self.num_pix, dtype=self.dtype)
+    def __array__(self) -> npt.NDArray[Any]:
+        ans = np.empty(self.num_pix, dtype=Detector.dtype)
         ans["coor"] = self.coor
         ans["factor"] = self.factor
         ans["mask"] = self.mask
         return ans
 
     def __array_function__(self, func, types, args, kwargs):
-
         if func not in HANDLED_FUNCTIONS:
-
             return NotImplemented
 
         # Note: this allows subclasses that don't override
@@ -253,9 +253,9 @@ def _from_file(fname: PATH_TYPE) -> Detector:
 
 
 def _init_detector(
-    coor: npt.NDArray[np.floating[Any]],
-    mask: npt.NDArray[np.integer[Any]],
-    factor: npt.NDArray[np.floating[Any]],
+    coor: npt.NDArray[np.floating[T1]],
+    mask: npt.NDArray[np.integer[T2]],
+    factor: npt.NDArray[np.floating[T1]],
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int32], npt.NDArray[np.float64]]:
     if not (coor.shape[0] == mask.shape[0] == factor.shape[0]):
         raise ValueError("`coor`, `mask`, `factor` should have the same length.")
@@ -267,15 +267,14 @@ def _init_detector(
     return new_coor.astype(np.float64), mask.astype(np.int32), factor.astype(np.float64)
 
 
-@beartype
 def detector(
     src: Union[Detector, PATH_TYPE, None] = None,
     *,
-    coor: Optional[npt.NDArray] = None,
-    mask: Optional[npt.NDArray] = None,
-    factor: Optional[npt.NDArray] = None,
-    detd: Union[float, int, np.floating, np.integer, None] = None,
-    ewald_rad: Union[float, int, np.floating, np.integer, None] = None,
+    coor: Optional[npt.NDArray[np.floating[T1]]] = None,
+    mask: Optional[npt.NDArray[np.integer[T2]]] = None,
+    factor: Optional[npt.NDArray[np.floating[T1]]] = None,
+    detd: Union[float, int, None] = None,
+    ewald_rad: Union[float, int, None] = None,
     norm_flag: bool = True,
 ) -> Detector:
     """
@@ -329,8 +328,8 @@ def detector(
             and (detd is not None)
             and (ewald_rad is not None)
         ):
-            coor, mask, factor = _init_detector(coor, mask, factor)
-            det = Detector(coor, factor, mask, float(detd), float(ewald_rad))
+            coor_, mask_, factor_ = _init_detector(coor, mask, factor)
+            det = Detector(coor_, factor_, mask_, float(detd), float(ewald_rad))
     elif isinstance(src, Detector):
         det = Detector(
             src.coor if coor is None else coor.astype(np.float64),
@@ -349,7 +348,6 @@ def detector(
     return det
 
 
-@beartype
 def get_2ddet(det: Detector, /, *, inplace: bool = False) -> Detector:
     """
     Get a detector for 2d clustering
@@ -378,7 +376,6 @@ def get_2ddet(det: Detector, /, *, inplace: bool = False) -> Detector:
     return ans
 
 
-@beartype
 def det_isclose(
     det1: Detector, det2: Detector, /, *, rtol: float = 1e-6
 ) -> bool:  # pragma: no cover
@@ -533,7 +530,9 @@ class DetRender:
     def to_xyz(self, cxy: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
         return cxy_to_xyz(cxy, self._det.ewald_rad, self.direction)
 
-    def frame_extent(self, pixel_unit=True) -> tuple[float, float, float, float]:
+    def frame_extent(
+        self, pixel_unit: bool = True
+    ) -> tuple[float, float, float, float]:
         xmin, ymin = self.cxy.min(axis=0)
         dx, dy = self.frame_shape
         if pixel_unit:
@@ -543,7 +542,6 @@ class DetRender:
             return xmin * r, (xmin + dx) * r, ymin * r, (ymin + dy) * r
 
 
-@beartype
 def det_render(det: Detector) -> DetRender:
     """
     The factory function of `DetRender`
@@ -576,7 +574,6 @@ def grid_position(shape: tuple[int, ...]) -> list[npt.NDArray[np.float64]]:
     )
 
 
-@beartype
 def get_3ddet_from_shape(
     shape: tuple[int, int], det: Detector, apply_mask: bool = True
 ) -> Detector:
