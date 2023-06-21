@@ -139,7 +139,7 @@ class Detector:
             self.ewald_rad,
         )
 
-    def __array__(self):
+    def __array__(self) -> npt.NDArray:
         ans = np.empty(self.num_pix, dtype=self.dtype)
         ans["coor"] = self.coor
         ans["factor"] = self.factor

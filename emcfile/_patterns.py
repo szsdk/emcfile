@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Tuple, Union
+from typing import Tuple, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -11,7 +11,7 @@ from scipy.sparse import coo_matrix, spmatrix
 
 from ._h5helper import PATH_TYPE, H5Path
 from ._misc import divide_range
-from ._pattern_sone import PatternsSOne, SPARSE_PATTERN
+from ._pattern_sone import SPARSE_PATTERN, PatternsSOne
 from ._pattern_sone_file import file_patterns
 
 __all__ = ["patterns"]
@@ -170,11 +170,14 @@ def patterns(
     elif isinstance(src, coo_matrix):
         return coo_to_SOne_kernel(src)
     elif isinstance(src, spmatrix):
-        return np.concatenate(
-            [
-                patterns(np.asarray((src[a:b]).todense()))
-                for a, b in divide_range(0, src.shape[0], src.shape[0] // 1024 + 1)
-            ]
+        return cast(
+            PatternsSOne,
+            np.concatenate(
+                [
+                    patterns(np.asarray((src[a:b]).todense()))
+                    for a, b in divide_range(0, src.shape[0], src.shape[0] // 1024 + 1)
+                ]
+            ),
         )
     elif isinstance(src, list) and isinstance(src[0], SPARSE_PATTERN):
         return _from_sparse_patterns(src)
