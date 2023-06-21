@@ -206,17 +206,18 @@ class PatternsSOne:
         raise ValueError(f"Do not support axis={axis}.")
 
     @overload
-    def __getitem__(self, index: int) -> npt.NDArray[np.uint32]:
+    def __getitem__(self, index: int) -> npt.NDArray[np.int32]:
         ...
 
     @overload
     def __getitem__(
-        self, index: Union[slice, npt.NDArray[np.integer[T1]]]
+        self, index: Union[slice, npt.NDArray[np.bool_], npt.NDArray[np.integer[T1]]]
     ) -> PatternsSOne:
         ...
 
     def __getitem__(
-        self, *idx: Union[int, slice, npt.NDArray[np.integer[T1]]]
+        self,
+        *idx: Union[int, slice, npt.NDArray[np.bool_], npt.NDArray[np.integer[T1]]],
     ) -> Union[npt.NDArray[np.uint32], PatternsSOne]:
         if len(idx) == 1 and isinstance(idx[0], (int, np.integer)):
             return self._get_pattern(int(idx[0]))

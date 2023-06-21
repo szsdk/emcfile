@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Tuple, Union, cast
+from typing import Optional, TypeVar, Union, cast
 
 import numpy as np
 import numpy.typing as npt
-from beartype import beartype
 from scipy.sparse import coo_matrix, spmatrix
 
 from ._h5helper import PATH_TYPE, H5Path
@@ -17,22 +16,14 @@ from ._pattern_sone_file import file_patterns
 __all__ = ["patterns"]
 
 _log = logging.getLogger(__name__)
-PATTENS_TYPE = Tuple[
-    int,
-    Tuple[int, int],
-    int,
-    npt.NDArray,
-    npt.NDArray,
-    npt.NDArray,
-    npt.NDArray,
-    npt.NDArray,
-]
+
+T1 = TypeVar("T1", bound=npt.NBitBase)
 
 
 def _get_start_end(
     num_data: int,
-    start: Union[None, int, np.integer],
-    end: Union[None, int, np.integer],
+    start: Optional[int],
+    end: Optional[int],
 ) -> tuple[int, int]:
     if start is not None and end is not None:
         return int(start), int(end)
@@ -41,7 +32,7 @@ def _get_start_end(
     return int(start), int(end)
 
 
-def dense_to_PatternsSOne(arr: npt.NDArray) -> PatternsSOne:
+def dense_to_PatternsSOne(arr: npt.NDArray[np.integer[T1]]) -> PatternsSOne:
     idx = arr == 1
     ones = idx.sum(axis=1)
     place_ones = idx.nonzero()[1]
@@ -78,7 +69,7 @@ def coo_to_SOne_kernel(coo: coo_matrix) -> PatternsSOne:
     )
 
 
-def _from_sparse_patterns(src):
+def _from_sparse_patterns(src: list[SPARSE_PATTERN]) -> PatternsSOne:
     return PatternsSOne(
         num_pix=src[0].num_pix,
         ones=np.array([len(s.place_ones) for s in src]).astype(np.uint32),
@@ -89,11 +80,10 @@ def _from_sparse_patterns(src):
     )
 
 
-@beartype
 def patterns(
     src: Union[
         PATH_TYPE,
-        npt.NDArray,
+        npt.NDArray[np.integer[T1]],
         spmatrix,
         int,
         tuple[tuple[int, int], int],
@@ -102,8 +92,8 @@ def patterns(
     ],
     /,
     *,
-    start: Union[None, int, np.integer] = None,
-    end: Union[None, int, np.integer] = None,
+    start: Optional[int] = None,
+    end: Optional[int] = None,
 ) -> PatternsSOne:
     """
     The interface function for reading a pattern set from a file, converting from a array, or
@@ -164,14 +154,20 @@ def patterns(
             np.empty((0,), np.int32),
         )
     elif (
-        isinstance(src, tuple) and isinstance(src[0], tuple) and isinstance(src[1], int)
+        isinstance(src, tuple)
+        and (len(src) == 2)
+        and isinstance(src[0], tuple)
+        and (len(src[0]) == 2)
+        and isinstance(src[0][0], int)
+        and isinstance(src[0][1], int)
+        and isinstance(src[1], int)
     ):
         if src[1] == 0:
-            return _zeros(src[0])
+            return _zeros((src[0][0], src[0][1]))
         elif src[1] == 1:
-            return _ones(src[0])
+            return _ones((src[0][0], src[0][1]))
         else:
-            return _full(src[0], src[1])
+            return _full((src[0][0], src[0][1]), src[1])
     elif isinstance(src, np.ndarray) and np.issubdtype(src.dtype, np.integer):
         if start is not None or end is not None:
             raise Exception()
