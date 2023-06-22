@@ -502,20 +502,23 @@ class DetRender:
         pix_idx = self._det.mask == 2
         self._mask[self.xy[pix_idx, 0], self.xy[pix_idx, 1]] = 1
         self._mask = self._mask.T.copy()
-        self._count: npt.NDArray[np.float64] = ma.masked_array(  # type: ignore[no-untyped-call]
+        self._count: npt.NDArray[np.float64] = ma.masked_array(
             np.zeros((self.frame_shape[1], self.frame_shape[0]), dtype="f8"),
             mask=self._mask,
         )
         np.add.at(
             self._count, (self.xy[:, 1], self.xy[:, 0]), np.ones(self.xy.shape[0])
         )
-        self._count /= cast(np.float64, self._count.mean())  # type: ignore[no-untyped-call]
+        self._count /= cast(np.float64, self._count.mean())
 
     def frame_pixels(self) -> list[npt.NDArray[np.float64]]:
         et = self.frame_extent()
-        return np.meshgrid(
-            np.linspace(et[0], et[1], self.frame_shape[1]),
-            np.linspace(et[2], et[3], self.frame_shape[0]),
+        return cast(
+            list[npt.NDArray[np.float64]],
+            np.meshgrid(
+                np.linspace(et[0], et[1], self.frame_shape[1]),
+                np.linspace(et[2], et[3], self.frame_shape[0]),
+            ),
         )
 
     def render(self, raw_img: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
@@ -523,7 +526,7 @@ class DetRender:
         The right way to visualize the `raw_img` is
         `plt.imshow(img, origin='lower', extent=self.frame_extent())`.
         """
-        img: npt.NDArray[np.float64] = ma.masked_array(  # type: ignore[no-untyped-call]
+        img: npt.NDArray[np.float64] = ma.masked_array(
             np.zeros((self.frame_shape[1], self.frame_shape[0]), dtype="f8"),
             mask=self._mask,
         )
@@ -575,8 +578,11 @@ def grid_position(shape: tuple[int, ...]) -> list[npt.NDArray[np.float64]]:
     -------
     positions: list
     """
-    return np.meshgrid(
-        *[np.linspace(-(s - 1) / 2, (s - 1) / 2, s) for s in shape], indexing="ij"
+    return cast(
+        list[npt.NDArray[np.float64]],
+        np.meshgrid(
+            *[np.linspace(-(s - 1) / 2, (s - 1) / 2, s) for s in shape], indexing="ij"
+        ),
     )
 
 
