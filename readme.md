@@ -9,7 +9,6 @@ Dependencies:
 - numpy >= 1.22
 - h5py
 - scipy
-- beartype
 
 ## Documentation
 

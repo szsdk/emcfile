@@ -9,7 +9,6 @@ from typing import Any, Generator, Iterator, Optional, Union, cast
 import h5py
 import numpy as np
 import numpy.typing as npt
-from beartype import beartype
 
 __all__ = [
     "H5Path",
@@ -206,7 +205,6 @@ def check_h5path(s: PATH_TYPE) -> bool:
     return (Path(fn_gn[0]).suffix.lower() == ".h5") or h5py.is_hdf5(fn_gn[0])
 
 
-@beartype
 def h5path(src: PATH_TYPE, group: Optional[str] = None) -> H5Path:
     """
     Convert string / path to `H5Path`.
@@ -235,7 +233,6 @@ def h5path(src: PATH_TYPE, group: Optional[str] = None) -> H5Path:
     raise TypeError()
 
 
-@beartype
 def make_path(s: PATH_TYPE) -> Union[Path, H5Path]:
     if check_h5path(s):
         return h5path(s)
