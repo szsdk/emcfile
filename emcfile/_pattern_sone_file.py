@@ -2,7 +2,7 @@ import logging
 import os
 from io import BufferedReader
 from pathlib import Path
-from typing import Any, TypeVar, Union, cast, overload
+from typing import Any, TypeVar, cast, overload
 
 import h5py
 import numpy as np
@@ -126,14 +126,14 @@ class PatternsSOneFile:
 
     @overload
     def __getitem__(
-        self, index: Union[slice, npt.NDArray[np.bool_], npt.NDArray["np.integer[T1]"]]
+        self, index: "slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[T1]]"
     ) -> PatternsSOne:
         ...
 
     def __getitem__(
         self,
-        index: Union[slice, npt.NDArray[np.bool_], npt.NDArray["np.integer[T1]"], int],
-    ) -> Union[npt.NDArray[np.int32], PatternsSOne]:
+        index: "slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[T1]] | int",
+    ) -> "npt.NDArray[np.int32] | PatternsSOne":
         if isinstance(index, (int, np.integer)):
             idx_con = np.array([[index, index + 1]])
         elif isinstance(index, np.ndarray):
@@ -171,7 +171,7 @@ class PatternsSOneFile:
 class PatternsSOneEMC(PatternsSOneFile):
     HEADER_BYTES = 1024
 
-    def __init__(self, fn: Union[str, Path]):
+    def __init__(self, fn: "str | Path"):
         self._fn = Path(fn)
         with open(self._fn, "rb") as fin:
             self.num_data = np.fromfile(fin, dtype=np.int32, count=1)[0]
@@ -201,7 +201,7 @@ class PatternsSOneEMC(PatternsSOneFile):
 
 
 def read_indexed_array_h5(
-    fin: Union[h5py.File, h5py.Group],
+    fin: "h5py.File | h5py.Group",
     idx_con: npt.NDArray["np.integer[T1]"],
     arr_idx: npt.NDArray["np.integer[T1]"],
 ) -> npt.NDArray[np.int32]:
@@ -237,7 +237,7 @@ def read_patterns_h5(
 
 
 class PatternsSOneH5(PatternsSOneFile):
-    def __init__(self, fn: Union[str, H5Path]):
+    def __init__(self, fn: "str | H5Path"):
         self._fn = h5path(fn)
         with self._fn.open_group() as (_, gp):
             self.num_data = gp.attrs["num_data"]
@@ -266,7 +266,7 @@ class PatternsSOneH5(PatternsSOneFile):
 
 
 class PatternsSOneH5V1(PatternsSOneFile):
-    def __init__(self, fn: Union[str, H5Path]):
+    def __init__(self, fn: "str | H5Path"):
         _log.warning(
             "This format has performance issue. `PatternsSOneH5` is recommended"
         )
@@ -305,19 +305,19 @@ class PatternsSOneH5V1(PatternsSOneFile):
 
     @overload
     def __getitem__(
-        self, index: Union[slice, npt.NDArray[np.bool_], npt.NDArray["np.integer[T1]"]]
+        self, index: "slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[T1]]"
     ) -> PatternsSOne:
         ...
 
     def __getitem__(
         self,
-        index: Union[slice, npt.NDArray[np.bool_], npt.NDArray["np.integer[T1]"], int],
-    ) -> Union[npt.NDArray[np.int32], PatternsSOne]:
+        index: "slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[T1]] | int",
+    ) -> "npt.NDArray[np.int32] | PatternsSOne":
         self.init_idx()
         return self._patterns[index]
 
 
-def file_patterns(fn: Union[str, Path, H5Path]) -> PatternsSOneFile:
+def file_patterns(fn: "str | Path | H5Path") -> PatternsSOneFile:
     p = make_path(fn)
     if not isinstance(p, H5Path):
         if h5py.is_hdf5(p):
