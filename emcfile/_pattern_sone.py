@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import logging
 from collections import namedtuple
+from collections.abc import Callable
 from pathlib import Path
 from typing import (
     Any,
-    Callable,
     Dict,
     Iterable,
     Optional,
     Tuple,
+    Type,
     TypeVar,
     Union,
     cast,
@@ -30,7 +31,7 @@ SPARSE_PATTERN = namedtuple(
     "SPARSE_PATTERN", ["num_pix", "place_ones", "place_multi", "count_multi"]
 )
 
-HANDLED_FUNCTIONS: Dict[Callable, Callable] = {}
+HANDLED_FUNCTIONS: Dict[Callable[..., Any], Callable[..., Any]] = {}
 
 T1 = TypeVar("T1", bound=npt.NBitBase)
 T2 = TypeVar("T2", bound=npt.NBitBase)
@@ -143,10 +144,10 @@ class PatternsSOne:
                 return False
         return True
 
-    def _get_pattern(self, idx: int) -> npt.NDArray[np.uint32]:
+    def _get_pattern(self, idx: int) -> npt.NDArray[np.int32]:
         if idx >= self.num_data or idx < 0:
             raise IndexError(f"{idx}")
-        pattern = np.zeros(self.num_pix, "uint32")
+        pattern = np.zeros(self.num_pix, "int32")
         pattern[self.place_ones[self.ones_idx[idx] : self.ones_idx[idx + 1]]] = 1
         r = slice(*self.multi_idx[idx : idx + 2])
         pattern[self.place_multi[r]] = self.count_multi[r]
@@ -206,23 +207,23 @@ class PatternsSOne:
         raise ValueError(f"Do not support axis={axis}.")
 
     @overload
-    def __getitem__(self, index: int) -> npt.NDArray[np.int32]:
+    def __getitem__(self, *index: int) -> npt.NDArray[np.int32]:
         ...
 
     @overload
     def __getitem__(
-        self, index: Union[slice, npt.NDArray[np.bool_], npt.NDArray[np.integer[T1]]]
+        self, *index: Union[slice, npt.NDArray[np.bool_], npt.NDArray[np.integer[T1]]]
     ) -> PatternsSOne:
         ...
 
     def __getitem__(
         self,
-        *idx: Union[int, slice, npt.NDArray[np.bool_], npt.NDArray[np.integer[T1]]],
-    ) -> Union[npt.NDArray[np.uint32], PatternsSOne]:
-        if len(idx) == 1 and isinstance(idx[0], (int, np.integer)):
-            return self._get_pattern(int(idx[0]))
+        *index: Union[int, slice, npt.NDArray[np.bool_], npt.NDArray[np.integer[T1]]],
+    ) -> Union[npt.NDArray[np.int32], PatternsSOne]:
+        if len(index) == 1 and isinstance(index[0], (int, np.integer)):
+            return self._get_pattern(int(index[0]))
         else:
-            return self._get_subdataset(idx)
+            return self._get_subdataset(index)
 
     def write(
         self,
@@ -265,7 +266,9 @@ class PatternsSOne:
             self._get_sparse_ones() * mtx + self._get_sparse_multi() * mtx,
         )
 
-    def __array_function__(self, func, types, args, kwargs):
+    def __array_function__(
+        self, func: Callable[..., Any], types: list[Type[Any]], args: Any, kwargs: Any
+    ) -> Any:
         if func not in HANDLED_FUNCTIONS:
             return NotImplemented
 
@@ -301,10 +304,13 @@ class PatternsSOne:
             self.count_multi[s:e] = self.count_multi[s:e][t]
 
 
-def implements(np_function):
+FT = TypeVar("FT", bound=Callable[..., Any])
+
+
+def implements(np_function: Callable[..., Any]) -> Callable[[FT], FT]:
     "Register an __array_function__ implementation for PatternsSOne objects."
 
-    def decorator(func):
+    def decorator(func: FT) -> FT:
         HANDLED_FUNCTIONS[np_function] = func
         return func
 
@@ -313,7 +319,7 @@ def implements(np_function):
 
 def iter_array_buffer(
     datas: list[PatternsSOne], buffer_size: int, g: str
-) -> Iterable[npt.NDArray[np.integer[T1]]]:
+) -> Iterable[Union[npt.NDArray[np.int32], npt.NDArray[np.uint32]]]:
     buffer = []
     nbytes = 0
     for a in datas:
@@ -441,7 +447,7 @@ def _write_h5_v1(
 
 @implements(np.concatenate)
 def concatenate_PatternsSOne(
-    patterns_l: list[PatternsSOne], casting="safe"
+    patterns_l: list[PatternsSOne], casting: str = "safe"
 ) -> PatternsSOne:
     "stack pattern sets together"
     num_pix = patterns_l[0].num_pix

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from copy import deepcopy
 from enum import IntEnum
 from functools import reduce
 from pathlib import Path
-from typing import Any, Optional, TypeVar, Union
+from typing import Any, Optional, Type, TypeVar, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -148,7 +149,9 @@ class Detector:
         ans["mask"] = self.mask
         return ans
 
-    def __array_function__(self, func, types, args, kwargs):
+    def __array_function__(
+        self, func: Callable[..., Any], types: list[Type[Any]], args: Any, kwargs: Any
+    ) -> Any:
         if func not in HANDLED_FUNCTIONS:
             return NotImplemented
 
@@ -164,10 +167,13 @@ class Detector:
 HANDLED_FUNCTIONS = {}
 
 
-def implements(np_function):
+FT = TypeVar("FT", bound=Callable[..., Any])
+
+
+def implements(np_function: Callable[..., Any]) -> Callable[[FT], FT]:
     "Register an __array_function__ implementation for PatternsSOne objects."
 
-    def decorator(func):
+    def decorator(func: FT) -> FT:
         HANDLED_FUNCTIONS[np_function] = func
         return func
 
@@ -496,14 +502,14 @@ class DetRender:
         pix_idx = self._det.mask == 2
         self._mask[self.xy[pix_idx, 0], self.xy[pix_idx, 1]] = 1
         self._mask = self._mask.T.copy()
-        self._count: ma.MaskedArray = ma.masked_array(
+        self._count: npt.NDArray[np.float64] = ma.masked_array(  # type: ignore[no-untyped-call]
             np.zeros((self.frame_shape[1], self.frame_shape[0]), dtype="f8"),
             mask=self._mask,
         )
         np.add.at(
             self._count, (self.xy[:, 1], self.xy[:, 0]), np.ones(self.xy.shape[0])
         )
-        self._count /= self._count.mean()
+        self._count /= cast(np.float64, self._count.mean())  # type: ignore[no-untyped-call]
 
     def frame_pixels(self) -> list[npt.NDArray[np.float64]]:
         et = self.frame_extent()
@@ -512,17 +518,17 @@ class DetRender:
             np.linspace(et[2], et[3], self.frame_shape[0]),
         )
 
-    def render(self, raw_img: npt.NDArray[Any]) -> ma.MaskedArray[Any, Any]:
+    def render(self, raw_img: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
         """
         The right way to visualize the `raw_img` is
         `plt.imshow(img, origin='lower', extent=self.frame_extent())`.
         """
-        img: ma.MaskedArray[Any, Any] = ma.masked_array(
+        img: npt.NDArray[np.float64] = ma.masked_array(  # type: ignore[no-untyped-call]
             np.zeros((self.frame_shape[1], self.frame_shape[0]), dtype="f8"),
             mask=self._mask,
         )
         np.add.at(img, (self.xy[:, 1], self.xy[:, 0]), raw_img)
-        return img / self._count
+        return cast(npt.NDArray[np.float64], img / self._count)
 
     def to_cxy(self, xyz: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
         return xyz_to_cxy(xyz, self._det.ewald_rad, self.direction)
