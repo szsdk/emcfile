@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import namedtuple
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import (
     Any,
@@ -267,7 +267,11 @@ class PatternsSOne:
         )
 
     def __array_function__(
-        self, func: Callable[..., Any], types: list[Type[Any]], args: Any, kwargs: Any
+        self,
+        func: Callable[..., Any],
+        types: Sequence[Type[Any]],
+        args: Any,
+        kwargs: Any,
     ) -> Any:
         if func not in HANDLED_FUNCTIONS:
             return NotImplemented
@@ -318,7 +322,7 @@ def implements(np_function: Callable[..., Any]) -> Callable[[FT], FT]:
 
 
 def iter_array_buffer(
-    datas: list[PatternsSOne], buffer_size: int, g: str
+    datas: Sequence[PatternsSOne], buffer_size: int, g: str
 ) -> Iterable[Union[npt.NDArray[np.int32], npt.NDArray[np.uint32]]]:
     buffer = []
     nbytes = 0
@@ -341,7 +345,7 @@ def iter_array_buffer(
             yield np.concatenate(buffer)
 
 
-def _write_bin(datas: list[PatternsSOne], path: Path, overwrite: bool) -> None:
+def _write_bin(datas: Sequence[PatternsSOne], path: Path, overwrite: bool) -> None:
     if path.exists() and not overwrite:
         raise Exception(f"{path} exists")
     num_data = np.sum([data.num_data for data in datas])
@@ -356,7 +360,7 @@ def _write_bin(datas: list[PatternsSOne], path: Path, overwrite: bool) -> None:
 
 
 def _write_h5_v2(
-    datas: list[PatternsSOne], path: H5Path, overwrite: bool, buffer_size: int
+    datas: Sequence[PatternsSOne], path: H5Path, overwrite: bool, buffer_size: int
 ) -> None:
     num_ones = np.sum([d.ones.sum() for d in datas])
     num_multi = np.sum([d.multi.sum() for d in datas])
@@ -382,7 +386,7 @@ def _write_h5_v2(
 
 
 def write_patterns(
-    datas: list[PatternsSOne],
+    datas: Sequence[PatternsSOne],
     path: PATH_TYPE,
     *,
     h5version: str = "2",

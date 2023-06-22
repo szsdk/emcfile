@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Optional, TypeVar, Union, cast
+from typing import Optional, TypeVar, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -69,7 +70,7 @@ def coo_to_SOne_kernel(coo: coo_matrix) -> PatternsSOne:
     )
 
 
-def _from_sparse_patterns(src: list[SPARSE_PATTERN]) -> PatternsSOne:
+def _from_sparse_patterns(src: Sequence[SPARSE_PATTERN]) -> PatternsSOne:
     return PatternsSOne(
         num_pix=src[0].num_pix,
         ones=np.array([len(s.place_ones) for s in src]).astype(np.uint32),
@@ -87,7 +88,7 @@ def patterns(
     "| int"
     "| tuple[tuple[int, int], int]"
     "| PatternsSOne"
-    "| list[SPARSE_PATTERN]",
+    "| Sequence[SPARSE_PATTERN]",
     /,
     *,
     start: Optional[int] = None,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from copy import deepcopy
 from enum import IntEnum
 from functools import reduce
@@ -123,9 +123,9 @@ class Detector:
 
     def __getitem__(
         self,
-        index: "slice | list[PixelType] | npt.NDArray[np.bool_] | npt.NDArray[np.integer[Any]]",
+        index: "slice | Sequence[PixelType] | npt.NDArray[np.bool_] | npt.NDArray[np.integer[Any]]",
     ) -> Detector:
-        if isinstance(index, list):
+        if isinstance(index, Sequence):
             if len(index) == 0:
                 raise ValueError("0-length input")
             if isinstance(index[0], PixelType):
@@ -179,7 +179,7 @@ def implements(np_function: Callable[..., Any]) -> Callable[[FT], FT]:
 
 
 @implements(np.concatenate)
-def concatenate_Detector(dets: list[Detector]) -> Detector:
+def concatenate_Detector(dets: Sequence[Detector]) -> Detector:
     ewald_rad = dets[0].ewald_rad
     np.testing.assert_array_equal([d.ewald_rad for d in dets], dets[0].ewald_rad)
     detd = dets[0].detd
