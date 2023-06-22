@@ -186,7 +186,7 @@ class PatternsSOne:
         axis: Optional[int] = None,
         keepdims: bool = False,
         dtype: npt.DTypeLike = None,
-    ) -> Union[npt.NDArray[Any], np.integer[T1], np.floating[T2], int, float]:
+    ) -> Union[npt.NDArray[Any], "np.integer[T1]", "np.floating[T2]", int, float]:
         if axis is None:
             return cast(
                 int, len(self.place_ones) + np.sum(self.count_multi, dtype=dtype)
@@ -212,13 +212,13 @@ class PatternsSOne:
 
     @overload
     def __getitem__(
-        self, *index: Union[slice, npt.NDArray[np.bool_], npt.NDArray[np.integer[T1]]]
+        self, *index: Union[slice, npt.NDArray[np.bool_], npt.NDArray["np.integer[T1]"]]
     ) -> PatternsSOne:
         ...
 
     def __getitem__(
         self,
-        *index: Union[int, slice, npt.NDArray[np.bool_], npt.NDArray[np.integer[T1]]],
+        *index: Union[int, slice, npt.NDArray[np.bool_], npt.NDArray["np.integer[T1]"]],
     ) -> Union[npt.NDArray[np.int32], PatternsSOne]:
         if len(index) == 1 and isinstance(index[0], (int, np.integer)):
             return self._get_pattern(int(index[0]))

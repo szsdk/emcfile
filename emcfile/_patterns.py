@@ -32,7 +32,7 @@ def _get_start_end(
     return int(start), int(end)
 
 
-def dense_to_PatternsSOne(arr: npt.NDArray[np.integer[T1]]) -> PatternsSOne:
+def dense_to_PatternsSOne(arr: npt.NDArray["np.integer[T1]"]) -> PatternsSOne:
     idx = arr == 1
     ones = idx.sum(axis=1)
     place_ones = idx.nonzero()[1]
@@ -83,7 +83,7 @@ def _from_sparse_patterns(src: list[SPARSE_PATTERN]) -> PatternsSOne:
 def patterns(
     src: Union[
         PATH_TYPE,
-        npt.NDArray[np.integer[T1]],
+        npt.NDArray["np.integer[T1]"],
         spmatrix,
         int,
         tuple[tuple[int, int], int],

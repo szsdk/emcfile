@@ -39,8 +39,8 @@ def concat_continous(a: npt.NDArray[Any]) -> npt.NDArray[Any]:
 
 def read_indexed_array(
     fin: BufferedReader,
-    idx_con: npt.NDArray[np.integer[T1]],
-    arr_idx: npt.NDArray[np.integer[T1]],
+    idx_con: npt.NDArray["np.integer[T1]"],
+    arr_idx: npt.NDArray["np.integer[T1]"],
     e0: int,
 ) -> tuple[npt.NDArray[np.int32], int]:
     if len(idx_con) == 1:
@@ -67,9 +67,9 @@ def read_indexed_array(
 
 def read_patterns(
     fn: Path,
-    idx_con: npt.NDArray[np.integer[T1]],
-    ones_idx: npt.NDArray[np.integer[T1]],
-    multi_idx: npt.NDArray[np.integer[T1]],
+    idx_con: npt.NDArray["np.integer[T1]"],
+    ones_idx: npt.NDArray["np.integer[T1]"],
+    multi_idx: npt.NDArray["np.integer[T1]"],
 ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
     seek_start = PatternsSOneEMC.HEADER_BYTES + I4 * (len(ones_idx) - 1) * 2
     with fn.open("rb") as fin:
@@ -113,7 +113,7 @@ class PatternsSOneFile:
         return float(nbytes / (4 * self.num_data * self.num_pix))
 
     def _read_patterns(
-        self, idx_con: npt.NDArray[np.integer[T1]]
+        self, idx_con: npt.NDArray["np.integer[T1]"]
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         raise NotImplementedError()
 
@@ -126,13 +126,13 @@ class PatternsSOneFile:
 
     @overload
     def __getitem__(
-        self, index: Union[slice, npt.NDArray[np.bool_], npt.NDArray[np.integer[T1]]]
+        self, index: Union[slice, npt.NDArray[np.bool_], npt.NDArray["np.integer[T1]"]]
     ) -> PatternsSOne:
         ...
 
     def __getitem__(
         self,
-        index: Union[slice, npt.NDArray[np.bool_], npt.NDArray[np.integer[T1]], int],
+        index: Union[slice, npt.NDArray[np.bool_], npt.NDArray["np.integer[T1]"], int],
     ) -> Union[npt.NDArray[np.int32], PatternsSOne]:
         if isinstance(index, (int, np.integer)):
             idx_con = np.array([[index, index + 1]])
@@ -194,7 +194,7 @@ class PatternsSOneEMC(PatternsSOneFile):
         self._init_idx = True
 
     def _read_patterns(
-        self, idx_con: npt.NDArray[np.integer[T1]]
+        self, idx_con: npt.NDArray["np.integer[T1]"]
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
         return read_patterns(self._fn, idx_con, self.ones_idx, self.multi_idx)
@@ -202,8 +202,8 @@ class PatternsSOneEMC(PatternsSOneFile):
 
 def read_indexed_array_h5(
     fin: Union[h5py.File, h5py.Group],
-    idx_con: npt.NDArray[np.integer[T1]],
-    arr_idx: npt.NDArray[np.integer[T1]],
+    idx_con: npt.NDArray["np.integer[T1]"],
+    arr_idx: npt.NDArray["np.integer[T1]"],
 ) -> npt.NDArray[np.int32]:
     if len(idx_con) == 1:
         s, e = idx_con[0]
@@ -225,9 +225,9 @@ def read_indexed_array_h5(
 
 def read_patterns_h5(
     fn: H5Path,
-    idx_con: npt.NDArray[np.integer[T1]],
-    ones_idx: npt.NDArray[np.integer[T1]],
-    multi_idx: npt.NDArray[np.integer[T1]],
+    idx_con: npt.NDArray["np.integer[T1]"],
+    ones_idx: npt.NDArray["np.integer[T1]"],
+    multi_idx: npt.NDArray["np.integer[T1]"],
 ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
     with fn.open_group() as (_, gp):
         place_ones = read_indexed_array_h5(gp["place_ones"], idx_con, ones_idx)
@@ -259,7 +259,7 @@ class PatternsSOneH5(PatternsSOneFile):
         self._init_idx = True
 
     def _read_patterns(
-        self, idx_con: npt.NDArray[np.integer[T1]]
+        self, idx_con: npt.NDArray["np.integer[T1]"]
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
         return read_patterns_h5(self._fn, idx_con, self.ones_idx, self.multi_idx)
@@ -305,13 +305,13 @@ class PatternsSOneH5V1(PatternsSOneFile):
 
     @overload
     def __getitem__(
-        self, index: Union[slice, npt.NDArray[np.bool_], npt.NDArray[np.integer[T1]]]
+        self, index: Union[slice, npt.NDArray[np.bool_], npt.NDArray["np.integer[T1]"]]
     ) -> PatternsSOne:
         ...
 
     def __getitem__(
         self,
-        index: Union[slice, npt.NDArray[np.bool_], npt.NDArray[np.integer[T1]], int],
+        index: Union[slice, npt.NDArray[np.bool_], npt.NDArray["np.integer[T1]"], int],
     ) -> Union[npt.NDArray[np.int32], PatternsSOne]:
         self.init_idx()
         return self._patterns[index]
