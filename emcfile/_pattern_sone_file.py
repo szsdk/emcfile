@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 import numpy.typing as npt
 
-from ._h5helper import H5Path, h5path, make_path
+from ._h5helper import PATH_TYPE, H5Path, h5path, make_path
 from ._pattern_sone import SPARSE_PATTERN, PatternsSOne
 
 __all__ = ["PatternsSOneEMC", "PatternsSOneH5", "file_patterns"]
@@ -317,7 +317,7 @@ class PatternsSOneH5V1(PatternsSOneFile):
         return self._patterns[index]
 
 
-def file_patterns(fn: "str | Path | H5Path") -> PatternsSOneFile:
+def file_patterns(fn: PATH_TYPE) -> PatternsSOneFile:
     p = make_path(fn)
     if not isinstance(p, H5Path):
         if h5py.is_hdf5(p):

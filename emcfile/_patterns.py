@@ -81,15 +81,13 @@ def _from_sparse_patterns(src: list[SPARSE_PATTERN]) -> PatternsSOne:
 
 
 def patterns(
-    src: Union[
-        PATH_TYPE,
-        npt.NDArray["np.integer[T1]"],
-        spmatrix,
-        int,
-        tuple[tuple[int, int], int],
-        PatternsSOne,
-        list[SPARSE_PATTERN],
-    ],
+    src: "PATH_TYPE"
+    "| npt.NDArray[np.integer[T1]]"
+    "| spmatrix"
+    "| int"
+    "| tuple[tuple[int, int], int]"
+    "| PatternsSOne"
+    "| list[SPARSE_PATTERN]",
     /,
     *,
     start: Optional[int] = None,

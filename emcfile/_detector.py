@@ -6,7 +6,7 @@ from copy import deepcopy
 from enum import IntEnum
 from functools import reduce
 from pathlib import Path
-from typing import Any, Optional, Type, TypeVar, Union, cast
+from typing import Any, Optional, Type, TypeVar, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -110,7 +110,7 @@ class Detector:
             return self._norm_flag
         return bool(np.isclose(self.factor.mean(), 1.0))
 
-    def write(self, fname: Union[str, Path, H5Path], overwrite: bool = False) -> None:
+    def write(self, fname: PATH_TYPE, overwrite: bool = False) -> None:
         fn = make_path(fname)
         if fn.exists() and not overwrite:
             raise FileExistsError(f"{fn} exists.")
@@ -123,9 +123,7 @@ class Detector:
 
     def __getitem__(
         self,
-        index: Union[
-            slice, list[PixelType], npt.NDArray[np.bool_], npt.NDArray[np.integer[Any]]
-        ],
+        index: "slice | list[PixelType] | npt.NDArray[np.bool_] | npt.NDArray[np.integer[Any]]",
     ) -> Detector:
         if isinstance(index, list):
             if len(index) == 0:
@@ -274,13 +272,13 @@ def _init_detector(
 
 
 def detector(
-    src: Union[Detector, PATH_TYPE, None] = None,
+    src: "Detector | PATH_TYPE | None" = None,
     *,
     coor: Optional[npt.NDArray["np.floating[T1]"]] = None,
     mask: Optional[npt.NDArray["np.integer[T2]"]] = None,
     factor: Optional[npt.NDArray["np.floating[T1]"]] = None,
-    detd: Union[float, int, None] = None,
-    ewald_rad: Union[float, int, None] = None,
+    detd: "float | int | None" = None,
+    ewald_rad: "float | int | None" = None,
     norm_flag: bool = True,
 ) -> Detector:
     """

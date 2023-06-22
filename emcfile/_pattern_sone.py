@@ -218,7 +218,7 @@ class PatternsSOne:
 
     def __getitem__(
         self,
-        *index: Union[int, slice, npt.NDArray[np.bool_], npt.NDArray["np.integer[T1]"]],
+        *index: "int | slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[T1]]",
     ) -> Union[npt.NDArray[np.int32], PatternsSOne]:
         if len(index) == 1 and isinstance(index[0], (int, np.integer)):
             return self._get_pattern(int(index[0]))

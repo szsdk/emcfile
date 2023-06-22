@@ -27,7 +27,7 @@ __all__ = [
 _log = logging.getLogger(__name__)
 
 
-def parse_h5path(fname: Union[str, Path]) -> tuple[Path, str]:
+def parse_h5path(fname: "str | Path") -> tuple[Path, str]:
     if not check_h5path(fname):
         raise ValueError(f"{fname} is not a valid h5path")
 
@@ -67,7 +67,7 @@ def h5group(
 
 
 class H5Path:
-    def __init__(self, fn: Union[str, Path], gn: str):
+    def __init__(self, fn: "str | Path", gn: str):
         """
         H5Path
 
@@ -81,10 +81,10 @@ class H5Path:
         self.fn = Path(fn)
         self.gn = str(gn)
 
-    def __truediv__(self, a: Union[str, Path]) -> H5Path:
+    def __truediv__(self, a: "str | Path") -> H5Path:
         return H5Path(self.fn, str(Path(self.gn) / a))
 
-    def __iter__(self) -> Iterator[Union[Path, str]]:
+    def __iter__(self) -> Iterator["Path | str"]:
         yield self.fn
         yield self.gn
 
