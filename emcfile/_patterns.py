@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Optional, TypeVar, Union, cast
+from typing import Optional, TypeVar, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -32,7 +33,7 @@ def _get_start_end(
     return int(start), int(end)
 
 
-def dense_to_PatternsSOne(arr: npt.NDArray[np.integer[T1]]) -> PatternsSOne:
+def dense_to_PatternsSOne(arr: npt.NDArray["np.integer[T1]"]) -> PatternsSOne:
     idx = arr == 1
     ones = idx.sum(axis=1)
     place_ones = idx.nonzero()[1]
@@ -69,7 +70,7 @@ def coo_to_SOne_kernel(coo: coo_matrix) -> PatternsSOne:
     )
 
 
-def _from_sparse_patterns(src: list[SPARSE_PATTERN]) -> PatternsSOne:
+def _from_sparse_patterns(src: Sequence[SPARSE_PATTERN]) -> PatternsSOne:
     return PatternsSOne(
         num_pix=src[0].num_pix,
         ones=np.array([len(s.place_ones) for s in src]).astype(np.uint32),
@@ -81,15 +82,13 @@ def _from_sparse_patterns(src: list[SPARSE_PATTERN]) -> PatternsSOne:
 
 
 def patterns(
-    src: Union[
-        PATH_TYPE,
-        npt.NDArray[np.integer[T1]],
-        spmatrix,
-        int,
-        tuple[tuple[int, int], int],
-        PatternsSOne,
-        list[SPARSE_PATTERN],
-    ],
+    src: "PATH_TYPE"
+    "| npt.NDArray[np.integer[T1]]"
+    "| spmatrix"
+    "| int"
+    "| tuple[tuple[int, int], int]"
+    "| PatternsSOne"
+    "| Sequence[SPARSE_PATTERN]",
     /,
     *,
     start: Optional[int] = None,
