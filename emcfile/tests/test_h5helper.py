@@ -17,14 +17,36 @@ def test_h5group():
             np.testing.assert_array_equal(g["data"][...], rand_data)
 
 
-def test_h5path():
-    s = Path("/tmp/tmpl6ppiovx.h5::inten")
-    assert tuple(ef.h5path(s)) == (Path("/tmp/tmpl6ppiovx.h5"), "inten")
-    for s in ["few.h5", "few.h5::", "few.h5::/"]:
-        assert tuple(ef.h5path(s)) == (Path("few.h5"), "/")
-    assert tuple(ef.h5path("few.txt::")) == (Path("few.txt"), "/")
-    for s in ["fwef.txt", "fewf.txt::32::33"]:
-        assert not ef.check_h5path(s)
+@pytest.mark.parametrize(
+    "fname, result",
+    [
+        ("/tmp/tmpl6ppiovx.h5::inten", (Path("/tmp/tmpl6ppiovx.h5"), "inten")),
+        ("few.h5", (Path("few.h5"), "/")),
+        ("few.h5::", (Path("few.h5"), "/")),
+        ("few.h5::/", (Path("few.h5"), "/")),
+        ("few.txt::", (Path("few.txt"), "/")),
+        ("fwef.txt", None),
+        ("fewf.txt::32::33", None),
+    ],
+)
+def test_h5path(fname, result):
+    if result is None:
+        with pytest.raises(ValueError):
+            ef.h5path(fname)
+    else:
+        assert tuple(ef.h5path(fname)) == result
+
+
+@pytest.mark.parametrize(
+    "fname, result",
+    [
+        ("/tmp/vx.h5::inten", ef.h5path("/tmp/vx.h5", "inten")),
+        ("/tmp/vx.h5", ef.h5path("/tmp/vx.h5", "/")),
+        ("/tmp/vx.txt", Path("/tmp/vx.txt")),
+    ],
+)
+def test_make_path(fname, result):
+    assert ef.make_path(fname) == result
 
 
 def _compare_dict(d1, d2):

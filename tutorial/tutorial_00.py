@@ -148,3 +148,49 @@ plt.xlabel("$x$ / mm")
 plt.ylabel("$y$ / mm")
 
 # ## HDF5 helper
+# This module provides helper functions for working with HDF5 files. The following example shows how to use the `make_path` function to create a path object based on the input value:
+
+from pathlib import Path
+
+path1 = "/tmp/example.h5::dataset"  # Input is an HDF5 file path
+result1 = ef.h5path("/tmp/example.h5", "dataset")  # Expected result as H5Path tuple
+
+path2 = "/tmp/file.txt"  # Input is a regular file path
+result2 = Path("/tmp/file.txt")  # Expected result as Path object
+
+# Usage 1: Input is an HDF5 file path
+created_path1 = ef.make_path(path1)
+assert created_path1 == result1
+
+# Usage 2: Input is a regular file path
+created_path2 = ef.make_path(path2)
+assert created_path2 == result2
+
+# In the example above, the make_path function is used to create a path object based on the input value.
+# If the input value represents an HDF5 file path (detected by check_h5path), the function calls the `h5path`
+# function to parse the path and returns the resulting `H5Path` tuple.
+# Otherwise, it converts the input value to a regular `Path` object.
+# Please note that the `H5Path` type represents a tuple of a `Path` object and a dataset name as a string.
+
+
+# ## Reading and writing Python objects to an HDF5 file:
+# The `read_obj_h5` and `write_obj_h5` functions can be used to read and write Python objects to an HDF5 file, respectively. Here's an example:
+
+obj = {"name": "sz", "age": 27, "data": {"test": np.random.rand(3, 5)}}
+obj_path = "file.h5::person"
+
+# Writing the object to the HDF5 file
+ef.write_obj_h5(obj_path, obj, overwrite=True)
+
+# Reading the object from the HDF5 file
+read_obj = ef.read_obj_h5(obj_path)
+
+# Reading and writing NumPy arrays to files:
+# The read_array and write_array functions are used to read and write NumPy arrays to files, respectively. Here's an example:
+
+array = np.random.rand(10)
+filename = "file.h5::dataset"  # Specify the HDF5 file and dataset path
+ef.write_array(filename, array, overwrite=True)
+
+# Example: Reading a NumPy array from an HDF5 file dataset
+read_array = ef.read_array(filename)

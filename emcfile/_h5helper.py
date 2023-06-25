@@ -89,6 +89,11 @@ class H5Path:
         yield self.fn
         yield self.gn
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, H5Path):
+            return False
+        return self.fn == other.fn and self.gn == other.gn
+
     def exists(self) -> bool:
         if not self.fn.exists():
             return False
@@ -235,6 +240,10 @@ def h5path(src: PATH_TYPE, group: Optional[str] = None) -> H5Path:
 
 
 def make_path(s: PATH_TYPE) -> Union[Path, H5Path]:
+    """
+    The make_path function creates a path object based on the input value. It accepts a string or
+    an existing Path object and returns either a `Path` object or an `H5Path` object, depending on the input.
+    """
     if check_h5path(s):
         return h5path(s)
     return Path(cast(str, s))
