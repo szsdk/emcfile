@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import logging
-from collections import namedtuple
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import (
     Any,
     Dict,
-    Iterable,
+    NamedTuple,
     Optional,
     Tuple,
     Type,
@@ -27,9 +26,13 @@ from ._misc import pretty_size
 
 _log = logging.getLogger(__name__)
 
-SPARSE_PATTERN = namedtuple(
-    "SPARSE_PATTERN", ["num_pix", "place_ones", "place_multi", "count_multi"]
-)
+
+class SPARSE_PATTERN(NamedTuple):
+    num_pix: int
+    place_ones: npt.NDArray[np.uint32]
+    place_multi: npt.NDArray[np.uint32]
+    count_multi: npt.NDArray[np.int32]
+
 
 HANDLED_FUNCTIONS: Dict[Callable[..., Any], Callable[..., Any]] = {}
 
@@ -269,10 +272,10 @@ class PatternsSOne:
     def __array_function__(
         self,
         func: Callable[..., Any],
-        types: Sequence[Type[Any]],
-        args: Any,
-        kwargs: Any,
-    ) -> Any:
+        types: Iterable[Type[object]],
+        args: Iterable[object],
+        kwargs: Mapping[str, object],
+    ) -> object:
         if func not in HANDLED_FUNCTIONS:
             return NotImplemented
 
@@ -451,7 +454,7 @@ def _write_h5_v1(
 
 @implements(np.concatenate)
 def concatenate_PatternsSOne(
-    patterns_l: list[PatternsSOne], casting: str = "safe"
+    patterns_l: "Sequence[PatternsSOne] | list[PatternsSOne]", casting: str = "safe"
 ) -> PatternsSOne:
     "stack pattern sets together"
     num_pix = patterns_l[0].num_pix
@@ -470,7 +473,7 @@ def concatenate_PatternsSOne(
         )
         ans.check()
         return ans
-    if casting == "destroy":
+    if (casting == "destroy") and isinstance(patterns_l, list):
         ans = patterns_l.pop(0)
         while len(patterns_l) > 0:
             pat = patterns_l.pop(0)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Generator, Iterator, Optional, Union, cast
@@ -240,7 +241,7 @@ def make_path(s: PATH_TYPE) -> Union[Path, H5Path]:
 
 
 def check_remove_groups(
-    fp: Union[h5py.Group, h5py.File], groups: list[str], overwrite: bool
+    fp: Union[h5py.Group, h5py.File], groups: Iterable[str], overwrite: bool
 ) -> None:
     attrs = fp.attrs.keys()
     for g in groups:
@@ -265,10 +266,13 @@ def _check_exists(
     return True
 
 
+_T = Union[Mapping[str, "_T"], npt.NDArray[Any], str, int, float, bool]
+
+
 def _write_single(
     group: h5py.Group,
     k: str,
-    v: Union[dict[str, npt.NDArray[Any]], npt.NDArray[Any]],
+    v: _T,
     overwrite: bool,
     verbose: bool,
 ) -> None:
@@ -283,7 +287,7 @@ def _write_single(
 
 
 def _write_group(
-    fp: h5py.File, group_name: str, obj: dict[str, Any], overwrite: bool, verbose: bool
+    fp: h5py.File, group_name: str, obj: _T, overwrite: bool, verbose: bool
 ) -> None:
     if not isinstance(obj, dict):
         raise Exception(f"Cannot write type {type(obj)}")
@@ -306,7 +310,7 @@ def _write_group(
 
 def write_obj_h5(
     fn: Union[str, H5Path],
-    obj: dict[str, Any],
+    obj: _T,
     overwrite: bool = False,
     verbose: bool = False,
 ) -> None:
@@ -324,7 +328,7 @@ def write_obj_h5(
         _write_group(fp, f.gn, obj, overwrite, verbose)
 
 
-def _read_group(g: Union[h5py.File, h5py.Group]) -> dict[str, Any]:
+def _read_group(g: Union[h5py.File, h5py.Group]) -> _T:
     ans = dict()
     for k, v in g.attrs.items():
         ans[k] = v
@@ -336,7 +340,7 @@ def _read_group(g: Union[h5py.File, h5py.Group]) -> dict[str, Any]:
     return ans
 
 
-def read_obj_h5(fn: Union[str, H5Path]) -> dict[str, Any]:
+def read_obj_h5(fn: Union[str, H5Path]) -> _T:
     """
     The inverse operation of `save_obj`. Read a dictionary from a h5 group.
     Parameters

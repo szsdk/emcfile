@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
 from enum import IntEnum
 from functools import reduce
@@ -148,8 +148,12 @@ class Detector:
         return ans
 
     def __array_function__(
-        self, func: Callable[..., Any], types: list[Type[Any]], args: Any, kwargs: Any
-    ) -> Any:
+        self,
+        func: Callable[..., Any],
+        types: Iterable[Type[object]],
+        args: Iterable[object],
+        kwargs: Mapping[str, object],
+    ) -> object:
         if func not in HANDLED_FUNCTIONS:
             return NotImplemented
 
