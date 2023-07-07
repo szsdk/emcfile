@@ -1,3 +1,4 @@
+from ._collector import PatternsSOneCollector
 from ._detector import (
     Detector,
     DetRender,
@@ -21,7 +22,7 @@ from ._h5helper import (
     write_array,
     write_obj_h5,
 )
-from ._pattern_sone import PatternsSOne, write_patterns, SPARSE_PATTERN
+from ._pattern_sone import SPARSE_PATTERN, PatternsSOne, write_patterns
 from ._pattern_sone_file import PatternsSOneEMC, PatternsSOneH5, file_patterns
 from ._patterns import patterns
 
@@ -51,6 +52,7 @@ __all__ = [
     "write_patterns",
     "PatternsSOneEMC",
     "PatternsSOneH5",
+    "PatternsSOneCollector",
     "file_patterns",
 ]
 
