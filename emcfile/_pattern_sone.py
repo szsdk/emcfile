@@ -454,7 +454,7 @@ def _write_h5_v1(
 
 @implements(np.concatenate)
 def concatenate_PatternsSOne(
-    patterns_l: "Sequence[PatternsSOne] | list[PatternsSOne]", casting: str = "safe"
+    patterns_l: "Sequence[PatternsSOne]", casting: str = "safe"
 ) -> PatternsSOne:
     "stack pattern sets together"
     num_pix = patterns_l[0].num_pix
