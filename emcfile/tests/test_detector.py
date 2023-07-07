@@ -100,6 +100,7 @@ def test_getitem(det):
 def test_get_2ddet(det):
     det_2d = ef.get_2ddet(det)
     ef.get_2ddet(det, inplace=True)
+    det.check_ewald_rad()
     assert ef.det_isclose(det, det_2d)
     assert det_2d.ndim == 2
 
@@ -134,3 +135,14 @@ def test_concatenate(det):
     det_sym = deepcopy(det)
     det_sym.coor *= np.array([-1, -1, 1])
     assert np.concatenate([det, det_sym]).num_pix == 2 * det.num_pix
+
+
+def test_2ddet():
+    l_half = int(10 * 0.5)
+    s = np.linspace(-l_half, l_half, 20)
+    xy = np.meshgrid(s, s)
+    coor = np.array([i.flatten() for i in xy]).T
+    num_pix = coor.shape[0]
+    mask = np.zeros(num_pix, "i4")
+    factor = np.ones(num_pix)
+    ef.detector(coor=coor, mask=mask, factor=factor, detd=-1, ewald_rad=np.inf)
