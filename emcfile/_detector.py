@@ -124,8 +124,7 @@ class Detector:
 
     def __getitem__(
         self,
-        index:
-        "slice | Sequence[PixelType] | npt.NDArray[np.bool_] |"
+        index: "slice | Sequence[PixelType] | npt.NDArray[np.bool_] |"
         "npt.NDArray[np.integer[Any]]",
     ) -> Detector:
         if isinstance(index, Sequence):
@@ -176,7 +175,8 @@ class Detector:
             return True
         r = np.linalg.norm(vec[:3]) / vec[3]
         if not np.isclose(self.ewald_rad, r, rtol=rtol, atol=atol):
-            logging.warning("det Ewald radius: %f, calculated: %f", self.ewald_rad, r)
+            logging.warning("det Ewald radius: %f, calculated: %f",
+                            self.ewald_rad, r)
             return False
         return True
 
@@ -371,8 +371,7 @@ def detector(
         det.norm()
     if check_consistency and (not det.check_ewald_rad()):
         raise ValueError(
-            "Ewald radius is not consistent with given detector coordinates."
-        )
+            "Ewald radius is not consistent with given detector coordinates.")
     return det
 
 
@@ -441,7 +440,8 @@ def det_isclose(det1: Detector,
     return True
 
 
-def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
+def get_ewald_vec(coor: npt.NDArray[Any],
+                  rtol: float = 1e-5) -> npt.NDArray[np.float64]:
     """
     Calcualte the center of a sphere with a point cloud distributed on it.
 
@@ -469,7 +469,7 @@ def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
             break
     if np.linalg.norm(n0) < 1e-1:
         raise ValueError("The input coor is degenerated to a line.")
-    
+
     coor_shift = coor - coor[ca]
     with np.errstate(divide="ignore", invalid="ignore"):
         coor_shift /= np.linalg.norm(coor_shift, axis=1, keepdims=True)
@@ -482,27 +482,28 @@ def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
         a = np.linalg.norm(x - r, axis=1)
         return float(a.std())
 
-    res = minimize(
-        _f,
-        np.array([-0.0, 0.0, -1.0]),
-        method="Nelder-Mead",
-        options={
-            "xatol": 1e-8,
-            "disp": False
-        },
-        args=(coor if len(coor) < 32 else coor[::len(coor) // 32], ),
-    )
-    res = minimize(
-        _f,
-        res.x,
-        method="Nelder-Mead",
-        options={
-            "xatol": 1e-8,
-            "disp": False
-        },
-        args=(coor, ),
-    )
-    return np.concatenate([res.x, [1.0]])
+    step = max(len(coor) // 32, 1)
+    vec0 = None
+    while step > 0:
+        coor_opt = coor[::step]
+        res = minimize(
+            _f,
+            coor.mean(axis=0),
+            method="Nelder-Mead",
+            options={
+                "xatol": 1e-8,
+                "disp": False
+            },
+            args=(coor_opt, ),
+        )
+        if vec0 is None:
+            if step == 1:
+                return np.concatenate([res.x, [1.0]])
+        elif np.linalg.norm(res.x - vec0) / np.linalg.norm(res.x) < rtol:
+            return np.concatenate([res.x, [1.0]])
+        vec0 = res.x
+        step //= 2
+    raise ValueError("Can not find a solution.")
 
 
 def xyz_to_cxy(xyz: npt.NDArray[Any], ewald_rad: float,
