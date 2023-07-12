@@ -1,8 +1,9 @@
 from collections.abc import Sequence
-from typing import Any, Optional, TypeAlias, Union, cast
+from typing import Any, Optional, Union, cast
 
 import numpy as np
 import numpy.typing as npt
+from typing_extensions import TypeAlias
 
 from ._h5helper import PATH_TYPE
 from ._pattern_sone import PatternsSOne, write_patterns
