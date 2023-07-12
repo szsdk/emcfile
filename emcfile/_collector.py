@@ -4,7 +4,8 @@ from typing import Any, Optional, TypeAlias, Union, cast
 import numpy as np
 import numpy.typing as npt
 
-from ._pattern_sone import PatternsSOne
+from ._h5helper import PATH_TYPE
+from ._pattern_sone import PatternsSOne, write_patterns
 from ._patterns import patterns
 
 NP_IMG: TypeAlias = npt.NDArray[np.integer[Any]]
@@ -113,3 +114,28 @@ class PatternsSOneCollector:
         """
         self._clear_buffer()
         return self._patterns
+
+    def write(
+        self,
+        path: PATH_TYPE,
+        *,
+        h5version: str = "2",
+        overwrite: bool = False,
+        buffer_size: int = 1073741824,  # 2 ** 30 bytes = 1 GB
+    ) -> None:
+        """
+        Write the collected patterns to a file.
+
+        Parameters
+        ----------
+        path : PATH_TYPE
+            Path to the file.
+        h5version : str
+            HDF5 file format version.
+        overwrite : bool
+            Whether to overwrite the file if it exists.
+        buffer_size : int
+            Buffer size for writing the patterns to the file.
+        """
+        self._clear_buffer()
+        write_patterns(self._patterns, path)
