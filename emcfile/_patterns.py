@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Optional, TypeVar, cast
@@ -16,7 +15,6 @@ from ._pattern_sone_file import file_patterns
 
 __all__ = ["patterns"]
 
-_log = logging.getLogger(__name__)
 
 T1 = TypeVar("T1", bound=npt.NBitBase)
 

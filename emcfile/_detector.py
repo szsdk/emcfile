@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import logging
 import itertools
+import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
 from enum import IntEnum
@@ -43,11 +43,13 @@ class PixelType(IntEnum):
 
 
 class Detector:
-    dtype = np.dtype([
-        ("coor", "f8", 3),
-        ("factor", "f4"),
-        ("mask", "i4"),
-    ])
+    dtype = np.dtype(
+        [
+            ("coor", "f8", 3),
+            ("factor", "f4"),
+            ("mask", "i4"),
+        ]
+    )
 
     def __init__(
         self,
@@ -94,8 +96,7 @@ class Detector:
 """
         for i, pt in enumerate(PixelType):
             n = np.sum(self.mask == pt)
-            ans = ans + (f"  Mask: {pt} - {n}\n"
-                         if i == 0 else f"        {pt} - {n}\n")
+            ans = ans + (f"  Mask: {pt} - {n}\n" if i == 0 else f"        {pt} - {n}\n")
         return ans
 
     @property
@@ -127,13 +128,12 @@ class Detector:
         index: "slice | Sequence[PixelType] | npt.NDArray[np.bool_] |"
         "npt.NDArray[np.integer[Any]]",
     ) -> Detector:
+        idx = index
         if isinstance(index, Sequence):
             if len(index) == 0:
                 raise ValueError("0-length input")
             if isinstance(index[0], PixelType):
                 idx = reduce(np.logical_or, [self.mask == pt for pt in index])
-        else:
-            idx = index
         return Detector(
             self.coor[idx],
             self.factor[idx],
@@ -167,16 +167,13 @@ class Detector:
             return NotImplemented
         return HANDLED_FUNCTIONS[func](*args, **kwargs)
 
-    def check_ewald_rad(self,
-                        rtol: float = 1e-04,
-                        atol: float = 1e-06) -> bool:
+    def check_ewald_rad(self, rtol: float = 1e-04, atol: float = 1e-06) -> bool:
         vec = get_ewald_vec(self.coor)
         if vec[3] == 0 and np.isinf(self.ewald_rad):
             return True
         r = np.linalg.norm(vec[:3]) / vec[3]
         if not np.isclose(self.ewald_rad, r, rtol=rtol, atol=atol):
-            logging.warning("det Ewald radius: %f, calculated: %f",
-                            self.ewald_rad, r)
+            logging.warning("det Ewald radius: %f, calculated: %f", self.ewald_rad, r)
             return False
         return True
 
@@ -199,26 +196,25 @@ def implements(np_function: Callable[..., Any]) -> Callable[[FT], FT]:
 @implements(np.concatenate)
 def concatenate_Detector(dets: Sequence[Detector]) -> Detector:
     ewald_rad = dets[0].ewald_rad
-    np.testing.assert_array_equal([d.ewald_rad for d in dets],
-                                  dets[0].ewald_rad)
+    np.testing.assert_array_equal([d.ewald_rad for d in dets], dets[0].ewald_rad)
     detd = dets[0].detd
     np.testing.assert_array_equal([d.detd for d in dets], dets[0].detd)
     data = np.concatenate([np.asarray(d) for d in dets], axis=0)
-    return Detector(data["coor"], data["factor"], data["mask"], detd,
-                    ewald_rad)
+    return Detector(data["coor"], data["factor"], data["mask"], detd, ewald_rad)
 
 
 def _from_asciidet(fname: Path) -> Detector:
     with fname.open() as fp:
         num_pix, detd, ewald_rad = [
-            f(d) for f, d in zip([int, float, float],
-                                 fp.readline().strip().split(" "))
+            f(d) for f, d in zip([int, float, float], fp.readline().strip().split(" "))
         ]
     det = np.genfromtxt(
         fname,
         skip_header=1,
         dtype=Detector.dtype,
     )
+    if num_pix != det.shape[0]:
+        raise ValueError(f"Number of pixels in {fname} does not match header.")
     return Detector(
         det["coor"],
         det["factor"],
@@ -281,18 +277,15 @@ def _init_detector(
     coor: npt.NDArray["np.floating[T1]"],
     mask: npt.NDArray["np.integer[T2]"],
     factor: npt.NDArray["np.floating[T1]"],
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int32],
-           npt.NDArray[np.float64]]:
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int32], npt.NDArray[np.float64]]:
     if not (coor.shape[0] == mask.shape[0] == factor.shape[0]):
-        raise ValueError(
-            "`coor`, `mask`, `factor` should have the same length.")
+        raise ValueError("`coor`, `mask`, `factor` should have the same length.")
     if coor.shape[1] == 2:
         new_coor = np.zeros((coor.shape[0], 3), coor.dtype)
         new_coor[:, :2] = coor
     else:
         new_coor = coor
-    return new_coor.astype(np.float64), mask.astype(np.int32), factor.astype(
-        np.float64)
+    return new_coor.astype(np.float64), mask.astype(np.int32), factor.astype(np.float64)
 
 
 def detector(
@@ -349,11 +342,15 @@ def detector(
 
     det = None
     if src is None:
-        if ((coor is not None) and (mask is not None) and (factor is not None)
-                and (detd is not None) and (ewald_rad is not None)):
+        if (
+            (coor is not None)
+            and (mask is not None)
+            and (factor is not None)
+            and (detd is not None)
+            and (ewald_rad is not None)
+        ):
             coor_, mask_, factor_ = _init_detector(coor, mask, factor)
-            det = Detector(coor_, factor_, mask_, float(detd),
-                           float(ewald_rad))
+            det = Detector(coor_, factor_, mask_, float(detd), float(ewald_rad))
     elif isinstance(src, Detector):
         det = Detector(
             src.coor if coor is None else coor.astype(np.float64),
@@ -371,7 +368,8 @@ def detector(
         det.norm()
     if check_consistency and (not det.check_ewald_rad()):
         raise ValueError(
-            "Ewald radius is not consistent with given detector coordinates.")
+            "Ewald radius is not consistent with given detector coordinates."
+        )
     return det
 
 
@@ -395,19 +393,18 @@ def get_2ddet(det: Detector, /, *, inplace: bool = False) -> Detector:
         ans = det
     else:
         ans = deepcopy(det)
-    ans.coor[:, :2] = xyz_to_cxy(ans.coor, det.ewald_rad,
-                                 -int(np.sign(det.coor[:, 2].sum())))
+    ans.coor[:, :2] = xyz_to_cxy(
+        ans.coor, det.ewald_rad, -int(np.sign(det.coor[:, 2].sum()))
+    )
 
     ans.coor[:, 2] = 0.0
     ans.ewald_rad = np.inf
     return ans
 
 
-def det_isclose(det1: Detector,
-                det2: Detector,
-                /,
-                *,
-                rtol: float = 1e-6) -> bool:  # pragma: no cover
+def det_isclose(
+    det1: Detector, det2: Detector, /, *, rtol: float = 1e-6
+) -> bool:  # pragma: no cover
     """
     Check whether two detectors are close to each other.
 
@@ -440,8 +437,7 @@ def det_isclose(det1: Detector,
     return True
 
 
-def get_ewald_vec(coor: npt.NDArray[Any],
-                  rtol: float = 1e-5) -> npt.NDArray[np.float64]:
+def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
     """
     Calcualte the center of a sphere with a point cloud distributed on it.
 
@@ -482,32 +478,26 @@ def get_ewald_vec(coor: npt.NDArray[Any],
         a = np.linalg.norm(x - r, axis=1)
         return float(a.std())
 
-    step = max(len(coor) // 32, 1)
-    vec0 = None
-    while step > 0:
-        coor_opt = coor[::step]
-        res = minimize(
-            _f,
-            coor.mean(axis=0),
-            method="Nelder-Mead",
-            options={
-                "xatol": 1e-8,
-                "disp": False
-            },
-            args=(coor_opt, ),
-        )
-        if vec0 is None:
-            if step == 1:
-                return np.concatenate([res.x, [1.0]])
-        elif np.linalg.norm(res.x - vec0) / np.linalg.norm(res.x) < rtol:
-            return np.concatenate([res.x, [1.0]])
-        vec0 = res.x
-        step //= 2
-    raise ValueError("Can not find a solution.")
+    res = minimize(
+        _f,
+        np.array([-0.0, 0.0, -1.0]),
+        method="Nelder-Mead",
+        options={"xatol": 1e-8, "disp": False},
+        args=(coor if len(coor) < 32 else coor[:: len(coor) // 32],),
+    )
+    res = minimize(
+        _f,
+        res.x,
+        method="Nelder-Mead",
+        options={"xatol": 1e-8, "disp": False},
+        args=(coor,),
+    )
+    return np.concatenate([res.x, [1.0]])
 
 
-def xyz_to_cxy(xyz: npt.NDArray[Any], ewald_rad: float,
-               direction: int) -> npt.NDArray[np.float64]:
+def xyz_to_cxy(
+    xyz: npt.NDArray[Any], ewald_rad: float, direction: int
+) -> npt.NDArray[np.float64]:
     is_1d = xyz.ndim == 1
     if is_1d:
         xyz = xyz[None, :]
@@ -515,14 +505,15 @@ def xyz_to_cxy(xyz: npt.NDArray[Any], ewald_rad: float,
     return ans.ravel() if is_1d else ans
 
 
-def cxy_to_xyz(cxy: npt.NDArray[Any], ewald_rad: float,
-               direction: int) -> npt.NDArray[np.float64]:
+def cxy_to_xyz(
+    cxy: npt.NDArray[Any], ewald_rad: float, direction: int
+) -> npt.NDArray[np.float64]:
     is_1d = cxy.ndim == 1
     if is_1d:
         cxy = cxy[None, :]
     cxy = cxy / ewald_rad
     xyz = np.empty((cxy.shape[0], 3))
-    cr = 1 / np.sqrt(1 + np.linalg.norm(cxy, axis=1)**2)
+    cr = 1 / np.sqrt(1 + np.linalg.norm(cxy, axis=1) ** 2)
     xyz[:, :2] = ewald_rad * cxy * cr.reshape(-1, 1)
     xyz[:, 2] = direction * ewald_rad * (cr - 1)
     return xyz.ravel() if is_1d else xyz
@@ -557,8 +548,9 @@ class DetRender:
             np.zeros((self.frame_shape[1], self.frame_shape[0]), dtype="f8"),
             mask=self._mask,
         )
-        np.add.at(self._count, (self.xy[:, 1], self.xy[:, 0]),
-                  np.ones(self.xy.shape[0]))
+        np.add.at(
+            self._count, (self.xy[:, 1], self.xy[:, 0]), np.ones(self.xy.shape[0])
+        )
         self._count /= cast(np.float64, self._count.mean())
 
     def frame_pixels(self) -> list[npt.NDArray[np.float64]]:
@@ -590,8 +582,8 @@ class DetRender:
         return cxy_to_xyz(cxy, self._det.ewald_rad, self.direction)
 
     def frame_extent(
-            self,
-            pixel_unit: bool = True) -> tuple[float, float, float, float]:
+        self, pixel_unit: bool = True
+    ) -> tuple[float, float, float, float]:
         xmin, ymin = self.cxy.min(axis=0)
         dx, dy = self.frame_shape
         if pixel_unit:
@@ -631,14 +623,14 @@ def grid_position(shape: tuple[int, ...]) -> list[npt.NDArray[np.float64]]:
     return cast(
         list[npt.NDArray[np.float64]],
         np.meshgrid(
-            *[np.linspace(-(s - 1) / 2, (s - 1) / 2, s) for s in shape],
-            indexing="ij"),
+            *[np.linspace(-(s - 1) / 2, (s - 1) / 2, s) for s in shape], indexing="ij"
+        ),
     )
 
 
-def get_3ddet_from_shape(shape: tuple[int, int],
-                         det: Detector,
-                         apply_mask: bool = True) -> Detector:
+def get_3ddet_from_shape(
+    shape: tuple[int, int], det: Detector, apply_mask: bool = True
+) -> Detector:
     """
     This fucntion resample the given detector `det` into a new detector  whose pixels
     are aligned in a grid with shape `shape`.
@@ -666,20 +658,18 @@ def get_3ddet_from_shape(shape: tuple[int, int],
     if direction == 0:
         direction = 1
     coor = cxy_to_xyz(
-        np.array(grid_position(shape)).reshape(2, -1).T, ewald_rad, direction)
+        np.array(grid_position(shape)).reshape(2, -1).T, ewald_rad, direction
+    )
 
     det_r = np.linalg.norm(det.coor[:, :2], axis=1)
-    ds = binned_statistic(det_r,
-                          det.factor,
-                          statistic="mean",
-                          bins=int(det_r.max() - det_r.min()) + 1)
+    ds = binned_statistic(
+        det_r, det.factor, statistic="mean", bins=int(det_r.max() - det_r.min()) + 1
+    )
     y = ds.statistic
     x = (ds.bin_edges[:-1] + ds.bin_edges[1:]) / 2
-    f = interp1d(x,
-                 y,
-                 assume_sorted=False,
-                 fill_value=(y.max(), y.min()),
-                 bounds_error=False)
+    f = interp1d(
+        x, y, assume_sorted=False, fill_value=(y.max(), y.min()), bounds_error=False
+    )
     r = np.linalg.norm(coor[:, :2], axis=1)
     factor = f(r)
     mask = np.full_like(factor, PixelType.GOOD, int)

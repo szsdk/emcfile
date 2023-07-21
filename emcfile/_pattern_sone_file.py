@@ -201,7 +201,7 @@ class PatternsSOneEMC(PatternsSOneFile):
 
 
 def read_indexed_array_h5(
-    fin: "h5py.File | h5py.Group",
+    fin: h5py.Dataset,
     idx_con: npt.NDArray["np.integer[T1]"],
     arr_idx: npt.NDArray["np.integer[T1]"],
 ) -> npt.NDArray[np.int32]:
@@ -240,8 +240,8 @@ class PatternsSOneH5(PatternsSOneFile):
     def __init__(self, fn: "str | H5Path"):
         self._fn = h5path(fn)
         with self._fn.open_group() as (_, gp):
-            self.num_data = gp.attrs["num_data"]
-            self.num_pix = gp.attrs["num_pix"]
+            self.num_data = int(gp.attrs["num_data"])
+            self.num_pix = int(gp.attrs["num_pix"])
         self.ndim = 2
         self.shape = (self.num_data, self.num_pix)
         self._init_idx = False

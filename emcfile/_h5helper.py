@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Generator, Iterator, Optional, Union, cast
+from typing import Any, Generator, Optional, Union, cast
 
 import h5py
 import numpy as np
@@ -43,7 +43,7 @@ def parse_h5path(fname: "str | Path") -> tuple[Path, str]:
 @contextmanager
 def h5group(
     fname: str, *args: Any, add: bool = True, **kargs: Any
-) -> Iterator[tuple[h5py.File, h5py.Group]]:
+) -> Generator[tuple[h5py.File, h5py.Group], Any, Any]:
     """
     Parse a string to a tuple (fptr:h5py.File, group:h5py.Group)
 
@@ -64,7 +64,10 @@ def h5group(
     with h5py.File(fn, *args, **kargs) as fptr:
         if (gn not in fptr) and add:
             fptr.create_group(gn)
-        yield fptr, fptr[gn]
+        g = fptr[gn]
+        if not isinstance(g, h5py.Group):
+            raise Exception(f"{gn} is not a group.")
+        yield fptr, g
 
 
 class H5Path:
@@ -101,7 +104,7 @@ class H5Path:
             return self.gn in fp
 
     @contextmanager
-    def open(self, *args: Any, **kargs: Any) -> h5py.File:
+    def open(self, *args: Any, **kargs: Any) -> Iterator[h5py.File]:
         with h5py.File(self.fn, *args, **kargs) as fptr:
             yield fptr
 
@@ -113,7 +116,7 @@ class H5Path:
         track_order: Optional[bool] = None,
         *args: Any,
         **kargs: Any,
-    ) -> Generator[tuple[h5py.File, h5py.Group], None, None]:
+    ) -> Generator[tuple[h5py.File, Union[h5py.Dataset, h5py.Group]], Any, Any]:
         """
         group_mode : [r|a]
         """
@@ -125,7 +128,10 @@ class H5Path:
                     fptr.create_group(self.gn, track_order=track_order)
             else:
                 raise ValueError(group_mode)
-            yield fptr, fptr[self.gn]
+            g = fptr[self.gn]
+            if not isinstance(g, (h5py.Dataset, h5py.Group)):
+                raise Exception(f"{self.gn} is not a group.")
+            yield fptr, g
 
     def __str__(self) -> str:
         return f"{self.fn}::{self.gn}"
@@ -279,24 +285,32 @@ _T = Union[Mapping[str, "_T"], npt.NDArray[Any], str, int, float, bool]
 
 
 def _write_single(
-    group: h5py.Group,
+    group: Union[h5py.File, h5py.Group, h5py.Dataset],
     k: str,
     v: _T,
     overwrite: bool,
     verbose: bool,
 ) -> None:
     if isinstance(v, np.ndarray):
+        if not isinstance(group, (h5py.File, h5py.Group)):
+            raise Exception(f"Cannot write type {type(v)} to {type(group)}")
         if _check_exists(k, group, overwrite, verbose):
             del group[k]
         group.create_dataset(k, data=v)
     elif isinstance(v, dict):
+        if not isinstance(group, (h5py.File, h5py.Group)):
+            raise Exception(f"Cannot write type {type(v)} to {type(group)}")
         _write_group(group, k, v, overwrite, verbose)
     else:
         group.attrs[k] = v
 
 
 def _write_group(
-    fp: h5py.File, group_name: str, obj: _T, overwrite: bool, verbose: bool
+    fp: Union[h5py.File, h5py.Group],
+    group_name: str,
+    obj: _T,
+    overwrite: bool,
+    verbose: bool,
 ) -> None:
     if not isinstance(obj, dict):
         raise Exception(f"Cannot write type {type(obj)}")
@@ -310,7 +324,8 @@ def _write_group(
         fp.create_group(group_name)
 
     g = fp[group_name]
-
+    if isinstance(g, h5py.Datatype):
+        raise NotImplementedError("The support for h5py.Datatype is not implemented.")
     for k, v in obj.items():
         _write_single(g, k, v, overwrite, verbose)
     if obj_dot is not None:
@@ -337,7 +352,7 @@ def write_obj_h5(
         _write_group(fp, f.gn, obj, overwrite, verbose)
 
 
-def _read_group(g: Union[h5py.File, h5py.Group]) -> dict[str, _T]:
+def _read_group(g: Union[h5py.File, h5py.Group]) -> _T:
     ans = dict()
     for k, v in g.attrs.items():
         ans[k] = v
@@ -349,7 +364,7 @@ def _read_group(g: Union[h5py.File, h5py.Group]) -> dict[str, _T]:
     return ans
 
 
-def read_obj_h5(fn: Union[str, H5Path]) -> dict[str, Any]:
+def read_obj_h5(fn: Union[str, H5Path]) -> _T:
     """
     The inverse operation of `save_obj`. Read a dictionary from a h5 group.
     Parameters
