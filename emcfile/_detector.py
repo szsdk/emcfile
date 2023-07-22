@@ -9,6 +9,7 @@ from functools import reduce
 from pathlib import Path
 from typing import Any, Optional, Type, TypeVar, cast
 
+import h5py
 import numpy as np
 import numpy.typing as npt
 from numpy import ma
@@ -239,6 +240,7 @@ def _write_asciidet(det: Detector, fname: Path) -> None:
 def _write_h5det(det: Detector, fname: H5Path) -> None:
     _log.info(f"Writing HDF5 detector to {fname}")
     with fname.open_group("a", "a") as (_, fptr):
+        assert isinstance(fptr, (h5py.Group, h5py.File))
         for s in ["qx", "qy", "qz", "corr", "mask", "detd", "ewald_rad"]:
             if s in fptr:
                 del fptr[s]

@@ -23,7 +23,12 @@ from ._h5helper import (
     write_obj_h5,
 )
 from ._pattern_sone import SPARSE_PATTERN, PatternsSOne, write_patterns
-from ._pattern_sone_file import PatternsSOneEMC, PatternsSOneH5, file_patterns
+from ._pattern_sone_file import (
+    PatternsSOneEMC,
+    PatternsSOneFile,
+    PatternsSOneH5,
+    file_patterns,
+)
 from ._patterns import patterns
 
 __all__ = [
@@ -50,6 +55,7 @@ __all__ = [
     "patterns",
     "PatternsSOne",
     "write_patterns",
+    "PatternsSOneFile",
     "PatternsSOneEMC",
     "PatternsSOneH5",
     "PatternsSOneCollector",
