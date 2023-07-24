@@ -25,7 +25,7 @@ class PatternsSOneCollector:
     """
 
     def __init__(self, max_buffer_size: int = 128):
-        self.max_buffer_size = 128
+        self.max_buffer_size = max_buffer_size
         self._patterns: list[PatternsSOne] = []
         self._buffer: list[NP_IMG] = []
         self._num_pix: Optional[int] = None

@@ -19,18 +19,6 @@ __all__ = ["patterns"]
 T1 = TypeVar("T1", bound=npt.NBitBase)
 
 
-def _get_start_end(
-    num_data: int,
-    start: Optional[int],
-    end: Optional[int],
-) -> tuple[int, int]:
-    if start is not None and end is not None:
-        return int(start), int(end)
-    start = 0 if start is None else start
-    end = num_data if end is None else end
-    return int(start), int(end)
-
-
 def dense_to_PatternsSOne(arr: npt.NDArray["np.integer[T1]"]) -> PatternsSOne:
     idx = arr == 1
     ones = idx.sum(axis=1)

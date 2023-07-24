@@ -59,7 +59,7 @@ def divide_range(s: int, e: int, n: int) -> List[Tuple[int, int]]:
     base = (e - s) // n
     size = (e - s) % n
     ans = []
-    for i in range(size):
+    for _ in range(size):
         ans.append((s, s + base + 1))
         s += base + 1
     if base == 0:

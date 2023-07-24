@@ -11,9 +11,9 @@ import emcfile as ef
 def test_h5group():
     rand_data = np.random.rand(222)
     with tempfile.NamedTemporaryFile(suffix=".h5") as f:
-        with ef.h5group(f"{f.name}::group", "a") as (fptr, g):
+        with ef.h5group(f"{f.name}::group", "a") as (_, g):
             g.create_dataset("data", data=rand_data)
-        with ef.h5group(f"{f.name}::group", "r") as (fptr, g):
+        with ef.h5group(f"{f.name}::group", "r") as (_, g):
             np.testing.assert_array_equal(g["data"][...], rand_data)
 
 
