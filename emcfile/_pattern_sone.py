@@ -19,7 +19,7 @@ from typing import (
 import h5py
 import numpy as np
 import numpy.typing as npt
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, hstack
 
 from ._h5helper import PATH_TYPE, H5Path, check_remove_groups, make_path
 from ._misc import pretty_size
@@ -234,8 +234,15 @@ class PatternsSOne:
         *,
         h5version: str = "2",
         overwrite: bool = False,
+        compression=None,
     ) -> None:
-        return write_patterns([self], path, h5version=h5version, overwrite=overwrite)
+        return write_patterns(
+            [self],
+            path,
+            h5version=h5version,
+            overwrite=overwrite,
+            compression=compression,
+        )
 
     def _get_sparse_ones(self) -> csr_matrix:
         _one = np.ones(1, "i4")
@@ -363,7 +370,11 @@ def _write_bin(datas: Sequence[PatternsSOne], path: Path, overwrite: bool) -> No
 
 
 def _write_h5_v2(
-    datas: Sequence[PatternsSOne], path: H5Path, overwrite: bool, buffer_size: int
+    datas: Sequence[PatternsSOne],
+    path: H5Path,
+    overwrite: bool,
+    buffer_size: int,
+    compression,
 ) -> None:
     num_ones = np.sum([d.ones.sum() for d in datas])
     num_multi = np.sum([d.multi.sum() for d in datas])
@@ -373,11 +384,17 @@ def _write_h5_v2(
         check_remove_groups(
             fp, ["ones", "multi", "place_ones", "place_multi", "count_multi"], overwrite
         )
-        fp.create_dataset("ones", (num_data,), dtype="i4")
-        fp.create_dataset("multi", (num_data,), dtype="i4")
-        fp.create_dataset("place_ones", (num_ones,), dtype="i4")
-        fp.create_dataset("place_multi", (num_multi,), dtype="i4")
-        fp.create_dataset("count_multi", (num_multi,), dtype="i4")
+        fp.create_dataset("ones", (num_data,), dtype="i4", compression=compression)
+        fp.create_dataset("multi", (num_data,), dtype="i4", compression=compression)
+        fp.create_dataset(
+            "place_ones", (num_ones,), dtype="i4", compression=compression
+        )
+        fp.create_dataset(
+            "place_multi", (num_multi,), dtype="i4", compression=compression
+        )
+        fp.create_dataset(
+            "count_multi", (num_multi,), dtype="i4", compression=compression
+        )
         fp.attrs["num_pix"] = num_pix
         fp.attrs["num_data"] = num_data
         fp.attrs["version"] = "2"
@@ -395,6 +412,7 @@ def write_patterns(
     h5version: str = "2",
     overwrite: bool = False,
     buffer_size: int = 1073741824,  # 2 ** 30 bytes = 1 GB
+    compression=None,
 ) -> None:
     # TODO: performance test
     f = make_path(path)
@@ -410,7 +428,7 @@ def write_patterns(
             )
             return _write_h5_v1(datas[0], f, overwrite)
         elif h5version == "2":
-            return _write_h5_v2(datas, f, overwrite, buffer_size)
+            return _write_h5_v2(datas, f, overwrite, buffer_size, compression)
         else:
             raise ValueError(f"The h5version(={h5version}) should be '1' or '2'.")
     raise ValueError(f"Wrong file name {path}")
@@ -454,37 +472,50 @@ def _write_h5_v1(
 
 @implements(np.concatenate)
 def concatenate_PatternsSOne(
-    patterns_l: "Sequence[PatternsSOne]", casting: str = "safe"
+    patterns_l: "Sequence[PatternsSOne]", axis=0, casting: str = "safe"
 ) -> PatternsSOne:
     "stack pattern sets together"
-    num_pix = patterns_l[0].num_pix
-    for d in patterns_l:
-        if d.num_pix != num_pix:
-            raise ValueError(
-                "The numbers of pixels of each pattern are not consistent."
+    if axis == 0:
+        num_pix = patterns_l[0].num_pix
+        for d in patterns_l:
+            if d.num_pix != num_pix:
+                raise ValueError(
+                    "The numbers of pixels of each pattern are not consistent."
+                )
+        if casting == "safe":
+            ans = PatternsSOne(
+                num_pix,
+                *[
+                    np.concatenate([getattr(d, g) for d in patterns_l])
+                    for g in PatternsSOne.ATTRS
+                ],
             )
-    if casting == "safe":
-        ans = PatternsSOne(
-            num_pix,
-            *[
-                np.concatenate([getattr(d, g) for d in patterns_l])
-                for g in PatternsSOne.ATTRS
-            ],
+            ans.check()
+            return ans
+        if (casting == "destroy") and isinstance(patterns_l, list):
+            ans = patterns_l.pop(0)
+            while len(patterns_l) > 0:
+                pat = patterns_l.pop(0)
+                pat = {g: getattr(pat, g) for g in PatternsSOne.ATTRS}
+                for g in PatternsSOne.ATTRS:
+                    b = pat.pop(g)
+                    a = getattr(ans, g)
+                    a.resize(a.shape[0] + b.shape[0], refcheck=False)
+                    a[a.shape[0] - b.shape[0] :] = b[:]
+            return ans
+        raise Exception(casting)
+    elif axis == 1:
+        ones = hstack([d._get_sparse_ones() for d in patterns_l])
+        multi = hstack([d._get_sparse_multi() for d in patterns_l])
+        return PatternsSOne(
+            ones.shape[1],
+            ones=ones.indptr[1:] - ones.indptr[:-1],
+            multi=multi.indptr[1:] - multi.indptr[:-1],
+            place_ones=ones.indices,
+            place_multi=multi.indices,
+            count_multi=multi.data,
         )
-        ans.check()
-        return ans
-    if (casting == "destroy") and isinstance(patterns_l, list):
-        ans = patterns_l.pop(0)
-        while len(patterns_l) > 0:
-            pat = patterns_l.pop(0)
-            pat = {g: getattr(pat, g) for g in PatternsSOne.ATTRS}
-            for g in PatternsSOne.ATTRS:
-                b = pat.pop(g)
-                a = getattr(ans, g)
-                a.resize(a.shape[0] + b.shape[0], refcheck=False)
-                a[a.shape[0] - b.shape[0] :] = b[:]
-        return ans
-    raise Exception(casting)
+    raise ValueError("The axis should be 0 or 1.")
 
 
 def _full(shape: Tuple[int, int], val: int) -> PatternsSOne:

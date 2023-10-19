@@ -109,7 +109,7 @@ def test_getitem(big_data):
         assert np.all(subdata1[_] == big_data[idx[_]])
 
 
-def test_concatenate(big_data):
+def test_concatenate(small_data, big_data):
     patterns = [ef.patterns(big_data.num_pix)] + [
         ef.patterns(big_data, start=i * 10, end=(i + 1) * 10) for i in range(5)
     ]
@@ -126,6 +126,11 @@ def test_concatenate(big_data):
     m1 = process.memory_info().rss
     assert (m1 - m0) < ans.nbytes * 0.9
     assert len(patterns) == 0
+
+    print(small_data)
+    assert np.concatenate([ef.patterns(small_data)] * 2, axis=1) == ef.patterns(
+        np.concatenate([small_data] * 2, axis=1)
+    )
 
 
 # This fixture is not used in the test, but it is used in the test_sum
