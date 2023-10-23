@@ -43,7 +43,7 @@ def parse_h5path(fname: "str | Path") -> tuple[Path, str]:
 @contextmanager
 def h5group(
     fname: str, *args: Any, add: bool = True, **kargs: Any
-) -> Generator[tuple[h5py.File, h5py.Group], Any, Any]:
+) -> Iterator[tuple[h5py.File, h5py.Group]]:
     """
     Parse a string to a tuple (fptr:h5py.File, group:h5py.Group)
 
@@ -116,7 +116,7 @@ class H5Path:
         track_order: Optional[bool] = None,
         *args: Any,
         **kargs: Any,
-    ) -> Generator[tuple[h5py.File, Union[h5py.Dataset, h5py.Group]], Any, Any]:
+    ) -> Iterator[tuple[h5py.File, Union[h5py.Dataset, h5py.Group]]]:
         """
         group_mode : [r|a]
         """
