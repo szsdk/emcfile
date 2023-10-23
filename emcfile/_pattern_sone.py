@@ -234,7 +234,7 @@ class PatternsSOne:
         *,
         h5version: str = "2",
         overwrite: bool = False,
-        compression=None,
+        compression: Union[None, int, str] = None,
     ) -> None:
         return write_patterns(
             [self],
@@ -374,7 +374,7 @@ def _write_h5_v2(
     path: H5Path,
     overwrite: bool,
     buffer_size: int,
-    compression,
+    compression: Union[None, int, str] = None,
 ) -> None:
     num_ones = np.sum([d.ones.sum() for d in datas])
     num_multi = np.sum([d.multi.sum() for d in datas])
@@ -412,7 +412,7 @@ def write_patterns(
     h5version: str = "2",
     overwrite: bool = False,
     buffer_size: int = 1073741824,  # 2 ** 30 bytes = 1 GB
-    compression=None,
+    compression: Union[None, int, str] = None,
 ) -> None:
     # TODO: performance test
     f = make_path(path)
@@ -472,7 +472,7 @@ def _write_h5_v1(
 
 @implements(np.concatenate)
 def concatenate_PatternsSOne(
-    patterns_l: "Sequence[PatternsSOne]", axis=0, casting: str = "safe"
+    patterns_l: "Sequence[PatternsSOne]", axis: int = 0, casting: str = "safe"
 ) -> PatternsSOne:
     "stack pattern sets together"
     if axis == 0:
