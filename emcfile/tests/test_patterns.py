@@ -253,6 +253,15 @@ def test_PatternsSOneFile_spase_pattern(file, request):
     assert d1 == ef.patterns([d2.sparse_pattern(i) for i in range(10)])
 
 
+@pytest.mark.parametrize("file", ["data_emc", "data_h5"])
+def test_readbuffer(file, request):
+    p = Path(request.getfixturevalue(file))
+    d1 = ef.patterns(p, end=10)
+    d2 = ef.file_patterns(p)
+    with d2.open() as fp:
+        assert d1 == ef.patterns([fp.sparse_pattern(i) for i in range(10)])
+
+
 def test_index(big_data, big_dense):
     idx = np.arange(big_data.shape[1])
     idx[0], idx[-1] = idx[-1], idx[0]
