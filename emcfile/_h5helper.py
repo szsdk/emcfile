@@ -136,6 +136,10 @@ class H5Path:
     def __str__(self) -> str:
         return f"{self.fn}::{self.gn}"
 
+    @classmethod  # type: ignore
+    def __get_validators__(cls):
+        yield lambda v, _: h5path(v)
+
 
 PATH_TYPE = Union[str, H5Path, os.PathLike]
 
