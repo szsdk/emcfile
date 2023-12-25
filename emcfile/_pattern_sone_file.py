@@ -160,6 +160,8 @@ class PatternsSOneFile:
                 idx_con = np.array([(start, stop)])
             else:
                 idx_con = np.array([(i, i + 1) for i in range(start, stop, index.step)])
+        else:
+            raise TypeError(f"Unsupported index type {type(index)}")
 
         place_ones, place_multi, count_multi = self._read_patterns(idx_con)
         if not isinstance(index, (int, np.integer)):
