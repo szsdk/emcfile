@@ -364,7 +364,7 @@ def _read_group(g: Union[h5py.File, h5py.Group]) -> dict[str, _T]:
     return ans
 
 
-def read_obj_h5(fn: Union[str, H5Path]) -> dict[str, _T]:
+def read_obj_h5(fn: Union[str, H5Path]) -> dict[str, Any]:
     """
     The inverse operation of `save_obj`. Read a dictionary from a h5 group.
     Parameters
