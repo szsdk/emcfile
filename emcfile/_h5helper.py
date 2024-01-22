@@ -136,6 +136,9 @@ class H5Path:
     def __str__(self) -> str:
         return f"{self.fn}::{self.gn}"
 
+    def __repr__(self) -> str:
+        return f"H5Path({self.fn}, {self.gn})"
+
     @classmethod  # type: ignore
     def __get_validators__(cls):
         yield lambda v, _: h5path(v)
