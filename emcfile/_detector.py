@@ -171,7 +171,7 @@ class Detector:
     def check_ewald_rad(self, rtol: float = 1e-04, atol: float = 1e-06) -> bool:
         coor = self.coor
         if coor.shape[0] >= 128:
-            coor = coor[:: coor.shape[0] // 64]
+            coor = coor[:: coor.shape[0] // 67]
         vec = get_ewald_vec(coor)
         if vec[3] == 0 and np.isinf(self.ewald_rad):
             return True
