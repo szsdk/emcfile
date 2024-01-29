@@ -259,9 +259,9 @@ def _write_h5det(det: Detector, fname: H5Path) -> None:
 def _from_h5det(fname: H5Path) -> Detector:
     with fname.open_group("r", "r") as (_, fp):
         return Detector(
-            np.array([fp["qx"][:], fp["qy"][:], fp["qz"][:]]).T.copy(),
-            fp["corr"][:],
-            fp["mask"][:],
+            np.array([fp["qx"][:], fp["qy"][:], fp["qz"][:]]).reshape(3, -1).T.copy(),
+            fp["corr"][:].ravel(),
+            fp["mask"][:].ravel(),
             fp["detd"][...].item(),
             fp["ewald_rad"][...].item(),
         )
