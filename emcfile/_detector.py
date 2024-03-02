@@ -7,7 +7,7 @@ from copy import deepcopy
 from enum import IntEnum
 from functools import reduce
 from pathlib import Path
-from typing import Any, Optional, Type, TypeVar, cast
+from typing import Any, Optional, Type, TypeVar, Union, cast
 
 import h5py
 import numpy as np
@@ -38,9 +38,21 @@ T2 = TypeVar("T2", bound=npt.NBitBase)
 
 
 class PixelType(IntEnum):
-    GOOD = 0
-    CORNER = 1
-    BAD = 2
+    GOOD = 0  # This is not recommended to be used in a bitwise mask.
+    CORNER = np.uint8(0b00000001)
+    BAD = np.uint8(0b00000010)
+
+
+_BITMAP = Union[Sequence[int], int]
+
+
+def _bitmap_to_int(bm: _BITMAP) -> np.unit8:
+    if isinstance(bm, int):
+        return np.uint8(bm)
+    ans = 0
+    for i in bm:
+        ans |= 1 << i
+    return ans
 
 
 class Detector:
@@ -180,6 +192,29 @@ class Detector:
             logging.warning("det Ewald radius: %f, calculated: %f", self.ewald_rad, r)
             return False
         return True
+
+    def mask_set(
+        self,
+        flags: _BITMAP,
+        values: _BITMAP,
+        pixel_indices: "None | slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[Any]]" = None,
+    ) -> None:
+        f = _bitmap_to_int(flags)
+        v = _bitmap_to_int(values)
+        self.mask[pixel_indices] = (self.mask[pixel_indices] & ~f) | (v & f)
+
+    def mask_flip(
+        self,
+        flags: _BITMAP,
+        pixel_indices: "None | slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[Any]]" = None,
+    ) -> None:
+        f = _bitmap_to_int(flags)
+        self.mask[pixel_indices] ^= f
+
+    def mask_select(self, flags: _BITMAP, values: _BITMAP) -> npt.NDArray[bool]:
+        f = _bitmap_to_int(flags)
+        v = _bitmap_to_int(values)
+        return self.mask & f == v
 
 
 HANDLED_FUNCTIONS = {}

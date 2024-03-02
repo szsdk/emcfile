@@ -146,3 +146,22 @@ def test_2ddet():
     mask = np.zeros(num_pix, "i4")
     factor = np.ones(num_pix)
     ef.detector(coor=coor, mask=mask, factor=factor, detd=-1, ewald_rad=np.inf)
+
+
+def test_mask_functions(det):
+    det = deepcopy(det)
+    np.testing.assert_equal(det.mask_select([1], [1]), det.mask == ef.PixelType.BAD)
+    np.testing.assert_equal(
+        det.mask_select([1, 0], [1, 0]), det.mask_select(0b11, 0b11)
+    )
+    det1 = deepcopy(det)
+    det1.mask_flip(0b10)
+    np.testing.assert_equal(det1.mask, det.mask ^ 0b10)
+
+    det1 = deepcopy(det)
+    det1.mask_set(0b11, 0b00)
+    np.testing.assert_equal(det1.mask, ef.PixelType.GOOD)
+
+    det1 = deepcopy(det)
+    det1.mask_set(0b11, 0b01)
+    np.testing.assert_equal(det1.mask, ef.PixelType.CORNER)
