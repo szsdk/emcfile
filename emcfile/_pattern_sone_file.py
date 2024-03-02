@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
-from contextlib import contextmanager
 from io import BufferedReader
 from pathlib import Path
-from typing import Any, Iterator, TypeVar, Union, cast, overload
+from typing import Any, TypeVar, cast, overload
 
 import h5py
 import numpy as np
@@ -133,14 +132,12 @@ class PatternsSOneFile:
         self._init_idx = True
 
     @overload
-    def __getitem__(self, index: int) -> npt.NDArray[np.int32]:
-        ...
+    def __getitem__(self, index: int) -> npt.NDArray[np.int32]: ...
 
     @overload
     def __getitem__(
         self, index: "slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[T1]]"
-    ) -> PatternsSOne:
-        ...
+    ) -> PatternsSOne: ...
 
     def __getitem__(
         self,
@@ -362,14 +359,12 @@ class PatternsSOneH5V1(PatternsSOneFile):
         self._init_idx = True
 
     @overload
-    def __getitem__(self, index: int) -> npt.NDArray[np.int32]:
-        ...
+    def __getitem__(self, index: int) -> npt.NDArray[np.int32]: ...
 
     @overload
     def __getitem__(
         self, index: "slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[T1]]"
-    ) -> PatternsSOne:
-        ...
+    ) -> PatternsSOne: ...
 
     def __getitem__(
         self,

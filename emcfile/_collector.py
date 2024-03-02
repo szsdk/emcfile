@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from numbers import Integral
-from typing import Any, Optional, Union, cast
+from typing import Optional, Union, cast
 
 import numpy as np
 import numpy.typing as npt

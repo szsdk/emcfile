@@ -2,6 +2,8 @@
 
 # %matplotlib inline
 
+from pathlib import Path
+
 import matplotlib.pylab as plt
 import numpy as np
 
@@ -30,7 +32,13 @@ patterns.shape
 
 patterns.num_data, patterns.num_pix
 
-patterns.ones, patterns.multi, patterns.place_ones, patterns.place_multi, patterns.count_multi
+(
+    patterns.ones,
+    patterns.multi,
+    patterns.place_ones,
+    patterns.place_multi,
+    patterns.count_multi,
+)
 
 [getattr(patterns, g) for g in patterns.ATTRS]
 
@@ -150,7 +158,6 @@ plt.ylabel("$y$ / mm")
 # ## HDF5 helper
 # This module provides helper functions for working with HDF5 files. The following example shows how to use the `make_path` function to create a path object based on the input value:
 
-from pathlib import Path
 
 path1 = "/tmp/example.h5::dataset"  # Input is an HDF5 file path
 result1 = ef.h5path("/tmp/example.h5", "dataset")  # Expected result as H5Path tuple

@@ -5,7 +5,7 @@ import os
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Generator, Optional, Union, cast
+from typing import Any, Optional, Union, cast
 
 import h5py
 import numpy as np

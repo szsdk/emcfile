@@ -196,9 +196,10 @@ def gen_write_patterns():
 
 @pytest.mark.parametrize("suffix, data_list", gen_write_patterns())
 def test_write_patterns(suffix, data_list):
-    with tempfile.NamedTemporaryFile(suffix=suffix) as f0, tempfile.NamedTemporaryFile(
-        suffix=suffix
-    ) as f1:
+    with (
+        tempfile.NamedTemporaryFile(suffix=suffix) as f0,
+        tempfile.NamedTemporaryFile(suffix=suffix) as f1,
+    ):
         t = time.time()
         all_data = np.concatenate(data_list)
         all_data.write(f1.name, overwrite=True)
