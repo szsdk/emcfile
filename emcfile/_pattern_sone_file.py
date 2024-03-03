@@ -131,6 +131,9 @@ class PatternsSOneFile:
         np.cumsum(self.multi, out=self.multi_idx[1:])
         self._init_idx = True
 
+    def __len__(self) -> int:
+        return int(self.num_data)
+
     @overload
     def __getitem__(self, index: int) -> npt.NDArray[np.int32]: ...
 

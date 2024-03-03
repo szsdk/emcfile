@@ -144,7 +144,7 @@ class H5Path:
         yield lambda v, _: h5path(v)
 
 
-PATH_TYPE = Union[str, H5Path, os.PathLike]
+PATH_TYPE = Union[str, H5Path, os.PathLike[str]]
 
 
 def read_array(

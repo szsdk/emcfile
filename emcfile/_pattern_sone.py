@@ -461,10 +461,10 @@ def _write_h5_v1(
             place_multi[idx] = d
 
         count_multi = fp.create_dataset("count_multi", (data.num_data,), dtype=dt)
-        for idx, d in enumerate(
+        for idx, d_c in enumerate(
             np.split(data.count_multi, data.multi_idx[1:-1]), start
         ):
-            count_multi[idx] = d
+            count_multi[idx] = d_c
         fp.attrs["version"] = "1"
 
 

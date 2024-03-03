@@ -1,5 +1,4 @@
 from collections.abc import Sequence
-from numbers import Integral
 from typing import Optional, Union, cast
 
 import numpy as np
@@ -10,7 +9,7 @@ from ._h5helper import PATH_TYPE
 from ._pattern_sone import PatternsSOne, write_patterns
 from ._patterns import patterns
 
-NP_IMG: TypeAlias = npt.NDArray[Integral]
+NP_IMG: TypeAlias = npt.NDArray[np.int_]
 
 
 class PatternsSOneCollector:

@@ -94,6 +94,11 @@ def test_patterns(inp, ref):
     assert p == ref
 
 
+def test_shape(big_data):
+    assert len(big_data) == big_data.num_data
+    assert big_data.shape == (big_data.num_data, big_data.num_pix)
+
+
 def test_getitem(big_data):
     for i in np.random.choice(big_data.num_data, 5):
         assert np.sum(big_data[i] == 1) == big_data.ones[i]
@@ -228,6 +233,14 @@ def test_pattern_mul(big_data):
     np.testing.assert_equal((big_data @ mtx).todense(), big_data.todense() @ mtx)
     mtx = csr_matrix(mtx)
     np.testing.assert_equal((big_data @ mtx).todense(), big_data.todense() @ mtx)
+
+
+@pytest.mark.parametrize("file", ["data_emc", "data_h5", "data_h5_v1"])
+def test_PatternsSOneFile_shape(file, request):
+    p = Path(request.getfixturevalue(file))
+    d = ef.file_patterns(p)
+    assert len(d) == d.num_data
+    assert d.shape == (d.num_data, d.num_pix)
 
 
 @pytest.mark.parametrize("file", ["data_emc", "data_h5", "data_h5_v1"])

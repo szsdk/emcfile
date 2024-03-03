@@ -24,4 +24,5 @@ repos:
   hooks:
   - id: mypy
     args: [--strict]
+    additional_dependencies: [numpy == 1.25.0]
     exclude: ^emcfile/tests/|^tutorial/

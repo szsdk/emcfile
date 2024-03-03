@@ -46,13 +46,13 @@ class PixelType(IntEnum):
 _BITMAP = Union[Sequence[int], int]
 
 
-def _bitmap_to_int(bm: _BITMAP) -> np.unit8:
+def _bitmap_to_int(bm: _BITMAP) -> np.unsignedinteger[np._typing._8Bit]:
     if isinstance(bm, int):
         return np.uint8(bm)
     ans = 0
     for i in bm:
         ans |= 1 << i
-    return ans
+    return np.uint8(ans)
 
 
 class Detector:
@@ -211,10 +211,10 @@ class Detector:
         f = _bitmap_to_int(flags)
         self.mask[pixel_indices] ^= f
 
-    def mask_select(self, flags: _BITMAP, values: _BITMAP) -> npt.NDArray[bool]:
+    def mask_select(self, flags: _BITMAP, values: _BITMAP) -> npt.NDArray[np.bool_]:
         f = _bitmap_to_int(flags)
         v = _bitmap_to_int(values)
-        return self.mask & f == v
+        return cast(npt.NDArray[np.bool_], (self.mask & f) == v)
 
 
 HANDLED_FUNCTIONS = {}
@@ -587,11 +587,14 @@ class DetRender:
         self._count: npt.NDArray[np.float64] = ma.masked_array(
             np.zeros((self.frame_shape[1], self.frame_shape[0]), dtype="f8"),
             mask=self._mask,
-        )
+        )  # type: ignore
         np.add.at(
             self._count, (self.xy[:, 1], self.xy[:, 0]), np.ones(self.xy.shape[0])
         )
-        self._count /= cast(np.float64, self._count.mean())
+        self._count /= cast(
+            np.float64,
+            self._count.mean(),  # type: ignore
+        )
 
     def frame_pixels(self) -> list[npt.NDArray[np.float64]]:
         et = self.frame_extent()
@@ -608,10 +611,10 @@ class DetRender:
         The right way to visualize the `raw_img` is
         `plt.imshow(img, origin='lower', extent=self.frame_extent())`.
         """
-        img: npt.NDArray[np.float64] = ma.masked_array(
+        img = ma.masked_array(
             np.zeros((self.frame_shape[1], self.frame_shape[0]), dtype="f8"),
             mask=self._mask,
-        )
+        )  # type: ignore
         np.add.at(img, (self.xy[:, 1], self.xy[:, 0]), raw_img)
         return cast(npt.NDArray[np.float64], img / self._count)
 
