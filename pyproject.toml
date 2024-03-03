@@ -9,19 +9,22 @@ authors = [{name = "Shen Zhou", email = "shen34206@hotmail.com"}]
 description = "This package supplies basic classes about datasets and detectors used in XFEL single pariticle imaging."
 license = {text="GPLv3"}
 dependencies = [
-    "h5py",
-    "numpy >= 1.20.0",
-    "scipy",
+  "h5py",
+  "numpy >= 1.20.0",
+  "scipy",
+  "typing_extensions"
 ]
 
 [project.optional-dependencies]
 tests = [
-  'coverage>=5.0.3',
-    "pdoc3",
-    "pytest",
-    "pytest-cov",
-    "pytest-html",
-    "pytest-metadata",
+  "coverage>=5.0.3",
+  "psutil",
+  "pdoc3",
+  "pytest",
+  "pytest-cov",
+  "pytest-html",
+  "pytest-metadata",
+  "matplotlib"
 ]
 
 [tool.setuptools]
@@ -64,6 +67,11 @@ exclude_lines =[
     "raise FileExistsError",
     "raise ValueError",
     "return NotImplemented",
+]
+
+omit = [
+  "emcfile/tests/*",
+  "tutorial/*"
 ]
 
 [tool.coverage.html]
