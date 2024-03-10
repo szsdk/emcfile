@@ -299,9 +299,7 @@ class PatternsSOne:
             return False
         a = np.subtract(self.place_ones[1:], self.place_ones[:-1], dtype=int)
         a[self.ones_idx[1:-1] - 1] = 1
-        if np.any(a <= 0):
-            return False
-        return True
+        return not np.any(a <= 0)
 
     def ensure_indices_ordered(self) -> None:
         if self.check_indices_ordered():

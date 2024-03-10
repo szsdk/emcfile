@@ -212,7 +212,7 @@ def test_write_patterns(suffix, data_list):
         logging.info(f"speed[single]: {all_data.nbytes * 1e-9 /t1:.2f} GB/s")
 
         t = time.time()
-        ef.write_patterns(data_list, f0.name, overwrite=True)
+        ef.write_patterns(data_list, f0.name, buffer_size=2**12, overwrite=True)
         t0 = time.time() - t
         logging.info(
             "speed[multiple; #patterns=%d]: %.2f GB/s",
