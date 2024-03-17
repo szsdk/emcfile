@@ -165,3 +165,19 @@ def test_mask_functions(det):
     det1 = deepcopy(det)
     det1.mask_set(0b11, 0b01)
     np.testing.assert_equal(det1.mask, ef.PixelType.CORNER)
+
+
+def test_detector_not_equal(det):
+    """
+    This tests covers the case where two detectors are not equal.
+    """
+    a = det[: det.num_pix - 1]
+    assert a != det
+
+    a = deepcopy(det)
+    a.coor[0, 0] = -1000
+    assert a != det
+
+    a = deepcopy(det)
+    a.factor[0] = -1000
+    assert a != det
