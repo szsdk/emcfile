@@ -1,3 +1,4 @@
+import copy
 import gc
 import itertools
 import logging
@@ -86,6 +87,21 @@ def gen_pattern_inputs():
     yield dense, ref
     yield coo_matrix(dense), ref
     yield csr_matrix(dense), ref
+
+
+def test_pattern_not_equal(small_data):
+    """
+    This test covers different cases for the `__eq__`  returns false.
+    """
+    a = ef.patterns(gen_dense(small_data.num_data - 1, small_data.num_pix))
+    assert a != small_data
+
+    a = ef.patterns(gen_dense(small_data.num_data, small_data.num_pix - 1))
+    assert a != small_data
+
+    a = copy.deepcopy(small_data)
+    a.place_multi[0] = 9999999
+    assert a != small_data
 
 
 @pytest.mark.parametrize("inp, ref", gen_pattern_inputs())
