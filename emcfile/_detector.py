@@ -7,7 +7,7 @@ from copy import deepcopy
 from enum import IntEnum
 from functools import reduce
 from pathlib import Path
-from typing import Any, Optional, Type, TypeVar, Union, cast
+from typing import Any, Literal, Optional, Type, TypeVar, Union, cast
 
 import h5py
 import numpy as np
@@ -413,7 +413,13 @@ def detector(
     return det
 
 
-def get_2ddet(det: Detector, /, *, inplace: bool = False) -> Detector:
+def get_2ddet(
+    det: Detector,
+    /,
+    *,
+    inplace: bool = False,
+    pixel_space: Literal["real", "reciprocal"] = "reciprocal",
+) -> Detector:
     """
     Get a detector for 2d clustering
 
@@ -433,9 +439,15 @@ def get_2ddet(det: Detector, /, *, inplace: bool = False) -> Detector:
         ans = det
     else:
         ans = deepcopy(det)
+    if det.detd != det.ewald_rad:
+        logging.warning(
+            f"Detector distance is not equal to Ewald radius. {pixel_space} space is used"
+        )
     ans.coor[:, :2] = xyz_to_cxy(
         ans.coor, det.ewald_rad, -int(np.sign(det.coor[:, 2].sum()))
     )
+    if pixel_space == "real":
+        ans.coor[:] *= det.detd / det.ewald_rad
 
     ans.coor[:, 2] = 0.0
     ans.ewald_rad = np.inf
