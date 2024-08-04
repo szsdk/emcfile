@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Sequence
 from io import BufferedReader
 from pathlib import Path
-from typing import Any, TypeVar, cast, overload
+from typing import Any, TypeVar, Union, cast, overload
 
 import h5py
 import numpy as np
@@ -13,7 +14,7 @@ import numpy.typing as npt
 from ._h5helper import PATH_TYPE, H5Path, h5path, make_path
 from ._pattern_sone import SPARSE_PATTERN, PatternsSOne
 
-__all__ = ["PatternsSOneEMC", "PatternsSOneH5", "file_patterns"]
+__all__ = ["PatternsSOneEMC", "PatternsSOneH5", "file_patterns", "PatternsSOneFileList"]
 _log = logging.getLogger(__name__)
 
 I4 = np.dtype("i4").itemsize
@@ -377,7 +378,64 @@ class PatternsSOneH5V1(PatternsSOneFile):
         return self._patterns[index]
 
 
-def file_patterns(fn: PATH_TYPE) -> PatternsSOneFile:
+class PatternsSOneFileList(PatternsSOneFile):
+    def __init__(self, pattern_list: Sequence[Union[PatternsSOneFile, PATH_TYPE]]):
+        self.pattern_list: list[PatternsSOneFile] = []
+        indptr = [0]
+        num_pix = None
+        for f in pattern_list:
+            patn = f if isinstance(f, PatternsSOneFile) else file_patterns(f)
+            if num_pix is None:
+                num_pix = patn.num_pix
+            elif num_pix != patn.num_pix:
+                raise ValueError("Inconsistent number of pixels")
+            self.pattern_list.append(patn)
+            indptr.append(len(patn))
+        if num_pix is None:
+            raise ValueError("Empty pattern list is not allowed")
+        self._indptr = np.cumsum(indptr)
+        self.num_pix = int(num_pix)
+        self.num_data = int(self._indptr[-1])
+        self.shape = (self.num_data, self.num_pix)
+        self._init_idx = False
+
+    def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
+        return np.concatenate([p.ones for p in self.pattern_list]), np.concatenate(
+            [p.multi for p in self.pattern_list]
+        )
+
+    @overload
+    def __getitem__(self, index: int) -> npt.NDArray[np.int32]: ...
+
+    @overload
+    def __getitem__(
+        self, index: "slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[T1]]"
+    ) -> PatternsSOne: ...
+
+    def __getitem__(
+        self,
+        item: "slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[T1]] | int",
+    ) -> "npt.NDArray[np.int32] | PatternsSOne":
+        if isinstance(item, (int, np.integer)):
+            lidx = np.digitize(item, self._indptr[1:])
+            return self.pattern_list[lidx][int(item - self._indptr[lidx])]
+        if isinstance(item, (slice, np.ndarray)):
+            pidx = np.arange(self.num_data)[item]
+        else:
+            raise TypeError("Unsupported index type")
+        lids = np.digitize(pidx, self._indptr[1:])
+        patns: list[PatternsSOne] = []
+        for i in np.sort(np.unique(lids)):
+            patns.append(self.pattern_list[i][pidx[lids == i] - self._indptr[i]])
+        return np.concatenate(patns)
+
+    def __len__(self) -> int:
+        return self.num_data
+
+
+def file_patterns(fn: Union[Sequence[PATH_TYPE], PATH_TYPE]) -> PatternsSOneFile:
+    if isinstance(fn, Sequence):
+        return PatternsSOneFileList(fn)
     p = make_path(fn)
     if not isinstance(p, H5Path):
         if h5py.is_hdf5(p):

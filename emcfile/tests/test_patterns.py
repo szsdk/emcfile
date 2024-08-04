@@ -331,3 +331,18 @@ def test_full(shape):
         ef.patterns((shape, 2)).todense(),
         np.full(shape, 2),
     )
+
+
+def test_pattern_list(data_emc, data_h5):
+    p0 = ef.file_patterns(data_emc)
+    p1 = ef.file_patterns(data_h5)
+    plst = ef.PatternsSOneFileList([p0, p1])
+    np.testing.assert_equal(plst[0], p0[0])
+    np.testing.assert_equal(plst[len(p0) + 2], p1[2])
+    assert len(plst) == len(p0) + len(p1)
+    np.testing.assert_equal(plst[1::3][0], p0[1])
+    np.testing.assert_equal(plst[1::3][1], p0[4])
+    plst.init_idx()
+    np.testing.assert_equal(plst.ones, np.concatenate([p0.ones, p1.ones]))
+    plst2 = ef.PatternsSOneFileList([plst, p0])
+    assert plst2[: len(plst)][: len(p0)] == p0[:]

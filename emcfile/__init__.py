@@ -26,6 +26,7 @@ from ._pattern_sone import SPARSE_PATTERN, PatternsSOne, write_patterns
 from ._pattern_sone_file import (
     PatternsSOneEMC,
     PatternsSOneFile,
+    PatternsSOneFileList,
     PatternsSOneH5,
     file_patterns,
 )
@@ -59,6 +60,7 @@ __all__ = [
     "PatternsSOneEMC",
     "PatternsSOneH5",
     "PatternsSOneCollector",
+    "PatternsSOneFileList",
     "file_patterns",
 ]
 
