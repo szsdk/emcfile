@@ -631,9 +631,12 @@ class DetRender:
         return cast(npt.NDArray[np.float64], img / self._count)
 
     def to_cxy(self, xyz: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
-        return xyz_to_cxy(xyz, self._det.ewald_rad, self.direction)
+        cxy = xyz_to_cxy(xyz, self._det.ewald_rad, self.direction)
+        cxy *= self._det.detd / self._det.ewald_rad
+        return cxy
 
     def to_xyz(self, cxy: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
+        cxy = cxy * self._det.ewald_rad / self._det.detd
         return cxy_to_xyz(cxy, self._det.ewald_rad, self.direction)
 
     def frame_extent(
