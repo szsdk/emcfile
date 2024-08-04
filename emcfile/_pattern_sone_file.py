@@ -434,8 +434,9 @@ class PatternsSOneFileList(PatternsSOneFile):
 
 
 def file_patterns(fn: Union[Sequence[PATH_TYPE], PATH_TYPE]) -> PatternsSOneFile:
-    if isinstance(fn, Sequence):
+    if isinstance(fn, (tuple, list)):
         return PatternsSOneFileList(fn)
+    assert isinstance(fn, (str, Path, H5Path))
     p = make_path(fn)
     if not isinstance(p, H5Path):
         if h5py.is_hdf5(p):
