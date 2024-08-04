@@ -50,7 +50,7 @@ def read_indexed_array(
         s, e = idx_con[0]
         e = arr_idx[e]
         s = arr_idx[s]
-        fin.seek(I4 * int(s - e0), os.SEEK_CUR)
+        fin.seek(I4 * (int(s) - e0), os.SEEK_CUR)
         return np.fromfile(fin, count=int(e - s), dtype=np.int32), int(e) - int(
             arr_idx[-1]
         )
@@ -59,9 +59,9 @@ def read_indexed_array(
     for s, e in idx_con:
         e = arr_idx[e]
         s = arr_idx[s]
-        fin.seek(I4 * int(s - e0), os.SEEK_CUR)
+        fin.seek(I4 * (int(s) - e0), os.SEEK_CUR)
         ans.append(np.frombuffer(fin.read(int(e - s) * I4), dtype=np.int32))
-        e0 = e
+        e0 = int(e)
     return (
         np.concatenate(ans) if len(ans) > 0 else np.array([], np.int32),
         int(e0) - int(arr_idx[-1]),
