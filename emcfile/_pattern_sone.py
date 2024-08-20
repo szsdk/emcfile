@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
@@ -228,7 +229,7 @@ class PatternsSOne:
 
     def write(
         self,
-        path: PATH_TYPE,
+        path: Union[PATH_TYPE, io.BytesIO],
         *,
         h5version: str = "2",
         overwrite: bool = False,
@@ -365,6 +366,18 @@ def _write_bin(datas: Sequence[PatternsSOne], path: Path, overwrite: bool) -> No
                 getattr(data, g).tofile(fptr)
 
 
+def _write_bytes(datas: Sequence[PatternsSOne], path: io.BytesIO) -> None:
+    num_data = np.sum([data.num_data for data in datas])
+    num_pix = datas[0].num_pix
+
+    header = np.zeros((256), dtype="i4")
+    header[:2] = [num_data, num_pix]
+    path.write(header.tobytes())
+    for g in PatternsSOne.ATTRS:
+        for data in datas:
+            path.write(getattr(data, g).tobytes())
+
+
 def _write_h5_v2(
     datas: Sequence[PatternsSOne],
     path: H5Path,
@@ -403,7 +416,7 @@ def _write_h5_v2(
 
 def write_patterns(
     datas: Sequence[PatternsSOne],
-    path: PATH_TYPE,
+    path: Union[PATH_TYPE, io.BytesIO],
     *,
     h5version: str = "2",
     overwrite: bool = False,
@@ -411,6 +424,9 @@ def write_patterns(
     compression: Union[None, int, str] = None,
 ) -> None:
     # TODO: performance test
+    if isinstance(path, io.BytesIO):
+        return _write_bytes(datas, path)
+
     f = make_path(path)
     if isinstance(f, Path):
         if f.suffix in [".emc", ".bin"]:

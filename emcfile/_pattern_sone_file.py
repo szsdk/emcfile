@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Sequence
-from io import BufferedReader
+from io import BufferedReader, BytesIO
 from pathlib import Path
 from typing import Any, TypeVar, Union, cast, overload
 
@@ -41,7 +41,7 @@ def concat_continous(a: npt.NDArray[Any]) -> npt.NDArray[Any]:
 
 
 def read_indexed_array(
-    fin: BufferedReader,
+    fin: Union[BufferedReader, BytesIO],
     idx_con: npt.NDArray["np.integer[T1]"],
     arr_idx: npt.NDArray["np.integer[T1]"],
     e0: int,
@@ -51,9 +51,9 @@ def read_indexed_array(
         e = arr_idx[e]
         s = arr_idx[s]
         fin.seek(I4 * (int(s) - e0), os.SEEK_CUR)
-        return np.fromfile(fin, count=int(e - s), dtype=np.int32), int(e) - int(
-            arr_idx[-1]
-        )
+        return np.frombuffer(
+            fin.read(int(e - s) * I4), count=int(e - s), dtype=np.int32
+        ), int(e) - int(arr_idx[-1])
 
     ans = []
     for s, e in idx_con:
@@ -69,8 +69,7 @@ def read_indexed_array(
 
 
 def read_patterns(
-    fn: Path,
-    fin: BufferedReader,
+    fin: Union[BufferedReader, BytesIO],
     idx_con: npt.NDArray["np.integer[T1]"],
     ones_idx: npt.NDArray["np.integer[T1]"],
     multi_idx: npt.NDArray["np.integer[T1]"],
@@ -84,17 +83,15 @@ def read_patterns(
     if fin.read(1):
         total = seek_start + place_ones.nbytes + place_multi.nbytes + count_multi.nbytes
         _log.error(
-            "START: %d, place_ones: %d, place_multi: %d, count_multi: %d, total=%d;"
-            "filesize = %d; e0: %d",
+            "START: %d, place_ones: %d, place_multi: %d, count_multi: %d, total=%d; e0: %d",
             seek_start,
             place_ones.nbytes,
             place_multi.nbytes,
             count_multi.nbytes,
             total,
-            fn.stat().st_size,
             e0,
         )
-        raise ValueError(f"Error when parsing {fn}")
+        raise ValueError("Error when parsing")
     return place_ones.view("u4"), place_multi.view("u4"), count_multi
 
 
@@ -207,10 +204,38 @@ class PatternsSOneEMC(PatternsSOneFile):
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
         with self._fn.open("rb") as fin:
-            return read_patterns(self._fn, fin, idx_con, self.ones_idx, self.multi_idx)
+            return read_patterns(fin, idx_con, self.ones_idx, self.multi_idx)
 
     def open(self) -> PatternsSOneEMCReadBuffer:
         return PatternsSOneEMCReadBuffer(self._fn)
+
+
+class _PatternsSOneBytes(PatternsSOneFile):
+    HEADER_BYTES = 1024
+
+    def __init__(self, fn: BytesIO):
+        self._fn = fn
+        self._fn.seek(0)
+        self.num_data = np.frombuffer(self._fn.read(4), dtype=np.int32, count=1)[0]
+        self.num_pix = np.frombuffer(self._fn.read(4), dtype=np.int32, count=1)[0]
+        self.ndim = 2
+        self.shape = (self.num_data, self.num_pix)
+        self._init_idx = False
+
+    def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
+        self._fn.seek(1024)
+        return np.frombuffer(
+            self._fn.read(I4 * self.num_data), dtype=np.int32, count=self.num_data
+        ), np.frombuffer(
+            self._fn.read(I4 * self.num_data), dtype=np.int32, count=self.num_data
+        )
+
+    def _read_patterns(
+        self, idx_con: npt.NDArray["np.integer[T1]"]
+    ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
+        self.init_idx()
+        self._fn.seek(0)
+        return read_patterns(self._fn, idx_con, self.ones_idx, self.multi_idx)
 
 
 class PatternsSOneEMCReadBuffer(PatternsSOneEMC):
@@ -238,9 +263,7 @@ class PatternsSOneEMCReadBuffer(PatternsSOneEMC):
         self, idx_con: npt.NDArray["np.integer[T1]"]
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
-        return read_patterns(
-            self._fn, self._file_handle, idx_con, self.ones_idx, self.multi_idx
-        )
+        return read_patterns(self._file_handle, idx_con, self.ones_idx, self.multi_idx)
 
 
 def read_indexed_array_h5(

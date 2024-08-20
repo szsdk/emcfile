@@ -1,5 +1,6 @@
 import copy
 import gc
+import io
 import itertools
 import logging
 import tempfile
@@ -206,6 +207,12 @@ def test_fileio(suffix, kargs, big_data):
             f"Reading {d_read.num_data} patterns from h5 file(v1): {time.time()-t0}"
         )
         assert d_read == big_data[start:end]
+
+
+def test_bytesio(small_data, tmp_path: Path):
+    bio = io.BytesIO()
+    small_data.write(bio)
+    assert ef.patterns(bio) == small_data
 
 
 def gen_write_patterns():

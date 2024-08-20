@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Optional, TypeVar, cast
@@ -11,7 +12,7 @@ from scipy.sparse import coo_matrix, spmatrix
 from ._h5helper import PATH_TYPE, H5Path
 from ._misc import divide_range
 from ._pattern_sone import SPARSE_PATTERN, PatternsSOne, _full, _ones, _zeros
-from ._pattern_sone_file import file_patterns
+from ._pattern_sone_file import _PatternsSOneBytes, file_patterns
 
 __all__ = ["patterns"]
 
@@ -69,6 +70,7 @@ def _from_sparse_patterns(src: Sequence[SPARSE_PATTERN]) -> PatternsSOne:
 
 def patterns(
     src: "PATH_TYPE"
+    "| io.BytesIO"
     "| npt.NDArray[np.integer[T1]]"
     "| spmatrix"
     "| int"
@@ -124,7 +126,8 @@ def patterns(
     - Another `PatternsSOne` object: The function returns a subset or a copy of the input object,
       starting from index `start` and ending at index `end`.
     """
-
+    if isinstance(src, io.BytesIO):
+        return _PatternsSOneBytes(src)[start:end]
     if isinstance(src, (str, Path, H5Path)):
         return file_patterns(src)[start:end]
     if isinstance(src, PatternsSOne):
