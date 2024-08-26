@@ -20,7 +20,7 @@ from typing import (
 import h5py
 import numpy as np
 import numpy.typing as npt
-from scipy.sparse import csr_matrix, hstack
+from scipy.sparse import csr_array, hstack
 
 from ._h5helper import PATH_TYPE, H5Path, check_remove_groups, make_path
 from ._misc import pretty_size
@@ -243,15 +243,15 @@ class PatternsSOne:
             compression=compression,
         )
 
-    def _get_sparse_ones(self) -> csr_matrix:
+    def _get_sparse_ones(self) -> csr_array:
         _one = np.ones(1, "i4")
         _one = np.lib.stride_tricks.as_strided(
             _one, shape=(self.place_ones.shape[0],), strides=(0,)
         )
-        return csr_matrix((_one, self.place_ones, self.ones_idx), shape=self.shape)
+        return csr_array((_one, self.place_ones, self.ones_idx), shape=self.shape)
 
-    def _get_sparse_multi(self) -> csr_matrix:
-        return csr_matrix(
+    def _get_sparse_multi(self) -> csr_array:
+        return csr_array(
             (self.count_multi, self.place_multi, self.multi_idx), shape=self.shape
         )
 
@@ -272,7 +272,7 @@ class PatternsSOne:
     def __matmul__(self, mtx: npt.NDArray[Any]) -> npt.NDArray[Any]:
         return cast(
             npt.NDArray[Any],
-            self._get_sparse_ones() * mtx + self._get_sparse_multi() * mtx,
+            self._get_sparse_ones() @ mtx + self._get_sparse_multi() @ mtx,
         )
 
     def __array_function__(

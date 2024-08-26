@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from psutil import Process
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import coo_array, csr_array
 
 import emcfile as ef
 from emcfile.tests.utils import temp_seed
@@ -86,8 +86,8 @@ def gen_pattern_inputs():
     ref = ef.patterns(dense)
     yield ref, ref
     yield dense, ref
-    yield coo_matrix(dense), ref
-    yield csr_matrix(dense), ref
+    yield coo_array(dense), ref
+    yield csr_array(dense), ref
 
 
 def test_pattern_not_equal(small_data):
@@ -252,9 +252,9 @@ def test_pattern_mul(big_data):
     np.testing.assert_almost_equal(big_data @ mtx, np.asarray(big_data) @ mtx)
     mtx = mtx > 0.4
     np.testing.assert_almost_equal(big_data @ mtx, big_data.todense() @ mtx)
-    mtx = coo_matrix(mtx)
+    mtx = coo_array(mtx)
     np.testing.assert_equal((big_data @ mtx).todense(), big_data.todense() @ mtx)
-    mtx = csr_matrix(mtx)
+    mtx = csr_array(mtx)
     np.testing.assert_equal((big_data @ mtx).todense(), big_data.todense() @ mtx)
 
 

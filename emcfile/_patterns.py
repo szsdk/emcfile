@@ -7,7 +7,7 @@ from typing import Optional, TypeVar, cast
 
 import numpy as np
 import numpy.typing as npt
-from scipy.sparse import coo_matrix, spmatrix
+from scipy.sparse import coo_array, coo_matrix, sparray, spmatrix
 
 from ._h5helper import PATH_TYPE, H5Path
 from ._misc import divide_range
@@ -160,9 +160,9 @@ def patterns(
         if start is not None or end is not None:
             raise Exception()
         return dense_to_PatternsSOne(src)
-    elif isinstance(src, coo_matrix):
+    elif isinstance(src, (coo_array, coo_matrix)):
         return coo_to_SOne_kernel(src)
-    elif isinstance(src, spmatrix):
+    elif isinstance(src, (sparray, spmatrix)):
         return cast(
             PatternsSOne,
             np.concatenate(
