@@ -522,7 +522,7 @@ def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
     with np.errstate(divide="ignore", invalid="ignore"):
         coor_shift /= np.linalg.norm(coor_shift, axis=1, keepdims=True)
     coor_shift[ca] = 0
-    is_2d = np.all(np.abs(np.dot(coor_shift, n0.reshape(3, 1))) < 1e-2)
+    is_2d = np.all(np.abs(np.dot(coor_shift, n0.reshape(3, 1))) < 1e-3)
     if is_2d:
         return np.array([n0[0], n0[1], n0[2], 0.0])
 
