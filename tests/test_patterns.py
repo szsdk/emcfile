@@ -13,7 +13,8 @@ from psutil import Process
 from scipy.sparse import coo_array, csr_array
 
 import emcfile as ef
-from emcfile.tests.utils import temp_seed
+
+from .utils import temp_seed
 
 
 def gen_dense(num_data, num_pix):

@@ -1,42 +1,33 @@
-[build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "emcfile"
-version = "0.0.0"
-authors = [{name = "Shen Zhou", email = "shen34206@hotmail.com"}]
-description = "This package supplies basic classes about datasets and detectors used in XFEL single pariticle imaging."
-license = {text="GPLv3"}
+version = "0.1.0"
+description = "Add your description here"
+readme = "readme.md"
+requires-python = ">=3.9"
 dependencies = [
-  "h5py",
-  "numpy >= 1.20.0",
-  "scipy",
-  "typing_extensions"
+    "h5py>=3.11.0",
+    "numpy>=1.20",
+    "scipy>=1.12.0",
+    "typing-extensions>=4.12.2",
 ]
 
-[project.optional-dependencies]
-tests = [
-  "coverage>=5.0.3",
-  "psutil",
-  "pdoc3",
-  "pytest",
-  "pytest-cov",
-  "pytest-html",
-  "pytest-metadata",
-  "matplotlib"
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "pre-commit>=2.20.0",
+    "coverage>=5.0.3",
+    "mypy>=0.991",
+    "pytest>=7.2.0",
+    "pytest-cov>=4.0.0",
+    "pytest-html",
+    "ruff>=0.0.235",
+    "psutil",
+    "pdoc3",
+    "matplotlib",
 ]
-
-[tool.setuptools]
-zip-safe = false
-packages = ["emcfile"]
-include-package-data = true
-
-[tool.setuptools.package-dir]
-emcfile = "emcfile/"
-
-[tool.setuptools.package-data]
-emcfile = ["py.typed"]
 
 [tool.pytest.ini_options]
 log_cli = true
