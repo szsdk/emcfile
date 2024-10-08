@@ -281,12 +281,10 @@ class PatternsSOne:
         """
         To dense ndarray
         """
-        return cast(
-            npt.NDArray[np.int32],
-            np.squeeze(
-                self._get_sparse_ones().todense() + self._get_sparse_multi().todense()
-            ),
-        )
+        ans = np.zeros(self.shape, dtype=np.int32)
+        ans += self._get_sparse_ones()
+        ans += self._get_sparse_multi()
+        return cast(npt.NDArray[np.int32], np.squeeze(ans))
 
     def __array__(self) -> npt.NDArray[np.int32]:
         return self.todense()
