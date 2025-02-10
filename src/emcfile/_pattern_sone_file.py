@@ -13,6 +13,7 @@ import numpy.typing as npt
 
 from ._h5helper import PATH_TYPE, H5Path, h5path, make_path
 from ._pattern_sone import SPARSE_PATTERN, PatternsSOne
+from ._utils import concat_continous
 
 __all__ = ["PatternsSOneEMC", "PatternsSOneH5", "file_patterns", "PatternsSOneFileList"]
 _log = logging.getLogger(__name__)
@@ -20,24 +21,6 @@ _log = logging.getLogger(__name__)
 I4 = np.dtype("i4").itemsize
 
 T1 = TypeVar("T1", bound=npt.NBitBase)
-
-
-def concat_continous(a: npt.NDArray[Any]) -> npt.NDArray[Any]:
-    """
-    Example
-        input [0, 1, 3, 4, 6]
-        output [[0, 2], [3, 5], [6, 7]]
-    """
-    if len(a) == 0:
-        return np.zeros((0, 2), np.uint64)
-    b = np.abs(a[1:] - a[:-1])
-    i = np.where(b != 1)[0]
-    ans = np.empty((len(i) + 1, 2), np.uint64)
-    ans[1:, 0] = a[i + 1]
-    ans[:-1, 1] = a[i] + 1
-    ans[0, 0] = a[0]
-    ans[-1, -1] = a[-1] + 1
-    return ans
 
 
 def read_indexed_array(
