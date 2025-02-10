@@ -117,7 +117,7 @@ def test_shape(big_data):
     assert big_data.shape == (big_data.num_data, big_data.num_pix)
 
 
-def test_getitem(big_data):
+def test_getitem(big_data, big_dense):
     for i in np.random.choice(big_data.num_data, 5):
         assert np.sum(big_data[i] == 1) == big_data.ones[i]
 
@@ -126,10 +126,16 @@ def test_getitem(big_data):
     t0 = time.time()
     subdata1 = big_data[mask]
     subdata2 = big_data[idx]
-    logging.info(f"Select dataset: {(time.time()-t0)/2}s")
+    logging.info(f"Select dataset: {(time.time() - t0) / 2}s")
     assert subdata1 == subdata2
     for _ in np.random.choice(subdata1.num_data, 5):
         assert np.all(subdata1[_] == big_data[idx[_]])
+
+    for _ in range(10):
+        i = np.random.choice(
+            big_data.num_data, size=np.random.randint(big_data.num_data)
+        )
+        assert np.all(big_data[i].todense() == big_dense[i])
 
 
 def test_concatenate(small_data, big_data):
@@ -205,7 +211,7 @@ def test_fileio(suffix, kargs, big_data):
         t0 = time.time()
         d_read = ef.patterns(f.name, start=start, end=end)
         logging.info(
-            f"Reading {d_read.num_data} patterns from h5 file(v1): {time.time()-t0}"
+            f"Reading {d_read.num_data} patterns from h5 file(v1): {time.time() - t0}"
         )
         assert d_read == big_data[start:end]
 
@@ -233,7 +239,7 @@ def test_write_patterns(suffix, data_list):
         all_data = np.concatenate(data_list)
         all_data.write(f1.name, overwrite=True)
         t1 = time.time() - t
-        logging.info(f"speed[single]: {all_data.nbytes * 1e-9 /t1:.2f} GB/s")
+        logging.info(f"speed[single]: {all_data.nbytes * 1e-9 / t1:.2f} GB/s")
 
         t = time.time()
         ef.write_patterns(data_list, f0.name, buffer_size=2**12, overwrite=True)
@@ -354,3 +360,7 @@ def test_pattern_list(data_emc, data_h5):
     np.testing.assert_equal(plst.ones, np.concatenate([p0.ones, p1.ones]))
     plst2 = ef.PatternsSOneFileList([plst, p0])
     assert plst2[: len(plst)][: len(p0)] == p0[:]
+
+
+def test_aaa(small_data):
+    print(small_data)

@@ -24,6 +24,7 @@ from scipy.sparse import csr_array, hstack
 
 from ._h5helper import PATH_TYPE, H5Path, check_remove_groups, make_path
 from ._misc import pretty_size
+from ._utils import concat_continous
 
 _log = logging.getLogger(__name__)
 
@@ -218,14 +219,35 @@ class PatternsSOne:
         self, *index: Union[slice, npt.NDArray[np.bool_], npt.NDArray["np.integer[T1]"]]
     ) -> PatternsSOne: ...
 
+    def _get_subdataset0(self, i) -> PatternsSOne:
+        if len(i) == 0:
+            return _zeros((0, self.num_pix))
+        c = concat_continous(i)
+        multi_s = self.multi_idx[c]
+        return PatternsSOne(
+            num_pix=self.num_pix,
+            ones=self.ones[i],
+            place_ones=np.concatenate(
+                [self.place_ones[s:e] for s, e in self.ones_idx[c]]
+            ),
+            multi=self.multi[i],
+            place_multi=np.concatenate([self.place_multi[s:e] for s, e in multi_s]),
+            count_multi=np.concatenate([self.count_multi[s:e] for s, e in multi_s]),
+        )
+
     def __getitem__(
         self,
         *index: "int | slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[T1]]",
     ) -> Union[npt.NDArray[np.int32], PatternsSOne]:
         if len(index) == 1 and isinstance(index[0], (int, np.integer)):
             return self._get_pattern(int(index[0]))
-        else:
-            return self._get_subdataset(index)
+        if len(index) == 1 and isinstance(index[0], np.ndarray):
+            if index[0].dtype == bool:
+                i = np.where(index[0])[0]
+            else:
+                i = index[0]
+            return self._get_subdataset0(i)
+        return self._get_subdataset(index)
 
     def write(
         self,
