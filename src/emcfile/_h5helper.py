@@ -103,6 +103,9 @@ class H5Path:
         with h5py.File(self.fn, "r") as fp:
             return self.gn in fp
 
+    def resolve(self):
+        return H5Path(self.fn.resolve(), self.gn)
+
     @contextmanager
     def open(self, *args: Any, **kargs: Any) -> Iterator[h5py.File]:
         with h5py.File(self.fn, *args, **kargs) as fptr:

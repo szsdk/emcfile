@@ -167,7 +167,7 @@ class PatternsSOneEMC(PatternsSOneFile):
     HEADER_BYTES = 1024
 
     def __init__(self, fn: "str | Path"):
-        self._fn = Path(fn)
+        self._fn = Path(fn).resolve()
         with open(self._fn, "rb") as fin:
             self.num_data = np.fromfile(fin, dtype=np.int32, count=1)[0]
             self.num_pix = np.fromfile(fin, dtype=np.int32, count=1)[0]
@@ -274,7 +274,7 @@ def read_indexed_array_h5(
 
 class PatternsSOneH5(PatternsSOneFile):
     def __init__(self, fn: "str | Path | H5Path"):
-        self._fn = h5path(fn)
+        self._fn = h5path(fn).resolve()
         with self._fn.open_group() as (_, gp):
             self.num_data = int(gp.attrs["num_data"])
             self.num_pix = int(gp.attrs["num_pix"])
