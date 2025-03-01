@@ -62,7 +62,7 @@ class PatternsSOne:
         count_multi: npt.NDArray[np.int32],
     ) -> None:
         self.ndim: int = 2
-        self.num_pix = num_pix
+        self.num_pix = int(num_pix)
         self.ones = ones
         self.multi = multi
         self.place_ones = place_ones
