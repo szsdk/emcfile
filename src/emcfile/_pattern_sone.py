@@ -197,17 +197,13 @@ class PatternsSOne:
                 int, len(self.place_ones) + np.sum(self.count_multi, dtype=dtype)
             )
         elif axis == 1:
-            ans: npt.NDArray[Any] = self.ones + np.squeeze(
-                np.asarray(self._get_sparse_multi().sum(axis=1, dtype=dtype))
-            )
+            ans = self.ones.astype(dtype, copy=True)
+            ans += np.squeeze(self._get_sparse_multi().sum(axis=1, dtype=dtype))
             return ans[:, None] if keepdims else ans
         elif axis == 0:
-            ans = np.squeeze(
-                np.asarray(self._get_sparse_ones().sum(axis=0, dtype=dtype))
-            )
-            ans = ans + np.squeeze(
-                np.asarray(self._get_sparse_multi().sum(axis=0, dtype=dtype))
-            )
+            ans: npt.NDArray[Any] = np.zeros(self.num_pix, dtype=dtype)
+            np.add.at(ans, self.place_ones, 1)
+            np.add.at(ans, self.place_multi, self.count_multi)
             return ans[None, :] if keepdims else ans
         raise ValueError(f"Do not support axis={axis}.")
 
