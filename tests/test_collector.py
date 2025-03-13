@@ -21,3 +21,8 @@ def test_collector(tmp_path):
     # test append with wrong size
     with pytest.raises(ValueError):
         cl.append(np.random.randint(32, size=35))
+
+    cl.extend(imgs)
+    cl.extend(np.array(imgs))
+    cl.extend(ef.patterns(np.array(imgs)))
+    assert np.concatenate(cl.pattern_list()) == ef.patterns(np.array(imgs * 4))
