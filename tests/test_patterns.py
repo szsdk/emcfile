@@ -7,12 +7,11 @@ import tempfile
 import time
 from pathlib import Path
 
+import emcfile as ef
 import numpy as np
 import pytest
 from psutil import Process
 from scipy.sparse import coo_array, csr_array
-
-import emcfile as ef
 
 from .utils import temp_seed
 
@@ -271,6 +270,32 @@ def test_PatternsSOneFile_shape(file, request):
     d = ef.file_patterns(p)
     assert len(d) == d.num_data
     assert d.shape == (d.num_data, d.num_pix)
+
+
+@pytest.mark.parametrize(
+    "file, chunk_size",
+    [
+        ("data_emc", 1),
+        ("data_h5", 1),
+        pytest.param("data_h5_v1", 1, marks=pytest.mark.skip("Too slow")),
+        ("data_emc", 128),
+        ("data_h5", 128),
+        ("data_h5_v1", 128),
+        ("data_emc", 99999),
+        ("data_h5", 99999),
+        ("data_h5_v1", 99999),
+    ],
+)
+@pytest.mark.parametrize("axis", [None, 0, 1])
+@pytest.mark.parametrize("keepdims", [True, False])
+def test_PatternsSOneFile_sum(file, axis, keepdims, chunk_size, request):
+    p = Path(request.getfixturevalue(file))
+    d1 = ef.patterns(p)
+    d2 = ef.file_patterns(p)
+    assert np.all(
+        d1.sum(axis=axis, keepdims=keepdims)
+        == d2.sum(axis=axis, keepdims=keepdims, chunk_size=chunk_size)
+    )
 
 
 @pytest.mark.parametrize("file", ["data_emc", "data_h5", "data_h5_v1"])

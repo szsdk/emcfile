@@ -85,14 +85,17 @@ class PatternsSOneFile:
     num_pix: int
     _init_idx: bool
 
-    def sparsity(self) -> float:
+    @property
+    def nbytes(self) -> int:
         self.init_idx()
-        nbytes = (
+        return int(
             self.ones.nbytes
             + self.multi.nbytes
             + (self.ones.sum() + self.multi.sum() * 2) * I4
         )
-        return float(nbytes / (4 * self.num_data * self.num_pix))
+
+    def sparsity(self) -> float:
+        return float(self.nbytes / (4 * self.num_data * self.num_pix))
 
     def _read_patterns(
         self, idx_con: npt.NDArray["np.integer[T1]"]
@@ -161,6 +164,27 @@ class PatternsSOneFile:
 
     def sparse_pattern(self, index: int) -> SPARSE_PATTERN:
         return self[index : index + 1].sparse_pattern(0)
+
+    def sum(
+        self,
+        axis: Optional[int] = None,
+        keepdims: bool = False,
+        dtype: npt.DTypeLike = None,
+        chunk_size: Optional[int] = None,
+    ) -> Union[int, float, npt.NDArray[Any]]:
+        if chunk_size is None:
+            chunk_size = max(8, int(self.nbytes / 100_000_000))  # about 100MB
+        sums = [
+            self[i : min(i + chunk_size, self.num_data)].sum(axis=axis, dtype=dtype)
+            for i in range(0, self.num_data, chunk_size)
+        ]
+        if axis == 1:
+            ans_1 = np.concatenate(sums)
+            return ans_1.reshape(-1, 1) if keepdims else ans_1
+        if axis == 0:
+            ans = np.sum(cast(list[npt.NDArray[Any]], sums), axis=0)
+            return cast(npt.NDArray[Any], ans.reshape(1, -1) if keepdims else ans)
+        return cast(Union[float, int], np.sum(cast(list[Union[int, float]], sums)))
 
 
 class PatternsSOneEMC(PatternsSOneFile):
