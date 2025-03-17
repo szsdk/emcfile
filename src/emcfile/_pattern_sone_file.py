@@ -193,8 +193,8 @@ class PatternsSOneEMC(PatternsSOneFile):
     def __init__(self, fn: "str | Path"):
         self._fn = Path(fn).resolve()
         with open(self._fn, "rb") as fin:
-            self.num_data = np.fromfile(fin, dtype=np.int32, count=1)[0]
-            self.num_pix = np.fromfile(fin, dtype=np.int32, count=1)[0]
+            self.num_data = int(np.fromfile(fin, dtype=np.int32, count=1)[0])
+            self.num_pix = int(np.fromfile(fin, dtype=np.int32, count=1)[0])
         self.ndim = 2
         self.shape = (self.num_data, self.num_pix)
         self._init_idx = False
@@ -223,8 +223,8 @@ class _PatternsSOneBytes(PatternsSOneFile):
     def __init__(self, fn: BytesIO):
         self._fn = fn
         self._fn.seek(0)
-        self.num_data = np.frombuffer(self._fn.read(4), dtype=np.int32, count=1)[0]
-        self.num_pix = np.frombuffer(self._fn.read(4), dtype=np.int32, count=1)[0]
+        self.num_data = int(np.frombuffer(self._fn.read(4), dtype=np.int32, count=1)[0])
+        self.num_pix = int(np.frombuffer(self._fn.read(4), dtype=np.int32, count=1)[0])
         self.ndim = 2
         self.shape = (self.num_data, self.num_pix)
         self._init_idx = False
@@ -366,7 +366,7 @@ class PatternsSOneH5V1(PatternsSOneFile):
         self._fn = h5path(fn)
         with self._fn.open_group() as (_, gp):
             self.num_data = len(gp["place_ones"])
-            self.num_pix = gp["num_pix"][:][0]
+            self.num_pix = int(gp["num_pix"][:][0])
         self.ndim = 2
         self.shape = (self.num_data, self.num_pix)
         self._init_idx = False
