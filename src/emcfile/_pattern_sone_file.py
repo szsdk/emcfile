@@ -12,6 +12,7 @@ import numpy as np
 import numpy.typing as npt
 
 from ._h5helper import PATH_TYPE, H5Path, h5path, make_path
+from ._misc import pretty_size
 from ._pattern_sone import SPARSE_PATTERN, PatternsSOne
 from ._utils import concat_continous
 
@@ -114,6 +115,14 @@ class PatternsSOneFile:
         self.multi_idx = np.zeros(self.num_data + 1, dtype="u8")
         np.cumsum(self.multi, out=self.multi_idx[1:])
         self._init_idx = True
+
+    def __repr__(self) -> str:
+        return f"""Pattern(1-sparse) <{hex(id(self))}>
+  Number of patterns: {self.num_data}
+  Number of pixels: {self.num_pix}
+  Size: {pretty_size(self.nbytes)}
+  Sparsity: {self.sparsity() * 100:.2f} %
+"""
 
     def __len__(self) -> int:
         return int(self.num_data)
