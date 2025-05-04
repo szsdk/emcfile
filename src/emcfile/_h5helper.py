@@ -291,7 +291,7 @@ def _check_exists(
     return True
 
 
-_T = Union[Mapping[str, "_T"], npt.NDArray[Any], str, int, float, bool]
+_T = Union[Mapping[str, "_T"], npt.NDArray[Any], str, int, float, bool, np.dtype]
 
 
 def _write_single(
@@ -303,20 +303,27 @@ def _write_single(
     compression: Optional[str],
     compression_opts: Union[None, str, int],
 ) -> None:
-    if isinstance(v, np.ndarray):
-        if not isinstance(group, (h5py.File, h5py.Group)):
-            raise Exception(f"Cannot write type {type(v)} to {type(group)}")
-        if _check_exists(k, group, overwrite, verbose):
-            del group[k]
-        group.create_dataset(
-            k, data=v, compression=compression, compression_opts=compression_opts
-        )
-    elif isinstance(v, dict):
-        if not isinstance(group, (h5py.File, h5py.Group)):
-            raise Exception(f"Cannot write type {type(v)} to {type(group)}")
-        _write_group(group, k, v, overwrite, verbose, compression, compression_opts)
-    else:
-        group.attrs[k] = v
+    match v:
+        case np.ndarray():
+            if not isinstance(group, (h5py.File, h5py.Group)):
+                raise Exception(f"Cannot write type {type(v)} to {type(group)}")
+            if _check_exists(k, group, overwrite, verbose):
+                del group[k]
+            group.create_dataset(
+                k, data=v, compression=compression, compression_opts=compression_opts
+            )
+        case dict():
+            if not isinstance(group, (h5py.File, h5py.Group)):
+                raise Exception(f"Cannot write type {type(v)} to {type(group)}")
+            _write_group(group, k, v, overwrite, verbose, compression, compression_opts)
+        case np.dtype():
+            if not isinstance(group, (h5py.File, h5py.Group)):
+                raise Exception(f"Cannot write type {type(v)} to {type(group)}")
+            if _check_exists(k, group, overwrite, verbose):
+                del group[k]
+            group[k] = v
+        case _:
+            group.attrs[k] = v
 
 
 def _write_group(
@@ -370,15 +377,22 @@ def write_obj_h5(
         _write_group(fp, f.gn, obj, overwrite, verbose, compression, compression_opts)
 
 
-def _read_group(g: Union[h5py.File, h5py.Group]) -> dict[str, _T]:
+def _read_group(
+    g: Union[h5py.File, h5py.Group, h5py.Dataset, h5py.Datatype],
+) -> dict[str, _T]:
     ans = dict()
     for k, v in g.attrs.items():
         ans[k] = v
-    if isinstance(g, (h5py.Group, h5py.File)):
-        for k in g.keys():
-            ans[k] = _read_group(g[k]) if isinstance(g[k], h5py.Group) else g[k][...]
-    else:
-        ans["."] = g[...]
+    match g:
+        case h5py.Group() | h5py.File():
+            for k in g.keys():
+                ans[k] = _read_group(g[k])
+        case h5py.Dataset():
+            ans["."] = g[...]
+        case h5py.Datatype():
+            ans["."] = g.dtype
+    if len(ans) == 1 and ("." in ans):
+        return ans["."]
     return ans
 
 

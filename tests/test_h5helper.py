@@ -1,20 +1,21 @@
-import tempfile
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
+from typing import cast
 
+import h5py
 import numpy as np
 import pytest
 
 import emcfile as ef
 
 
-def test_h5group():
+def test_h5group(tmp_path_factory):
+    fn = tmp_path_factory.mktemp("data") / "test.h5"
     rand_data = np.random.rand(222)
-    with tempfile.NamedTemporaryFile(suffix=".h5") as f:
-        with ef.h5group(f"{f.name}::group", "a") as (_, g):
-            g.create_dataset("data", data=rand_data)
-        with ef.h5group(f"{f.name}::group", "r") as (_, g):
-            np.testing.assert_array_equal(g["data"][...], rand_data)
+    with ef.h5group(f"{fn}::group", "a") as (_, g):
+        g.create_dataset("data", data=rand_data)
+    with ef.h5group(f"{fn}::group", "r") as (_, g):
+        np.testing.assert_array_equal(cast(h5py.Dataset, g["data"])[...], rand_data)
 
 
 @pytest.mark.parametrize(
@@ -65,19 +66,24 @@ def _compare_dict(d1, d2):
     return True
 
 
-def test_obj_h5():
-    with tempfile.NamedTemporaryFile(suffix=".h5") as fth5:
-        obj = {"name": "sz", "age": 27, "data": {"test": np.random.rand(3, 5)}}
-        obj_path = f"{fth5.name}::person"
+def test_obj_h5(tmp_path_factory):
+    fn = tmp_path_factory.mktemp("data") / "test.h5"
+    obj = {
+        "name": "sz",
+        "age": 27,
+        "data": {"test": np.random.rand(3, 5)},
+        "datatype": np.dtype([("a", int), ("b", float)]),
+    }
+    obj_path = f"{fn}::person"
+    ef.write_obj_h5(obj_path, obj, overwrite=False)
+    with pytest.raises(Exception):
         ef.write_obj_h5(obj_path, obj, overwrite=False)
-        with pytest.raises(Exception):
-            ef.write_obj_h5(obj_path, obj, overwrite=False)
-        ef.write_obj_h5(obj_path, obj, overwrite=True)
-        assert _compare_dict(ef.read_obj_h5(obj_path), obj)
+    ef.write_obj_h5(obj_path, obj, overwrite=True)
+    assert _compare_dict(ef.read_obj_h5(obj_path), obj)
 
-        obj = {"name": "sz", "age": 27, ".": np.random.rand(3, 5)}
-        ef.write_obj_h5(obj_path, obj, overwrite=True, verbose=True)
-        assert _compare_dict(ef.read_obj_h5(obj_path), obj)
+    obj = {"name": "sz", "age": 27, ".": np.random.rand(3, 5)}
+    ef.write_obj_h5(obj_path, obj, overwrite=True, verbose=True)
+    assert _compare_dict(ef.read_obj_h5(obj_path), obj)
 
 
 @pytest.fixture(
