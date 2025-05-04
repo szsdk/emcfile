@@ -299,6 +299,16 @@ def test_PatternsSOneFile_sum(file, axis, keepdims, chunk_size, request):
     )
 
 
+# @pytest.mark.parametrize("file", ["data_emc", "data_h5"])
+@pytest.mark.parametrize("file", ["data_emc"])
+def test_PatternsSOneFile_attrs(file, request):
+    p = Path(request.getfixturevalue(file))
+    d1 = ef.patterns(p)
+    d2 = ef.file_patterns(p)
+    for a in ef.PatternsSOne.ATTRS:
+        np.testing.assert_equal(getattr(d1, a), getattr(d2, a))
+
+
 @pytest.mark.parametrize("file", ["data_emc", "data_h5", "data_h5_v1"])
 def test_PatternsSOneFile_getitem(file, request):
     p = Path(request.getfixturevalue(file))
@@ -373,7 +383,7 @@ def test_full(shape):
     )
 
 
-def test_pattern_list(data_emc, data_h5):
+def test_pattern_list(data_emc, data_h5, tmp_path_factory):
     p0 = ef.file_patterns(data_emc)
     p1 = ef.file_patterns(data_h5)
     plst = ef.PatternsSOneList([p0, p1[:]])
@@ -386,6 +396,17 @@ def test_pattern_list(data_emc, data_h5):
     np.testing.assert_equal(plst.ones, np.concatenate([p0.ones, p1.ones]))
     plst2 = ef.PatternsSOneList([plst, p0])
     assert plst2[: len(plst)][: len(p0)] == p0[:]
+
+
+@pytest.mark.parametrize("file", ["plst.emc", "plst.h5"])
+def test_PatternsSOneList_write(data_emc, data_h5, file, tmp_path_factory):
+    fn = tmp_path_factory.mktemp("data") / file
+    p0 = data_emc
+    p1 = ef.file_patterns(data_h5)
+    p2 = p1[:]
+    plst = ef.PatternsSOneList([p0, p1, p2])
+    plst.write(fn, overwrite=True)
+    assert ef.patterns(fn) == np.concatenate([ef.patterns(p0), p1[:], p2])
 
 
 def test_aaa(small_data):

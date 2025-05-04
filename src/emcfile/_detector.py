@@ -39,14 +39,14 @@ T2 = TypeVar("T2", bound=npt.NBitBase)
 
 class PixelType(IntEnum):
     GOOD = 0  # This is not recommended to be used in a bitwise mask.
-    CORNER = np.uint8(0b00000001)
-    BAD = np.uint8(0b00000010)
+    CORNER = 0b00000001
+    BAD = 0b00000010
 
 
 _BITMAP = Union[Sequence[int], int]
 
 
-def _bitmap_to_int(bm: _BITMAP) -> np.unsignedinteger[np._typing._8Bit]:
+def _bitmap_to_int(bm: _BITMAP) -> np.uint8:
     if isinstance(bm, int):
         return np.uint8(bm)
     ans = 0
@@ -744,7 +744,11 @@ def get_3ddet_from_shape(
     y = ds.statistic
     x = (ds.bin_edges[:-1] + ds.bin_edges[1:]) / 2
     f = interp1d(
-        x, y, assume_sorted=False, fill_value=(y.max(), y.min()), bounds_error=False
+        x,
+        y,
+        assume_sorted=False,
+        fill_value=cast(float, (y.max(), y.min())),  # only make pyright happy
+        bounds_error=False,
     )
     r = np.linalg.norm(coor[:, :2], axis=1)
     factor = f(r)

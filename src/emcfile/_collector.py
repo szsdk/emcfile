@@ -1,12 +1,12 @@
 from collections.abc import Sequence
-from typing import Optional, Union, cast
+from typing import Optional, Union
 
 import numpy as np
 import numpy.typing as npt
 from typing_extensions import TypeAlias
 
 from ._h5helper import PATH_TYPE
-from ._pattern_sone import PatternsSOne, PatternsSOneBase, write_patterns
+from ._pattern_sone import PatternsSOne, write_patterns
 from ._pattern_sone_file import PatternsSOneList
 from ._patterns import patterns
 
