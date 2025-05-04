@@ -6,7 +6,8 @@ import numpy.typing as npt
 from typing_extensions import TypeAlias
 
 from ._h5helper import PATH_TYPE
-from ._pattern_sone import PatternsSOne, write_patterns
+from ._pattern_sone import PatternsSOne, PatternsSOneBase, write_patterns
+from ._pattern_sone_file import PatternsSOneList
 from ._patterns import patterns
 
 NP_IMG: TypeAlias = npt.NDArray[np.int_]
@@ -88,7 +89,7 @@ class PatternsSOneCollector:
         else:
             raise Exception()
 
-    def patterns(self) -> PatternsSOne:
+    def patterns(self) -> PatternsSOneList:
         """
         Generate the `PatternsSOne` pattern set from collected patterns.
 
@@ -99,9 +100,7 @@ class PatternsSOneCollector:
         self._clear_buffer()
         if len(self._patterns) == 0:
             raise ValueError("No pattern is added.")
-        if len(self._patterns) > 0:
-            self._patterns = [cast(PatternsSOne, np.concatenate(self._patterns))]
-        return self._patterns[0]
+        return PatternsSOneList(self._patterns)
 
     def pattern_list(self) -> list[PatternsSOne]:
         """
@@ -139,4 +138,10 @@ class PatternsSOneCollector:
             Buffer size for writing the patterns to the file.
         """
         self._clear_buffer()
-        write_patterns(self._patterns, path)
+        write_patterns(
+            self._patterns,
+            path,
+            h5version=h5version,
+            overwrite=overwrite,
+            buffer_size=buffer_size,
+        )

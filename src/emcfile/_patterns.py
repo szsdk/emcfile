@@ -39,7 +39,7 @@ def dense_to_PatternsSOne(arr: npt.NDArray["np.integer[T1]"]) -> PatternsSOne:
     )
 
 
-def coo_to_SOne_kernel(coo: coo_matrix) -> PatternsSOne:
+def coo_to_SOne_kernel(coo: coo_matrix | coo_array) -> PatternsSOne:
     coo = coo.copy()
     idx = coo.data == 1
     c = coo_matrix((np.ones(idx.sum(), "i4"), (coo.row[idx], coo.col[idx])), coo.shape)
@@ -47,13 +47,14 @@ def coo_to_SOne_kernel(coo: coo_matrix) -> PatternsSOne:
     coo.eliminate_zeros()
     coo_csr = coo.tocsr()
     c_csr = c.tocsr()
+    assert coo.shape is not None
     return PatternsSOne(
-        int(coo.shape[1]),
-        c_csr.indptr[1:] - c_csr.indptr[:-1],
-        coo_csr.indptr[1:] - coo_csr.indptr[:-1],
-        c_csr.indices,
-        coo_csr.indices,
-        coo_csr.data,
+        int(cast(int, coo.shape[1])),
+        np.diff(c_csr.indptr),
+        np.diff(coo_csr.indptr),
+        cast(np.ndarray, c_csr.indices),
+        cast(np.ndarray, coo_csr.indices),
+        cast(np.ndarray, coo_csr.data),
     )
 
 
@@ -69,14 +70,14 @@ def _from_sparse_patterns(src: Sequence[SPARSE_PATTERN]) -> PatternsSOne:
 
 
 def patterns(
-    src: "PATH_TYPE"
-    "| io.BytesIO"
-    "| npt.NDArray[np.integer[T1]]"
-    "| spmatrix"
-    "| int"
-    "| tuple[tuple[int, int], int]"
-    "| PatternsSOne"
-    "| Sequence[SPARSE_PATTERN]",
+    src: PATH_TYPE
+    | io.BytesIO
+    | npt.NDArray[np.integer[T1]]
+    | spmatrix
+    | int
+    | tuple[tuple[int, int], int]
+    | PatternsSOne
+    | Sequence[SPARSE_PATTERN],
     /,
     *,
     start: Optional[int] = None,
@@ -126,53 +127,52 @@ def patterns(
     - Another `PatternsSOne` object: The function returns a subset or a copy of the input object,
       starting from index `start` and ending at index `end`.
     """
-    if isinstance(src, io.BytesIO):
-        return _PatternsSOneBytes(src)[start:end]
-    if isinstance(src, (str, Path, H5Path)):
-        return file_patterns(src)[start:end]
-    if isinstance(src, PatternsSOne):
-        return src[start:end]
-    elif isinstance(src, (int, np.integer)):
-        return PatternsSOne(
-            int(src),
-            np.empty((0,), np.uint32),
-            np.empty((0,), np.uint32),
-            np.empty((0,), np.uint32),
-            np.empty((0,), np.uint32),
-            np.empty((0,), np.int32),
-        )
-    elif (
-        isinstance(src, tuple)
-        and (len(src) == 2)
-        and isinstance(src[0], tuple)
-        and (len(src[0]) == 2)
-        and isinstance(src[0][0], int)
-        and isinstance(src[0][1], int)
-        and isinstance(src[1], int)
-    ):
-        if src[1] == 0:
-            return _zeros((src[0][0], src[0][1]))
-        elif src[1] == 1:
-            return _ones((src[0][0], src[0][1]))
-        else:
-            return _full((src[0][0], src[0][1]), src[1])
-    elif isinstance(src, np.ndarray) and np.issubdtype(src.dtype, np.integer):
-        if start is not None or end is not None:
-            raise Exception()
-        return dense_to_PatternsSOne(src)
-    elif isinstance(src, (coo_array, coo_matrix)):
-        return coo_to_SOne_kernel(src)
-    elif isinstance(src, (sparray, spmatrix)):
-        return cast(
-            PatternsSOne,
-            np.concatenate(
-                [
-                    patterns(np.asarray((src[a:b]).todense()))
-                    for a, b in divide_range(0, src.shape[0], src.shape[0] // 1024 + 1)
-                ]
-            ),
-        )
-    elif isinstance(src, list) and isinstance(src[0], SPARSE_PATTERN):
-        return _from_sparse_patterns(src)
-    else:
-        raise Exception()
+    match src:
+        case io.BytesIO():
+            return _PatternsSOneBytes(src)[start:end]
+        case str() | Path() | H5Path():
+            return file_patterns(src)[start:end]
+        case PatternsSOne():
+            return src[start:end]
+        case int() | np.integer():
+            return PatternsSOne(
+                int(src),
+                np.empty((0,), np.uint32),
+                np.empty((0,), np.uint32),
+                np.empty((0,), np.uint32),
+                np.empty((0,), np.uint32),
+                np.empty((0,), np.int32),
+            )
+        case ((int() | np.integer(), int() | np.integer()) as shape, 0):
+            return _zeros(shape)
+        case ((int() | np.integer(), int() | np.integer()) as shape, 1):
+            return _ones(shape)
+        case (
+            (int() | np.integer(), int() | np.integer()) as shape,
+            int() | np.integer() as v,
+        ):
+            return _full(shape, v)
+        case np.ndarray():
+            if not np.issubdtype(src.dtype, np.integer):
+                raise ValueError(f"{src.dtype} is not supported")
+            ans = dense_to_PatternsSOne(src)
+            if (start is not None) or (end is not None):
+                ans = ans[start:end]
+            return ans
+        case coo_array() | coo_matrix():
+            return coo_to_SOne_kernel(src)
+        case sparray() | spmatrix():
+            return cast(
+                PatternsSOne,
+                np.concatenate(
+                    [
+                        patterns(np.asarray((src[a:b]).todense()))
+                        for a, b in divide_range(
+                            0, src.shape[0], src.shape[0] // 1024 + 1
+                        )
+                    ]
+                ),
+            )
+        case list() | np.ndarray() if all(isinstance(i, SPARSE_PATTERN) for i in src):
+            return _from_sparse_patterns(src)
+    raise Exception()

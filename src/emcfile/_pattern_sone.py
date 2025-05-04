@@ -9,12 +9,14 @@ from typing import (
     Dict,
     NamedTuple,
     Optional,
+    Protocol,
     Tuple,
     Type,
     TypeVar,
     Union,
     cast,
     overload,
+    runtime_checkable,
 )
 
 import h5py
@@ -40,6 +42,55 @@ HANDLED_FUNCTIONS: Dict[Callable[..., Any], Callable[..., Any]] = {}
 
 T1 = TypeVar("T1", bound=npt.NBitBase)
 T2 = TypeVar("T2", bound=npt.NBitBase)
+
+
+TRANGE = slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[T1]]
+
+
+@runtime_checkable
+class PatternsSOneBase(Protocol):
+    @property
+    def num_pix(self) -> int: ...
+
+    @property
+    def num_data(self) -> int: ...
+
+    @property
+    def shape(self) -> Tuple[int, int]: ...
+
+    @property
+    def ndim(self) -> int: ...
+
+    @property
+    def ones(self) -> npt.NDArray[np.uint32]: ...
+
+    @property
+    def multi(self) -> npt.NDArray[np.uint32]: ...
+
+    @property
+    def place_ones(self) -> npt.NDArray[np.uint32]: ...
+
+    @property
+    def place_multi(self) -> npt.NDArray[np.uint32]: ...
+
+    @property
+    def count_multi(self) -> npt.NDArray[np.int32]: ...
+
+    def __len__(self) -> int: ...
+
+    @overload
+    def __getitem__(self, index: int | np.integer) -> npt.NDArray[np.int32]: ...
+
+    @overload
+    def __getitem__(self, index: TRANGE) -> PatternsSOne: ...
+
+    @overload
+    def __getitem__(self, index: tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
+
+    def __getitem__(
+        self,
+        index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
+    ) -> npt.NDArray[np.int32] | PatternsSOne: ...
 
 
 class PatternsSOne:
@@ -159,8 +210,8 @@ class PatternsSOne:
         return pattern
 
     def _get_subdataset(self, idx: Any) -> PatternsSOne:
-        so = self._get_sparse_ones().__getitem__(*idx)
-        sm = self._get_sparse_multi().__getitem__(*idx)
+        so = self._get_sparse_ones().__getitem__(idx)
+        sm = self._get_sparse_multi().__getitem__(idx)
         ones = so.indptr[1:] - so.indptr[:-1]
         multi = sm.indptr[1:] - sm.indptr[:-1]
         return PatternsSOne(
@@ -191,7 +242,13 @@ class PatternsSOne:
         axis: Optional[int] = None,
         keepdims: bool = False,
         dtype: npt.DTypeLike = None,
-    ) -> Union[npt.NDArray[Any], "np.integer[T1]", "np.floating[T2]", int, float]:
+    ) -> Union[
+        npt.NDArray[Any],
+        np.integer[npt.NBitBase],
+        np.floating[npt.NBitBase],
+        int,
+        float,
+    ]:
         if axis is None:
             return cast(
                 int, len(self.place_ones) + np.sum(self.count_multi, dtype=dtype)
@@ -208,12 +265,13 @@ class PatternsSOne:
         raise ValueError(f"Do not support axis={axis}.")
 
     @overload
-    def __getitem__(self, *index: int) -> npt.NDArray[np.int32]: ...
+    def __getitem__(self, index: int | np.integer) -> npt.NDArray[np.int32]: ...
 
     @overload
-    def __getitem__(
-        self, *index: Union[slice, npt.NDArray[np.bool_], npt.NDArray["np.integer[T1]"]]
-    ) -> PatternsSOne: ...
+    def __getitem__(self, index: TRANGE) -> PatternsSOne: ...
+
+    @overload
+    def __getitem__(self, index: tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
 
     def _get_subdataset0(self, i) -> PatternsSOne:
         if len(i) == 0:
@@ -233,17 +291,19 @@ class PatternsSOne:
 
     def __getitem__(
         self,
-        *index: "int | slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[T1]]",
+        index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
     ) -> Union[npt.NDArray[np.int32], PatternsSOne]:
-        if len(index) == 1 and isinstance(index[0], (int, np.integer)):
-            return self._get_pattern(int(index[0]))
-        if len(index) == 1 and isinstance(index[0], np.ndarray):
-            if index[0].dtype == bool:
-                i = np.where(index[0])[0]
-            else:
-                i = index[0]
-            return self._get_subdataset0(i)
-        return self._get_subdataset(index)
+        match index:
+            case int() | np.integer():
+                return self._get_pattern(int(index))
+            case np.ndarray() if np.issubdtype(index.dtype, bool):
+                return self._get_subdataset0(np.where(index)[0])
+            case np.ndarray() if np.issubdtype(index.dtype, np.integer):
+                return self._get_subdataset0(index)
+            case slice():
+                return self._get_subdataset((index,))
+            case _:
+                return self._get_subdataset(index)
 
     def write(
         self,
@@ -345,7 +405,7 @@ def implements(np_function: Callable[..., Any]) -> Callable[[FT], FT]:
 
 
 def iter_array_buffer(
-    datas: Sequence[PatternsSOne], buffer_size: int, g: str
+    datas: Sequence[PatternsSOneBase], buffer_size: int, g: str
 ) -> Iterable[Union[npt.NDArray[np.int32], npt.NDArray[np.uint32]]]:
     buffer = []
     nbytes = 0
@@ -368,7 +428,7 @@ def iter_array_buffer(
             yield np.concatenate(buffer)
 
 
-def _write_bin(datas: Sequence[PatternsSOne], path: Path, overwrite: bool) -> None:
+def _write_bin(datas: Sequence[PatternsSOneBase], path: Path, overwrite: bool) -> None:
     if path.exists() and not overwrite:
         raise Exception(f"{path} exists")
     num_data = np.sum([data.num_data for data in datas])
@@ -382,7 +442,7 @@ def _write_bin(datas: Sequence[PatternsSOne], path: Path, overwrite: bool) -> No
                 getattr(data, g).tofile(fptr)
 
 
-def _write_bytes(datas: Sequence[PatternsSOne], path: io.BytesIO) -> None:
+def _write_bytes(datas: Sequence[PatternsSOneBase], path: io.BytesIO) -> None:
     num_data = np.sum([data.num_data for data in datas])
     num_pix = datas[0].num_pix
 
@@ -395,7 +455,7 @@ def _write_bytes(datas: Sequence[PatternsSOne], path: io.BytesIO) -> None:
 
 
 def _write_h5_v2(
-    datas: Sequence[PatternsSOne],
+    datas: Sequence[PatternsSOneBase],
     path: H5Path,
     overwrite: bool,
     buffer_size: int,
@@ -406,6 +466,7 @@ def _write_h5_v2(
     num_data = np.sum([data.num_data for data in datas])
     num_pix = datas[0].num_pix
     with path.open_group("a", "a") as (_, fp):
+        assert isinstance(fp, (h5py.Group, h5py.File))
         check_remove_groups(
             fp, ["ones", "multi", "place_ones", "place_multi", "count_multi"], overwrite
         )
@@ -426,12 +487,14 @@ def _write_h5_v2(
         for g in PatternsSOne.ATTRS:
             n = 0
             for a in iter_array_buffer(datas, buffer_size, g):
-                fp[g][n : n + a.shape[0]] = a
+                fg = fp[g]
+                assert isinstance(fg, h5py.Dataset)
+                fg[n : n + a.shape[0]] = a
                 n += a.shape[0]
 
 
 def write_patterns(
-    datas: Sequence[PatternsSOne],
+    datas: Sequence[PatternsSOneBase],
     path: Union[PATH_TYPE, io.BytesIO],
     *,
     h5version: str = "2",
@@ -463,7 +526,7 @@ def write_patterns(
 
 
 def _write_h5_v1(
-    data: PatternsSOne,
+    data: PatternsSOneBase,
     path: H5Path,
     overwrite: bool,
     start: int = 0,
@@ -471,6 +534,7 @@ def _write_h5_v1(
 ) -> None:
     dt = h5py.special_dtype(vlen=np.int32)
     with path.open_group("a", "a") as (_, fp):
+        assert isinstance(fp, (h5py.Group, h5py.File))
         check_remove_groups(
             fp,
             ["num_pix", "ones", "multi", "place_ones", "place_multi", "count_multi"],
@@ -481,19 +545,20 @@ def _write_h5_v1(
 
         place_ones = fp.create_dataset("place_ones", (data.num_data,), dtype=dt)
 
-        for idx, d in enumerate(np.split(data.place_ones, data.ones_idx[1:-1]), start):
+        ones_idx = np.zeros(data.num_data + 1, dtype="u8")
+        np.cumsum(data.ones, out=ones_idx[1:])
+        multi_idx = np.zeros(data.num_data + 1, dtype="u8")
+        np.cumsum(data.multi, out=multi_idx[1:])
+
+        for idx, d in enumerate(np.split(data.place_ones, ones_idx[1:-1]), start):
             place_ones[idx] = d
 
         place_multi = fp.create_dataset("place_multi", (data.num_data,), dtype=dt)
-        for idx, d in enumerate(
-            np.split(data.place_multi, data.multi_idx[1:-1]), start
-        ):
+        for idx, d in enumerate(np.split(data.place_multi, multi_idx[1:-1]), start):
             place_multi[idx] = d
 
         count_multi = fp.create_dataset("count_multi", (data.num_data,), dtype=dt)
-        for idx, d_c in enumerate(
-            np.split(data.count_multi, data.multi_idx[1:-1]), start
-        ):
+        for idx, d_c in enumerate(np.split(data.count_multi, multi_idx[1:-1]), start):
             count_multi[idx] = d_c
         fp.attrs["version"] = "1"
 
@@ -533,15 +598,16 @@ def concatenate_PatternsSOne(
             return ans
         raise Exception(casting)
     elif axis == 1:
-        ones = hstack([d._get_sparse_ones() for d in patterns_l])
-        multi = hstack([d._get_sparse_multi() for d in patterns_l])
+        ones = cast(csr_array, hstack([d._get_sparse_ones() for d in patterns_l]))
+        multi = cast(csr_array, hstack([d._get_sparse_multi() for d in patterns_l]))
+        assert ones.shape is not None
         return PatternsSOne(
             ones.shape[1],
-            ones=ones.indptr[1:] - ones.indptr[:-1],
-            multi=multi.indptr[1:] - multi.indptr[:-1],
-            place_ones=ones.indices,
-            place_multi=multi.indices,
-            count_multi=multi.data,
+            ones=cast(np.ndarray, ones.indptr[1:] - ones.indptr[:-1]),
+            multi=cast(np.ndarray, multi.indptr[1:] - multi.indptr[:-1]),
+            place_ones=cast(np.ndarray, ones.indices),
+            place_multi=cast(np.ndarray, multi.indices),
+            count_multi=cast(np.ndarray, multi.data),
         )
     raise ValueError("The axis should be 0 or 1.")
 
@@ -578,5 +644,5 @@ def _zeros(shape: Tuple[int, int]) -> PatternsSOne:
         np.zeros(num_data, dtype=np.uint32),
         np.array([], dtype=np.uint32),
         np.array([], dtype=np.uint32),
-        np.array([], dtype=np.uint32),
+        np.array([], dtype=np.int32),
     )

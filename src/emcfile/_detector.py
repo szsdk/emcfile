@@ -138,8 +138,10 @@ class Detector:
 
     def __getitem__(
         self,
-        index: "slice | Sequence[PixelType] | npt.NDArray[np.bool_] |"
-        "npt.NDArray[np.integer[Any]]",
+        index: slice
+        | Sequence[PixelType]
+        | npt.NDArray[np.bool_]
+        | npt.NDArray[np.integer[Any]],
     ) -> Detector:
         idx = index
         if isinstance(index, Sequence):
@@ -197,7 +199,10 @@ class Detector:
         self,
         flags: _BITMAP,
         values: _BITMAP,
-        pixel_indices: "None | slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[Any]]" = None,
+        pixel_indices: None
+        | slice
+        | npt.NDArray[np.bool_]
+        | npt.NDArray[np.integer[Any]] = None,
     ) -> None:
         f = _bitmap_to_int(flags)
         v = _bitmap_to_int(values)
@@ -206,7 +211,10 @@ class Detector:
     def mask_flip(
         self,
         flags: _BITMAP,
-        pixel_indices: "None | slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[Any]]" = None,
+        pixel_indices: None
+        | slice
+        | npt.NDArray[np.bool_]
+        | npt.NDArray[np.integer[Any]] = None,
     ) -> None:
         f = _bitmap_to_int(flags)
         self.mask[pixel_indices] ^= f
@@ -294,11 +302,19 @@ def _write_h5det(det: Detector, fname: H5Path) -> None:
 def _from_h5det(fname: H5Path) -> Detector:
     with fname.open_group("r", "r") as (_, fp):
         return Detector(
-            np.array([fp["qx"][:], fp["qy"][:], fp["qz"][:]]).reshape(3, -1).T.copy(),
-            fp["corr"][:].ravel(),
-            fp["mask"][:].ravel(),
-            fp["detd"][...].item(),
-            fp["ewald_rad"][...].item(),
+            np.array(
+                [
+                    cast(h5py.Dataset, fp["qx"])[:],
+                    cast(h5py.Dataset, fp["qy"])[:],
+                    cast(h5py.Dataset, fp["qz"])[:],
+                ]
+            )
+            .reshape(3, -1)
+            .T.copy(),
+            cast(h5py.Dataset, fp["corr"])[:].ravel(),
+            cast(h5py.Dataset, fp["mask"])[:].ravel(),
+            cast(h5py.Dataset, fp["detd"])[...].item(),
+            cast(h5py.Dataset, fp["ewald_rad"])[...].item(),
         )
 
 
@@ -503,8 +519,8 @@ def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
     np.ndarray:
         The projection coordinate of the center.
     """
-    if coor.shape[0] < 4:
-        raise ValueError("At least 4 points are required.")
+    # if coor.shape[0] < 4:
+    #     raise ValueError("At least 4 points are required.")
 
     # 2d detector test
     for ca, cb, cc in itertools.combinations(range(coor.shape[0]), 3):
@@ -515,8 +531,10 @@ def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
         n0 = np.cross(db, dc)
         if np.linalg.norm(n0) > 1e-1:
             break
-    if np.linalg.norm(n0) < 1e-1:
+    else:
         raise ValueError("The input coor is degenerated to a line.")
+    # if np.linalg.norm(n0) < 1e-1:
+    #     raise ValueError("The input coor is degenerated to a line.")
 
     coor_shift = coor - coor[ca]
     with np.errstate(divide="ignore", invalid="ignore"):

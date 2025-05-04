@@ -12,7 +12,7 @@ def test_collector(tmp_path):
         cl.append(img)
         imgs.append(img)
     ref = ef.patterns(np.array(imgs))
-    assert ref == cl.patterns()
+    assert ref == cl.patterns()[:]
 
     # test write
     cl.write(tmp_path / "test.emc")
