@@ -33,8 +33,8 @@ __all__ = [
 
 _log = logging.getLogger(__name__)
 
-T1 = TypeVar("T1", bound=npt.NBitBase)
-T2 = TypeVar("T2", bound=npt.NBitBase)
+T1 = TypeVar("T1", np.float32, np.float64)
+T2 = TypeVar("T2", np.uint8, np.int32, np.int64)
 
 
 class PixelType(IntEnum):
@@ -330,9 +330,9 @@ def _from_file(fname: PATH_TYPE) -> Detector:
 
 
 def _init_detector(
-    coor: npt.NDArray["np.floating[T1]"],
-    mask: npt.NDArray["np.integer[T2]"],
-    factor: npt.NDArray["np.floating[T1]"],
+    coor: npt.NDArray[T1],
+    mask: npt.NDArray[T2],
+    factor: npt.NDArray[T1],
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int32], npt.NDArray[np.float64]]:
     if not (coor.shape[0] == mask.shape[0] == factor.shape[0]):
         raise ValueError("`coor`, `mask`, `factor` should have the same length.")
@@ -347,9 +347,9 @@ def _init_detector(
 def detector(
     src: "Detector | PATH_TYPE | None" = None,
     *,
-    coor: Optional[npt.NDArray["np.floating[T1]"]] = None,
-    mask: Optional[npt.NDArray["np.integer[T2]"]] = None,
-    factor: Optional[npt.NDArray["np.floating[T1]"]] = None,
+    coor: Optional[npt.NDArray[T1]] = None,
+    mask: Optional[npt.NDArray[T2]] = None,
+    factor: Optional[npt.NDArray[T1]] = None,
     detd: "float | int | None" = None,
     ewald_rad: "float | int | None" = None,
     norm_flag: bool = True,

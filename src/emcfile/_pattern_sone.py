@@ -40,11 +40,8 @@ class SPARSE_PATTERN(NamedTuple):
 
 HANDLED_FUNCTIONS: Dict[Callable[..., Any], Callable[..., Any]] = {}
 
-T1 = TypeVar("T1", bound=npt.NBitBase)
-T2 = TypeVar("T2", bound=npt.NBitBase)
 
-
-TRANGE = slice | npt.NDArray[np.bool_] | npt.NDArray[np.integer[T1]]
+TRANGE = slice | npt.NDArray[np.bool_ | np.int32 | np.int64 | np.uint32 | np.uint64]
 
 
 @runtime_checkable
@@ -244,8 +241,10 @@ class PatternsSOne:
         dtype: npt.DTypeLike = None,
     ) -> Union[
         npt.NDArray[Any],
-        np.integer[npt.NBitBase],
-        np.floating[npt.NBitBase],
+        np.int32,
+        np.int64,
+        np.float32,
+        np.float64,
         int,
         float,
     ]:
