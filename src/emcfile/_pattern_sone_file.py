@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import glob
 import io
 import logging
 import os
@@ -635,6 +636,10 @@ class PatternsSOneList(PatternsSOneFile):
 
 
 def file_patterns(fn: Union[Sequence[PATH_TYPE], PATH_TYPE]) -> PatternsSOneFile:
+    if (isinstance(fn, str) and glob.has_magic(fn)) or (
+        isinstance(fn, Path) and glob.has_magic(str(fn))
+    ):
+        return PatternsSOneList(sorted(glob.glob(str(fn))))
     if isinstance(fn, (tuple, list)):
         return PatternsSOneList(fn)
     assert isinstance(fn, (str, Path, H5Path))
