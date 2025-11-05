@@ -232,6 +232,26 @@ class PatternsSOneFile:
 
 
 class PatternsSOneEMC(PatternsSOneFile):
+    """
+    Represents a collection of patterns stored in an EMC-formatted binary file.
+
+    This class provides an interface for reading patterns from `.emc` or `.bin`
+    files, which are custom binary formats for storing sparse pattern data.
+    It supports lazy loading, meaning that data is only read from the file
+    when it is actually needed.
+
+    Parameters
+    ----------
+    fn
+        The path to the EMC file.
+
+    Attributes
+    ----------
+    num_data : int
+        The number of patterns in the file.
+    num_pix : int
+        The number of pixels in each pattern.
+    """
     HEADER_BYTES = 1024
 
     def __init__(self, fn: "str | Path"):
@@ -390,6 +410,26 @@ def read_indexed_array_h5(
 
 
 class PatternsSOneH5(PatternsSOneFile):
+    """
+    Represents a collection of patterns stored in an HDF5 file.
+
+    This class provides an interface for reading patterns from HDF5 files that
+    adhere to the `emcfile` storage format. It supports lazy loading of data
+    to efficiently handle large datasets.
+
+    Parameters
+    ----------
+    fn
+        The path to the HDF5 file, which can be a string, `pathlib.Path`, or
+        `H5Path` object.
+
+    Attributes
+    ----------
+    num_data : int
+        The number of patterns in the file.
+    num_pix : int
+        The number of pixels in each pattern.
+    """
     def __init__(self, fn: str | Path | H5Path):
         self._fn = h5path(fn).resolve()
         with self._fn.open_group() as (_, gp):
@@ -557,6 +597,34 @@ class PatternsSOneH5V1(PatternsSOneFile):
 
 
 class PatternsSOneList(PatternsSOneFile):
+    """
+    Represents a collection of patterns from multiple source files.
+
+    This class provides a unified interface for accessing patterns that are
+    distributed across multiple files. It can handle a mixture of file formats
+    (e.g., EMC and HDF5) and `PatternsSOne` objects, treating them as a single,
+    large dataset.
+
+    Parameters
+    ----------
+    pattern_list
+        A sequence of paths to pattern files or `PatternsSOneBase` objects.
+
+    Attributes
+    ----------
+    pattern_list : list[PatternsSOneBase]
+        The list of pattern sources.
+    num_data : int
+        The total number of patterns in the collection.
+    num_pix : int
+        The number of pixels in each pattern.
+
+    Raises
+    ------
+    ValueError
+        If the pattern list is empty or if the number of pixels is
+        inconsistent across the source files.
+    """
     def __init__(
         self,
         pattern_list: Sequence[Union[PATH_TYPE, PatternsSOneBase]],

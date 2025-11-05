@@ -13,9 +13,6 @@ import h5py
 import numpy as np
 import numpy.typing as npt
 from numpy import ma
-from scipy.interpolate import interp1d
-from scipy.optimize import minimize
-from scipy.stats import binned_statistic
 
 from ._h5helper import PATH_TYPE, H5Path, make_path
 
@@ -56,6 +53,33 @@ def _bitmap_to_int(bm: _BITMAP) -> np.uint8:
 
 
 class Detector:
+    """
+    Represents the physical properties and geometry of a detector.
+
+    This class stores information about the detector's pixels, including their
+    3D coordinates, scaling factors, and masks. It also holds metadata such
+    as the detector distance and Ewald radius.
+
+    Attributes
+    ----------
+    coor : numpy.ndarray
+        A (num_pix, 3) array of the 3D coordinates for each pixel.
+    factor : numpy.ndarray
+        A (num_pix,) array of the per-pixel scaling factors.
+    mask : numpy.ndarray
+        A (num_pix,) array of integers representing the bitmask for each pixel's status.
+    detd : float
+        The distance between the detector and the sample in millimeters.
+    ewald_rad : float
+        The Ewald sphere radius in pixels.
+    num_pix : int
+        The total number of a detector's pixels.
+    pixel_size : float
+        The physical size of a pixel in millimeters.
+    norm_flag : bool
+        A flag indicating whether the `factor` array has been normalized.
+    """
+
     dtype = np.dtype(
         [
             ("coor", "f8", 3),
@@ -356,44 +380,81 @@ def detector(
     check_consistency: bool = True,
 ) -> Detector:
     """
-    This is the interface function for `Detector`. It create a Detector object from
-    a source or from provided coordinates, mask, factor, and other parameters.
+    Factory function for creating and loading `Detector` objects.
+
+    This function provides a flexible interface for creating a `Detector` object
+    either from a file, from an existing `Detector` object, or from scratch by
+    providing its constituent parts as arguments.
 
     Parameters
     ----------
-    src : Union[Detector, PATH_TYPE, None]
-        Source from which to create the Detector. Can be None, Detector object, or file
-        path. If src is a Detector, this function return another copy of the input, the
-        data of the output `Detector` could be rewritten by over given arguments, such
-        as `coor`. If src is a file (a str or a Path), read the detector form it. The
-        file format could be '.h5', '.dat', '.emc'. If src is None, all parameters for a
-        Detector should be given. Default is None.
-
-    coor : Optional[npt.NDArray]
-        Coordinates of the detector.
-
-    mask : Optional[npt.NDArray]
-        Mask of the detector.
-
-    factor : Optional[npt.NDArray]
-        Factor of the detector.
-
-    detd : Union[float, int, np.floating, np.integer, None]
-        Detector distance.
-
-    ewald_rad : Union[float, int, np.floating, np.integer, None]
-        Ewald radius.
-
-    norm_flag : bool
-        Flag to indicate whether to normalize the detector. Default is True.
+    src
+        The source for creating the `Detector` object.
+        - If `None`, a new detector is created from the provided keyword
+          arguments (`coor`, `mask`, `factor`, etc.).
+        - If a `Detector` object, a new copy is created. Any provided
+          keyword arguments will override the properties of the source object.
+        - If a path-like object (`str`, `pathlib.Path`, `H5Path`), the detector
+          is loaded from the specified file (`.h5`, `.dat`).
+    coor
+        A (N, 3) or (N, 2) array of pixel coordinates.
+    mask
+        A (N,) array of pixel masks.
+    factor
+        A (N,) array of pixel factors.
+    detd
+        The detector distance from the sample in millimeters.
+    ewald_rad
+        The Ewald sphere radius in pixels.
+    norm_flag
+        If `True`, the detector factors are normalized to have a mean of 1.0.
+        Defaults to `True`.
+    check_consistency
+        If `True`, verifies that the Ewald radius is consistent with the
+        provided detector coordinates. Defaults to `True`.
 
     Returns
     -------
-    Detector: Created detector object.
+    Detector
+        The newly created or loaded `Detector` object.
 
     Raises
-    -------
-    Exception: If the source cannot be parsed.
+    ------
+    ValueError
+        If `check_consistency` is `True` and the Ewald radius is not
+        consistent with the detector coordinates.
+    FileNotFoundError
+        If `src` is a path to a file that does not exist.
+    Exception
+        If the source `src` cannot be parsed or if required arguments are
+        missing when `src` is `None`.
+
+    See Also
+    --------
+    Detector : The class that represents detector properties.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from emcfile import detector, PixelType
+
+    # Create a simple detector from scratch
+    >>> num_pix = 100
+    >>> coor = np.random.rand(num_pix, 3)
+    >>> mask = np.full(num_pix, PixelType.GOOD)
+    >>> factor = np.ones(num_pix)
+    >>> det = detector(coor=coor, mask=mask, factor=factor,
+    ...                detd=100.0, ewald_rad=512.0)
+    >>> det.num_pix
+    100
+
+    # Load a detector from a file (assuming 'test_det.dat' exists)
+    # >>> det_from_file = detector('test_det.dat')
+
+    # Create a new detector by modifying an existing one
+    >>> new_det = detector(det, detd=110.0)
+    >>> new_det.detd
+    110.0
     """
 
     det = None
@@ -523,6 +584,8 @@ def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
     #     raise ValueError("At least 4 points are required.")
 
     # 2d detector test
+    from scipy.optimize import minimize
+
     for ca, cb, cc in itertools.combinations(range(coor.shape[0]), 3):
         db = coor[cb] - coor[ca]
         db /= np.linalg.norm(db)
@@ -728,6 +791,9 @@ def get_3ddet_from_shape(
     Detector
 
     """
+    from scipy.interpolate import interp1d
+    from scipy.stats import binned_statistic
+
     detd = det.detd
     ewald_rad = det.ewald_rad
     direction = -int(np.sign(det.coor[:, 2].sum()))

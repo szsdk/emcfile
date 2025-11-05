@@ -84,48 +84,67 @@ def patterns(
     end: Optional[int] = None,
 ) -> PatternsSOne:
     """
-    The interface function for reading a pattern set from a file, converting from a array, or
-    building an empty `PatternsSOne` with a given number of pixels.
+    The `patterns` function is the primary interface for creating `PatternsSOne`
+    objects. It can read pattern sets from files, convert from arrays, or
+    initialize an empty object.
+
+    This function is highly flexible and accepts various input types to
+    streamline the process of creating pattern sets for analysis.
 
     Parameters
     ----------
-    src : Union[pathlib.Path, numpy.ndarray, scipy.sparse.spmatrix, int, numpy.integer,
-                PatternsSOne, list[SPARSE_PATTERN]]
-        The source of the pattern set. Can be a file path, a dense numpy array,
-        a sparse matrix, an integer, or another `PatternsSOne` object.
-
-    start : Union[None, int, numpy.integer]
-        The starting pattern index. Defaults to `None`.
-
-    end : Union[None, int, numpy.integer]
-        The ending pattern index. Defaults to `None`.
+    src
+        The source of the pattern set. It can be one of the following:
+        - `str` or `pathlib.Path` or `H5Path`: The path to a file containing
+          the pattern data.
+        - `io.BytesIO`: A stream of bytes containing the pattern data.
+        - `numpy.ndarray`: A dense numpy array representing the patterns.
+        - `scipy.sparse.spmatrix`: A sparse matrix representing the patterns.
+        - `int`: The number of pixels, used to create an empty `PatternsSOne`
+          object.
+        - `tuple[tuple[int, int], int]`: A shape and a value to create a
+          uniform pattern.
+        - `PatternsSOne`: An existing `PatternsSOne` object.
+        - `Sequence[SPARSE_PATTERN]`: A sequence of `SPARSE_PATTERN` objects.
+    start
+        The starting index of the patterns to read from the source.
+        If `None`, reading starts from the beginning. Defaults to `None`.
+    end
+        The ending index of the patterns to read from the source.
+        If `None`, reading continues to the end. Defaults to `None`.
 
     Returns
     -------
-    my_module.PatternsSOne
-        The created pattern set.
+    PatternsSOne
+        A `PatternsSOne` object containing the pattern data.
 
     Raises
     ------
+    ValueError
+        If the input `numpy.ndarray` has an unsupported data type.
     Exception
-        If the source cannot be parsed, or if the start and end indices are provided
-        for a dense numpy array.
+        If the source type is not recognized or cannot be parsed.
 
-    Notes
-    -----
-    The function converts the input pattern set to a `PatternsSOne` object, which is a custom data
-    structure used in our module to store and manipulate patterns. The function accepts the
-    following types of input:
+    See Also
+    --------
+    PatternsSOne : The underlying class for storing and managing patterns.
+    file_patterns : A function for reading patterns from a file.
 
-    - A file path: The function reads the binary pattern data from the specified file and
-      creates a `PatternsSOne` object.
-    - A dense numpy array: The function converts the numpy array to a `PatternsSOne` object.
-    - A sparse matrix: The function converts the sparse matrix to a `PatternsSOne` object. If
-      the matrix is not in COO format, it is divided into smaller chunks for processing.
-    - An integer: The function creates a new `PatternsSOne` object with the specified number of
-      pixels and no binary data.
-    - Another `PatternsSOne` object: The function returns a subset or a copy of the input object,
-      starting from index `start` and ending at index `end`.
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from emcfile import patterns
+
+    Create patterns from a numpy array:
+    >>> arr = np.random.randint(0, 5, size=(10, 100))
+    >>> p = patterns(arr)
+    >>> p.num_data
+    10
+
+    Create an empty pattern set with a specific number of pixels:
+    >>> empty_p = patterns(1024)
+    >>> empty_p.num_pix
+    1024
     """
     match src:
         case io.BytesIO():

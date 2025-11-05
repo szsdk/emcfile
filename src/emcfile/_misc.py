@@ -5,17 +5,33 @@ _units = ["B", "KB", "MB", "GB", "TB", "PB"]
 
 def pretty_size(s: float) -> str:
     """
-    The function convert a size, a number with unit byte, to a string with suitable unit.
+    Converts a size in bytes to a human-readable string with an appropriate unit.
+
+    This function takes a size in bytes and formats it into a more readable
+    string, using units such as KB, MB, GB, etc.
 
     Parameters
     ----------
-    s : float
-        The input size in bytes.
+    s
+        The size in bytes.
 
     Returns
     -------
-    str:
-        The return.
+    str
+        A human-readable string representing the size.
+
+    Examples
+    --------
+    >>> from emcfile._misc import pretty_size
+
+    >>> pretty_size(1024)
+    '1.00 KB'
+
+    >>> pretty_size(1234567)
+    '1.18 MB'
+
+    >>> pretty_size(500)
+    '500.0 B'
     """
     unit = 0
     while s >= 1024:
@@ -29,30 +45,39 @@ def pretty_size(s: float) -> str:
 
 def divide_range(s: int, e: int, n: int) -> List[Tuple[int, int]]:
     """
-    This function divides a range `range(s, e)` into `n` pieces nearly equivalently.
+    Divides a numerical range into a specified number of nearly equal sub-ranges.
+
+    This function is useful for splitting a large range of numbers into smaller,
+    more manageable chunks, for example, for parallel processing.
 
     Parameters
     ----------
-    s : int
-        The start.
-    e : int
-        The end.
-    n : int
-        The number of pieces.
+    s
+        The starting integer of the range.
+    e
+        The ending integer of the range.
+    n
+        The number of sub-ranges to divide the main range into.
 
     Returns
     -------
-    List[Tuple[int, int]]:
-        The result
+    List[Tuple[int, int]]
+        A list of tuples, where each tuple represents a sub-range.
 
     Raises
     ------
-    ValueError:
-        `n` should be a integer larger than 0.
+    ValueError
+        If `n` is not a positive integer.
 
-    See Also
+    Examples
     --------
-    tests.test_utils.test_divide_range
+    >>> from emcfile._misc import divide_range
+
+    >>> divide_range(0, 10, 3)
+    [(0, 4), (4, 7), (7, 10)]
+
+    >>> divide_range(0, 10, 5)
+    [(0, 2), (2, 4), (4, 6), (6, 8), (8, 10)]
     """
     if n <= 0:
         raise ValueError(f"n(={n}) should be positive")

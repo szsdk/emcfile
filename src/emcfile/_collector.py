@@ -15,14 +15,39 @@ NP_IMG: TypeAlias = npt.NDArray[np.int_]
 
 class PatternsSOneCollector:
     """
-    Collects `np.ndarray` patterns and returns a `PatternsSOne` pattern set with
-    `.patterns()`.
+    Collects `np.ndarray` patterns and efficiently converts them into a
+    `PatternsSOne` object.
+
+    This class is designed to incrementally build a `PatternsSOne` pattern set
+    from a series of NumPy arrays. It uses a buffer to accumulate patterns
+    and converts them to the more memory-efficient `PatternsSOne` format in
+    batches, which is useful when dealing with a large number of patterns that
+    may not fit into memory all at once.
+
+    Parameters
+    ----------
+    max_buffer_size
+        The maximum number of `np.ndarray` patterns to store in the buffer
+        before converting them to a `PatternsSOne` object. Defaults to 128.
 
     Attributes
     ----------
     max_buffer_size : int
-        Maximum number of `np.ndarray` patterns to be stored in the buffer before
-        converting them to `PatternsSOne`.
+        The maximum size of the internal buffer.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from emcfile import PatternsSOneCollector
+
+    >>> collector = PatternsSOneCollector(max_buffer_size=64)
+    >>> for _ in range(100):
+    ...     pattern = np.random.randint(0, 5, size=(10, 10))
+    ...     collector.append(pattern)
+
+    >>> patterns = collector.patterns()
+    >>> patterns.num_data
+    100
     """
 
     def __init__(self, max_buffer_size: int = 128):
@@ -49,11 +74,22 @@ class PatternsSOneCollector:
 
     def append(self, img: NP_IMG) -> None:
         """
-        Append a `np.ndarray` pattern to the buffer.
+        Appends a single `np.ndarray` pattern to the collector.
+
+        The pattern is added to an internal buffer. When the buffer size
+        reaches `max_buffer_size`, the buffered patterns are converted to a
+        `PatternsSOne` object and stored.
 
         Parameters
         ----------
-        img : NP_IMG
+        img
+            A `np.ndarray` representing a single pattern.
+
+        Raises
+        ------
+        ValueError
+            If the size of the input image does not match the number of pixels
+            of the previously added patterns.
         """
         if self.num_pix is not None and self.num_pix != img.size:
             raise ValueError(
@@ -72,12 +108,20 @@ class PatternsSOneCollector:
 
     def extend(self, imgs: Union[Sequence[NP_IMG], PatternsSOne]) -> None:
         """
-        Append a sequence of `np.ndarray` patterns or a `PatternsSOne` pattern set to the
-        buffer.
+        Extends the collector with a sequence of patterns.
+
+        This method can be used to add multiple patterns at once, either as a
+        sequence of `np.ndarray` objects or as a `PatternsSOne` object.
 
         Parameters
         ----------
-        imgs : Union[Sequence[NP_IMG], PatternsSOne]
+        imgs
+            A sequence of `np.ndarray` patterns or a `PatternsSOne` object.
+
+        Raises
+        ------
+        Exception
+            If the input `imgs` is not a supported type.
         """
         if isinstance(imgs, (list, np.ndarray)):
             self._buffer.extend(imgs)
@@ -91,11 +135,20 @@ class PatternsSOneCollector:
 
     def patterns(self) -> PatternsSOneList:
         """
-        Generate the `PatternsSOne` pattern set from collected patterns.
+        Finalizes the collection process and returns the collected patterns.
+
+        This method clears the internal buffer and concatenates all stored
+        `PatternsSOne` objects into a single `PatternsSOneList`.
 
         Returns
         -------
-        PatternsSOne
+        PatternsSOneList
+            A `PatternsSOneList` object containing all the collected patterns.
+
+        Raises
+        ------
+        ValueError
+            If no patterns have been added to the collector.
         """
         self._clear_buffer()
         if len(self._patterns) == 0:
@@ -104,13 +157,17 @@ class PatternsSOneCollector:
 
     def pattern_list(self) -> list[PatternsSOne]:
         """
-        Instead of concatenating all patterns, return a list of `PatternsSOne` pattern.
-        This is useful when the number of patterns is too large to be concatenated in
-        some circumstances.
+        Returns a list of `PatternsSOne` objects.
+
+        Instead of concatenating all patterns into a single object, this method
+        returns a list of the `PatternsSOne` objects that have been created
+        from the buffered NumPy arrays. This can be useful for processing large
+        datasets in chunks.
 
         Returns
         -------
         list[PatternsSOne]
+            A list of `PatternsSOne` objects.
         """
         self._clear_buffer()
         return self._patterns
@@ -124,18 +181,23 @@ class PatternsSOneCollector:
         buffer_size: int = 1073741824,  # 2 ** 30 bytes = 1 GB
     ) -> None:
         """
-        Write the collected patterns to a file.
+        Writes the collected patterns to a file.
+
+        This method first finalizes the collection process and then writes the
+        patterns to the specified file.
 
         Parameters
         ----------
-        path : PATH_TYPE
-            Path to the file.
-        h5version : str
-            HDF5 file format version.
-        overwrite : bool
-            Whether to overwrite the file if it exists.
-        buffer_size : int
-            Buffer size for writing the patterns to the file.
+        path
+            The path to the output file.
+        h5version
+            The HDF5 file format version to use. Defaults to "2".
+        overwrite
+            If `True`, the output file will be overwritten if it already
+            exists. Defaults to `False`.
+        buffer_size
+            The buffer size in bytes for writing the patterns to the file.
+            Defaults to 1 GB.
         """
         self._clear_buffer()
         write_patterns(

@@ -1,29 +1,56 @@
 # emcfile
 
-This package provides useful utilities for the `emc` photon format and its corresponding
-detector files.
+`emcfile` is a Python package providing essential utilities for handling the `emc` photon format and its associated detector files. It offers a streamlined interface for reading, writing, and manipulating diffraction patterns and detector geometry, with a focus on performance and ease of use.
+
+## Key Features
+
+- **Pattern Manipulation**: Create, access, and modify diffraction patterns with a `numpy`-like API.
+- **Detector Geometry**: Define and manage detector geometry, including pixel coordinates, masks, and scaling factors.
+- **File I/O**: Read and write patterns and detectors from/to various file formats, including the `.emc` format, text-based `.dat` files, and HDF5.
+- **HDF5 Integration**: A suite of helper functions to simplify interactions with HDF5 files, allowing you to easily store and retrieve Python objects and NumPy arrays.
+- **Visualization**: Render detector data for quick visualization and analysis.
 
 ## Installation
-Dependencies:
+
+You can install `emcfile` using pip:
+
+```bash
+pip install emcfile
+```
+
+**Dependencies:**
 - python >= 3.9
 - numpy >= 1.22
 - h5py
 - scipy
 
-## Documentation
+## Quick Start
 
-This package can be divided into three parts roughly:
-- handle classes and functions for HDF5 file
-- detector file related classes and functions
-- pattern file related classes and functions
+Here's a brief example of how to use `emcfile` to create and save a `patterns` object:
 
-The tutorial, `tutorial/tutorial_00.py`, is recommended as the starting point of this package.
-You could use [jupytext](https://github.com/mwouts/jupytext) to generate a jupyter notebook file
-for a more interactive experience with the following command
-```bash
-jupytext tutorial_00.py -o tutorial_00.ipynb
+```python
+import numpy as np
+import emcfile as ef
+
+# Create random patterns
+num_data = 5
+num_pix = 10
+patterns_data = np.random.rand(num_data, num_pix) ** 3 * 5
+patterns = ef.patterns(patterns_data.astype("int"))
+
+# Write patterns to an .emc file
+patterns.write("test_pattern.emc", overwrite=True)
+
+# Read patterns from the .emc file
+p_emc = ef.patterns("test_pattern.emc")
+print(p_emc)
 ```
 
+## Documentation
+
+For a comprehensive guide to using the package, please see the [tutorial](tutorial/tutorial.md).
+
 ## Conventions
+
 ### Patterns
 For a pattern object, its first index is always the pattern index.

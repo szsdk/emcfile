@@ -229,20 +229,48 @@ def check_h5path(s: PATH_TYPE) -> bool:
 
 def h5path(src: PATH_TYPE, group: Optional[str] = None) -> H5Path:
     """
-    Convert string / path to `H5Path`.
-    Example: example.h5::h5_group
+    Converts a string or path-like object into an `H5Path` object.
+
+    This function is the primary constructor for `H5Path` objects, which are
+    used to represent a path to a dataset or group within an HDF5 file.
 
     Parameters
     ----------
-    src : Union[Path, str]
-        The input.
-
-    group : Optional[str]
+    src
+        The source to convert to an `H5Path`. It can be a string in the
+        format "filename.h5::group/name", a `pathlib.Path` object, or an
+        existing `H5Path` object.
+    group
+        If provided, this string will be used as the group/dataset name,
+        and `src` will be treated as the filename.
 
     Returns
     -------
-    H5Path:
-        The return
+    H5Path
+        An `H5Path` object representing the path to the HDF5 file and the
+        internal group/dataset.
+
+    Raises
+    ------
+    TypeError
+        If `src` is an `H5Path` and `group` is also provided, or if `src`
+        is of an unsupported type.
+
+    Examples
+    --------
+    >>> from emcfile import h5path
+
+    # Create an H5Path from a string
+    >>> p = h5path("my_data.h5::/path/to/dataset")
+    >>> p.fn
+    PosixPath('my_data.h5')
+    >>> p.gn
+    '/path/to/dataset'
+
+    # Create an H5Path from a filename and group name
+    >>> p2 = h5path("my_data.h5", group="/path/to/another/dataset")
+    >>> p2.gn
+    '/path/to/another/dataset'
     """
     if group is not None:
         if isinstance(src, H5Path):
@@ -257,8 +285,40 @@ def h5path(src: PATH_TYPE, group: Optional[str] = None) -> H5Path:
 
 def make_path(s: PATH_TYPE) -> Union[Path, H5Path]:
     """
-    The make_path function creates a path object based on the input value. It accepts a string or
-    an existing Path object and returns either a `Path` object or an `H5Path` object, depending on the input.
+    Creates a `Path` or `H5Path` object from a string or path-like object.
+
+    This function intelligently determines whether the input represents a regular
+    file path or a path to an HDF5 dataset and returns the appropriate path
+    object.
+
+    Parameters
+    ----------
+    s
+        The string or path-like object to convert.
+
+    Returns
+    -------
+    Union[Path, H5Path]
+        A `pathlib.Path` object if the input is a regular file path, or an
+        `H5Path` object if it points to an HDF5 dataset.
+
+    See Also
+    --------
+    h5path : The function used to create `H5Path` objects.
+
+    Examples
+    --------
+    >>> from emcfile import make_path
+
+    # Create a regular Path object
+    >>> p = make_path("/path/to/a/file.txt")
+    >>> isinstance(p, Path)
+    True
+
+    # Create an H5Path object
+    >>> h5p = make_path("my_data.h5::/group/dataset")
+    >>> isinstance(h5p, H5Path)
+    True
     """
     if check_h5path(s):
         return h5path(s)
@@ -363,14 +423,53 @@ def write_obj_h5(
     compression: Optional[str] = None,
     compression_opts: Union[None, str, int] = None,
 ) -> None:
-    """Save dict `obj` to a `h5py.File`. The `np.ndarray` values are saved as
-    h5 datasets. Others are saved in attributes of h5 group `group_name`.
+    """Saves a Python object to an HDF5 file.
+
+    This function recursively traverses a Python object (typically a dictionary)
+    and writes its contents to an HDF5 file. NumPy arrays are saved as
+    datasets, while other data types (e.g., strings, numbers, booleans) are
+    saved as attributes of the corresponding group.
+
     Parameters
     ----------
-    fn : h5py.File
-        The handle of an h5file.
-    group_name : str
-    obj : dict
+    fn
+        The path to the HDF5 file, which can be a string or an `H5Path`
+        object.
+    obj
+        The Python object to save.
+    overwrite
+        If `True`, existing groups or datasets with the same name will be
+        overwritten. Defaults to `False`.
+    verbose
+        If `True`, prints a message when an existing group or dataset is
+        overwritten. Defaults to `False`.
+    compression
+        The compression algorithm to use for datasets (e.g., "gzip", "lzf").
+        Defaults to `None`.
+    compression_opts
+        The compression options, such as the compression level. Defaults to
+        `None`.
+
+    See Also
+    --------
+    read_obj_h5 : The corresponding function for reading an object from an
+                  HDF5 file.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from emcfile import write_obj_h5, read_obj_h5
+
+    >>> data = {
+    ...     "name": "test_data",
+    ...     "values": np.arange(10),
+    ...     "metadata": {"version": 1, "author": "emcfile"}
+    ... }
+
+    >>> write_obj_h5("my_data.h5::/data/group", data, overwrite=True)
+    >>> read_data = read_obj_h5("my_data.h5::/data/group")
+    >>> np.array_equal(data["values"], read_data["values"])
+    True
     """
     f = h5path(fn)
     with f.open("a") as fp:
@@ -398,13 +497,43 @@ def _read_group(
 
 def read_obj_h5(fn: Union[str, H5Path]) -> dict[str, Any]:
     """
-    The inverse operation of `save_obj`. Read a dictionary from a h5 group.
+    Reads a Python object from an HDF5 file.
+
+    This function is the inverse of `write_obj_h5`. It reads an HDF5 group
+    and reconstructs the original Python object, loading datasets into NumPy
+    arrays and attributes into the corresponding dictionary fields.
+
     Parameters
     ----------
-    fn : h5py.File
-        The input h5 file handler.
-    group_name : str
-        The group name stores the object.
+    fn
+        The path to the HDF5 file, which can be a string or an `H5Path`
+        object.
+
+    Returns
+    -------
+    dict[str, Any]
+        The Python object reconstructed from the HDF5 file.
+
+    See Also
+    --------
+    write_obj_h5 : The corresponding function for writing an object to an
+                   HDF5 file.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from emcfile import write_obj_h5, read_obj_h5
+
+    >>> data = {
+    ...     "name": "test_data",
+    ...     "values": np.arange(10),
+    ...     "metadata": {"version": 1, "author": "emcfile"}
+    ... }
+
+    >>> write_obj_h5("my_data.h5::/data/group", data, overwrite=True)
+    >>> read_data = read_obj_h5("my_data.h5::/data/group")
+    >>> np.array_equal(data["values"], read_data["values"])
+    True
     """
     f = h5path(fn)
     with f.open_group() as (_, gp):

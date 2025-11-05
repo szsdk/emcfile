@@ -92,10 +92,30 @@ class PatternsSOneBase(Protocol):
 
 class PatternsSOne:
     """
-    The class for dragonfly photon dataset. The main difference between this
-    format with a normal csr sparse matrix is that the 1-photon pixels positions
-    are stored separately. Then we do not need to store these values since they
-    are just 1.
+    Represents a collection of diffraction patterns in a sparse format.
+
+    This class is optimized for storing and manipulating large sets of diffraction
+    patterns where the data is sparse (i.e., most pixel values are zero). It
+    achieves this by separately storing the locations of single-photon pixels
+    (value = 1) and multi-photon pixels (value > 1), which significantly
+    reduces memory usage compared to a dense NumPy array.
+
+    Attributes
+    ----------
+    num_pix : int
+        The number of pixels in each pattern.
+    ones : numpy.ndarray
+        A (num_data,) array storing the number of single-photon pixels for each
+        pattern.
+    multi : numpy.ndarray
+        A (num_data,) array storing the number of multi-photon pixels for each
+        pattern.
+    place_ones : numpy.ndarray
+        A 1D array storing the pixel indices of all single-photon events.
+    place_multi : numpy.ndarray
+        A 1D array storing the pixel indices of all multi-photon events.
+    count_multi : numpy.ndarray
+        A 1D array storing the photon counts for all multi-photon events.
     """
 
     ATTRS = ["ones", "multi", "place_ones", "place_multi", "count_multi"]
