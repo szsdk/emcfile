@@ -40,6 +40,10 @@ def test_todense(big_data, big_dense):
     np.testing.assert_equal(big_data.todense(), big_dense)
 
 
+def test_tocsr(big_data, big_dense):
+    np.testing.assert_equal(big_data.tocsr().todense(), big_dense)
+
+
 @pytest.fixture()
 def small_dense():
     return gen_dense(32, 4)

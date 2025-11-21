@@ -352,6 +352,9 @@ class PatternsSOne:
             (self.count_multi, self.place_multi, self.multi_idx), shape=self.shape
         )
 
+    def tocsr(self) -> csr_array:
+        return self._get_sparse_ones() + self._get_sparse_multi()
+
     def todense(self) -> npt.NDArray[np.int32]:
         """
         To dense ndarray
