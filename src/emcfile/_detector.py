@@ -276,9 +276,9 @@ def concatenate_Detector(dets: Sequence[Detector]) -> Detector:
 
 def _from_asciidet(fname: Path) -> Detector:
     with fname.open() as fp:
-        num_pix, detd, ewald_rad = [
+        num_pix, detd, ewald_rad = tuple(
             f(d) for f, d in zip([int, float, float], fp.readline().strip().split(" "))
-        ]
+        )
     det = np.genfromtxt(
         fname,
         skip_header=1,
@@ -369,13 +369,14 @@ def _init_detector(
 
 
 def detector(
-    src: "Detector | PATH_TYPE | None" = None,
+    src: Detector | PATH_TYPE | None = None,
     *,
+    # coor: Optional[npt.NDArray[T1]] = None,
     coor: Optional[npt.NDArray[T1]] = None,
     mask: Optional[npt.NDArray[T2]] = None,
     factor: Optional[npt.NDArray[T1]] = None,
-    detd: "float | int | None" = None,
-    ewald_rad: "float | int | None" = None,
+    detd: float | int | None = None,
+    ewald_rad: float | int | None = None,
     norm_flag: bool = True,
     check_consistency: bool = True,
 ) -> Detector:
