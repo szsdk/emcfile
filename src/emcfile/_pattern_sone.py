@@ -524,7 +524,6 @@ def write_patterns(
     buffer_size: int = 1073741824,  # 2 ** 30 bytes = 1 GB
     compression: Union[None, int, str] = None,
 ) -> None:
-    # TODO: performance test
     if isinstance(path, io.BytesIO):
         return _write_bytes(datas, path)
 

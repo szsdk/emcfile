@@ -368,15 +368,69 @@ def _init_detector(
     return new_coor.astype(np.float64), mask.astype(np.int32), factor.astype(np.float64)
 
 
+def simple_detector(shape: tuple[int, int], detd: float) -> Detector:
+    """
+    Generate a simple detector.
+
+    Parameters
+    ----------
+    shape : (nx, ny)
+        Number of pixels in x and y.
+    detd : float
+        Detector distance in pixels.
+
+    Returns
+    -------
+    ef.Detector
+    """
+
+    nx, ny = shape
+
+    # basic constants (can be adjusted if needed)
+
+    detc_x = (nx - 1) / 2.0
+    detc_y = (ny - 1) / 2.0
+
+    # pixel grid
+    x, y = np.mgrid[0:nx, 0:ny]
+    x = x.flatten() - detc_x
+    y = y.flatten() - detc_y
+
+    norm = np.sqrt(x**2 + y**2 + detd**2)
+
+    # reciprocal-space scaling
+    # q_sep = 2 * np.sin(0.5 * np.arctan(1 / detd))
+    # qscaling = 1.0 / q_sep
+
+    coor = np.array([x / norm, y / norm, (detd / norm - 1.0)]).T * detd
+
+    # polarization = none
+    polar = 1.0 - (x**2 + y**2) / (2 * norm**2)
+
+    factor = detd / norm**3
+    factor *= polar
+
+    mask = np.zeros_like(factor, dtype="u1")
+
+    ewald_rad = detd
+
+    return Detector(
+        coor=coor,
+        factor=factor,
+        detd=detd,
+        ewald_rad=ewald_rad,
+        mask=mask,
+    )
+
+
 def detector(
     src: Detector | PATH_TYPE | None = None,
     *,
-    # coor: Optional[npt.NDArray[T1]] = None,
-    coor: Optional[npt.NDArray[T1]] = None,
+    coor: Union[npt.NDArray[T1], tuple[int, int], None] = None,
     mask: Optional[npt.NDArray[T2]] = None,
     factor: Optional[npt.NDArray[T1]] = None,
-    detd: float | int | None = None,
-    ewald_rad: float | int | None = None,
+    detd: Union[float, int, None] = None,
+    ewald_rad: Union[float, int, None] = None,
     norm_flag: bool = True,
     check_consistency: bool = True,
 ) -> Detector:
@@ -469,6 +523,8 @@ def detector(
         ):
             coor_, mask_, factor_ = _init_detector(coor, mask, factor)
             det = Detector(coor_, factor_, mask_, float(detd), float(ewald_rad))
+        elif (coor is not None) and (detd is not None):
+            det = simple_detector(coor, detd)
     elif isinstance(src, Detector):
         det = Detector(
             src.coor if coor is None else coor.astype(np.float64),

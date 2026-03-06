@@ -46,6 +46,10 @@ def test_det_operation(det):
     )
 
 
+def test_simple_detector():
+    ef.detector(coor=(100, 100), detd=2000)
+
+
 def test_det_read(det_file):
     ef.detector(det_file, norm_flag=False)
     with pytest.raises(Exception):
