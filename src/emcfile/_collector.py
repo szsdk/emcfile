@@ -6,6 +6,7 @@ import numpy.typing as npt
 from typing_extensions import TypeAlias
 
 from ._h5helper import PATH_TYPE
+from ._html_display import html_card
 from ._pattern_sone import PatternsSOne, write_patterns
 from ._pattern_sone_file import PatternsSOneList
 from ._patterns import patterns
@@ -171,6 +172,30 @@ class PatternsSOneCollector:
         """
         self._clear_buffer()
         return self._patterns
+
+    def _repr_html_(self) -> str:
+        buffered_patterns = len(self._buffer)
+        summary = {
+            "pixels": self.num_pix,
+            "stored patterns": int(sum(len(p) for p in self._patterns) + buffered_patterns),
+            "stored chunks": len(self._patterns),
+            "buffer size": self.max_buffer_size,
+        }
+        return html_card(
+            "Pattern collector",
+            summary,
+            details={
+                "type": self.__class__.__name__,
+                "buffered_patterns": buffered_patterns,
+            },
+            bars=(
+                (
+                    "buffer fill",
+                    100 * buffered_patterns / max(1, self.max_buffer_size),
+                    "#7c3aed",
+                ),
+            ),
+        )
 
     def write(
         self,

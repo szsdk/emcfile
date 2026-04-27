@@ -14,6 +14,7 @@ import numpy as np
 import numpy.typing as npt
 
 from ._h5helper import PATH_TYPE, H5Path, h5path, make_path
+from ._html_display import html_card
 from ._misc import pretty_size
 from ._pattern_sone import (
     SPARSE_PATTERN,
@@ -153,6 +154,22 @@ class PatternsSOneFile:
   Size: {pretty_size(self.nbytes)}
   Sparsity: {self.sparsity() * 100:.2f} %
 """
+
+    def _repr_html_(self) -> str:
+        summary = {
+            "patterns": self.num_data,
+            "pixels": self.num_pix,
+            "size": pretty_size(self.nbytes),
+        }
+        return html_card(
+            "Pattern file",
+            summary,
+            details={
+                "type": self.__class__.__name__,
+                "source": str(getattr(self, "_fn", "<memory>")),
+            },
+            bars=(("sparsity", self.sparsity() * 100, "#0f766e"),),
+        )
 
     def __len__(self) -> int:
         return int(self.num_data)

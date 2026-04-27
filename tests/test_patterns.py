@@ -85,6 +85,22 @@ def test_operation(big_data):
     big_data.sparsity()
 
 
+def test_display(big_data, data_emc):
+    html = big_data._repr_html_()
+    assert isinstance(html, str)
+    assert "Patterns" in html or "patterns" in html.lower()
+
+    file_html = ef.file_patterns(data_emc)._repr_html_()
+    assert isinstance(file_html, str)
+
+
+def test_display_marimo(big_data):
+    # _repr_html_() always returns HTML string
+    html = big_data._repr_html_()
+    assert isinstance(html, str)
+    assert "Patterns" in html or "patterns" in html.lower()
+
+
 def gen_pattern_inputs():
     with temp_seed(123):
         dense = (5 * np.random.rand(400, 128**2) ** 5).astype("i4")
@@ -400,6 +416,8 @@ def test_pattern_list(data_emc, data_h5, tmp_path_factory):
     np.testing.assert_equal(plst.ones, np.concatenate([p0.ones, p1.ones]))
     plst2 = ef.PatternsSOneList([plst, p0])
     assert plst2[: len(plst)][: len(p0)] == p0[:]
+    html = plst._repr_html_()
+    assert isinstance(html, str)
 
 
 @pytest.mark.parametrize("file", ["plst.emc", "plst.h5"])

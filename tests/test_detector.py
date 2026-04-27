@@ -135,6 +135,22 @@ def test_det_render(det):
     detr.frame_pixels()
 
 
+def test_display(det):
+    html = det._repr_html_()
+    assert isinstance(html, str)
+    assert "Detector" in html or "detector" in html.lower()
+
+    render_html = ef.det_render(det)._repr_html_()
+    assert isinstance(render_html, str)
+
+
+def test_display_marimo(det):
+    # _repr_html_() always returns HTML string
+    html = det._repr_html_()
+    assert isinstance(html, str)
+    assert "Detector" in html or "detector" in html.lower()
+
+
 def test_concatenate(det):
     det_sym = deepcopy(det)
     det_sym.coor *= np.array([-1, -1, 1])

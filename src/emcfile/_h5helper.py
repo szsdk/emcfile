@@ -11,6 +11,8 @@ import h5py
 import numpy as np
 import numpy.typing as npt
 
+from ._html_display import html_card
+
 __all__ = [
     "H5Path",
     "PATH_TYPE",
@@ -141,6 +143,21 @@ class H5Path:
 
     def __repr__(self) -> str:
         return f"H5Path({self.fn}, {self.gn})"
+
+    def _repr_html_(self) -> str:
+        summary = {
+            "file": self.fn.name,
+            "group": self.gn,
+        }
+        return html_card(
+            "HDF5 path",
+            summary,
+            details={
+                "type": self.__class__.__name__,
+                "path": str(self.fn),
+                "exists": self.exists(),
+            },
+        )
 
     @classmethod  # type: ignore
     def __get_validators__(cls):

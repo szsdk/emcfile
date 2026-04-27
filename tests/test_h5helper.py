@@ -50,6 +50,14 @@ def test_make_path(fname, result):
     assert ef.make_path(fname) == result
 
 
+def test_h5path_display(tmp_path):
+    path = ef.h5path(tmp_path / "test.h5", "group")
+    html = path._repr_html_()
+    # Verify it's a string containing expected content
+    assert isinstance(html, str)
+    assert "test.h5" in html or "HDF5" in html
+
+
 def _compare_dict(d1, d2):
     if d1.keys() != d2.keys():
         return False

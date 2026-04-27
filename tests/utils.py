@@ -15,3 +15,19 @@ def temp_seed(seed: int) -> Iterator[None]:
         yield
     finally:
         np.random.set_state(state)
+
+
+class FakeMarimoHtml:
+    def __init__(self, text: str):
+        self.text = text
+
+    def callout(self, kind: str = "neutral"):
+        return self
+
+
+class FakeMarimo:
+    Html = FakeMarimoHtml
+
+    @staticmethod
+    def as_html(value: object) -> str:
+        return f"<pre>{type(value).__name__}</pre>"

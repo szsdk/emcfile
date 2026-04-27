@@ -6,6 +6,10 @@ import emcfile as ef
 
 def test_collector(tmp_path):
     cl = ef.PatternsSOneCollector(16)
+    html = cl._repr_html_()
+    assert isinstance(html, str)
+    assert "Pattern collector" in html or "collector" in html.lower()
+
     imgs = []
     for _ in range(30):
         img = np.random.randint(32, size=34)
@@ -26,3 +30,6 @@ def test_collector(tmp_path):
     cl.extend(np.array(imgs))
     cl.extend(ef.patterns(np.array(imgs)))
     assert np.concatenate(cl.pattern_list()) == ef.patterns(np.array(imgs * 4))
+
+    html = cl._repr_html_()
+    assert isinstance(html, str)

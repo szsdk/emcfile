@@ -15,6 +15,7 @@ import numpy.typing as npt
 from numpy import ma
 
 from ._h5helper import PATH_TYPE, H5Path, make_path
+from ._html_display import html_card
 
 __all__ = [
     "det_render",
@@ -135,6 +136,45 @@ class Detector:
             n = np.sum(self.mask == pt)
             ans = ans + (f"  Mask: {pt} - {n}\n" if i == 0 else f"        {pt} - {n}\n")
         return ans
+
+    def _repr_html_(self) -> str:
+        total = max(1, self.num_pix)
+        mask_counts = {
+            pt.name.lower(): int(np.sum(self.mask == pt)) for pt in PixelType
+        }
+        summary = {
+            "dimension": self.ndim,
+            "pixels": self.num_pix,
+            "distance (mm)": self.detd,
+            "ewald radius (px)": self.ewald_rad,
+            "pixel size (mm)": self.pixel_size,
+        }
+        return html_card(
+            "Detector",
+            summary,
+            details={
+                "type": self.__class__.__name__,
+                "normalized": self.norm_flag,
+                "mask_counts": mask_counts,
+            },
+            bars=(
+                (
+                    f"good pixels ({mask_counts['good']})",
+                    100 * mask_counts["good"] / total,
+                    "#16a34a",
+                ),
+                (
+                    f"corner pixels ({mask_counts['corner']})",
+                    100 * mask_counts["corner"] / total,
+                    "#f59e0b",
+                ),
+                (
+                    f"bad pixels ({mask_counts['bad']})",
+                    100 * mask_counts["bad"] / total,
+                    "#dc2626",
+                ),
+            ),
+        )
 
     @property
     def ndim(self) -> int:
@@ -787,6 +827,21 @@ class DetRender:
         else:
             r = self._det.detd / self._det.ewald_rad
             return xmin * r, (xmin + dx) * r, ymin * r, (ymin + dy) * r
+
+    def _repr_html_(self) -> str:
+        summary = {
+            "frame_shape": tuple(int(v) for v in self.frame_shape),
+            "direction": self.direction,
+        }
+        return html_card(
+            "Detector renderer",
+            summary,
+            details={
+                "type": self.__class__.__name__,
+                "extent_pixels": self.frame_extent(),
+                "extent_mm": self.frame_extent(pixel_unit=False),
+            },
+        )
 
 
 def det_render(det: Detector) -> DetRender:

@@ -25,6 +25,7 @@ import numpy.typing as npt
 from scipy.sparse import csr_array, hstack
 
 from ._h5helper import PATH_TYPE, H5Path, check_remove_groups, make_path
+from ._html_display import html_card
 from ._misc import pretty_size
 from ._utils import concat_continous
 
@@ -88,6 +89,19 @@ class PatternsSOneBase(Protocol):
         self,
         index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
     ) -> npt.NDArray[np.int32] | PatternsSOne: ...
+
+
+def _patterns_preview(
+    patterns: PatternsSOneBase,
+    preview_rows: int = 8,
+    preview_cols: int = 16,
+) -> npt.NDArray[np.int32]:
+    rows = min(patterns.num_data, preview_rows)
+    cols = min(patterns.num_pix, preview_cols)
+    if rows == 0:
+        return np.zeros((0, cols), dtype=np.int32)
+    preview = cast(PatternsSOne, patterns[:rows]).todense()
+    return cast(npt.NDArray[np.int32], np.atleast_2d(preview)[:, :cols])
 
 
 class PatternsSOne:
@@ -197,6 +211,20 @@ class PatternsSOne:
   Size: {pretty_size(self.nbytes)}
   Sparsity: {self.sparsity() * 100:.2f} %
 """
+
+    def _repr_html_(self) -> str:
+        summary = {
+            "patterns": self.num_data,
+            "pixels": self.num_pix,
+            "mean count": self.get_mean_count() if self.num_data > 0 else 0.0,
+            "size": pretty_size(self.nbytes),
+        }
+        return html_card(
+            "Patterns",
+            summary,
+            details={"type": self.__class__.__name__},
+            bars=(("sparsity", self.sparsity() * 100, "#2563eb"),),
+        )
 
     @property
     def nbytes(self) -> int:
