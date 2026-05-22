@@ -412,6 +412,16 @@ def test_pattern_list(data_emc, data_h5, tmp_path_factory):
     assert len(plst) == len(p0) + len(p1)
     np.testing.assert_equal(plst[1::3][0], p0[1])
     np.testing.assert_equal(plst[1::3][1], p0[4])
+    idx = [len(p0) + 2, 1, len(p0) + 2, len(p0) - 1, 0]
+    np.testing.assert_equal(
+        plst[idx].todense(),
+        np.vstack([plst[i] for i in idx]),
+    )
+    idx = [len(p0) + 1, 2]
+    np.testing.assert_equal(
+        plst[idx].todense(),
+        np.vstack([plst[i] for i in idx]),
+    )
     plst.init_idx()
     np.testing.assert_equal(plst.ones, np.concatenate([p0.ones, p1.ones]))
     plst2 = ef.PatternsSOneList([plst, p0])
