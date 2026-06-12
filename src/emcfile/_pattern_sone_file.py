@@ -272,11 +272,17 @@ class PatternsSOneEMC(PatternsSOneFile):
 
     HEADER_BYTES = 1024
 
-    def __init__(self, fn: "str | Path"):
+    def __init__(
+        self, fn: str | Path, num_data: None | int = None, num_pix: None | int = None
+    ):
         self._fn = Path(fn).resolve()
-        with open(self._fn, "rb") as fin:
-            self.num_data = int(np.fromfile(fin, dtype=np.int32, count=1)[0])
-            self.num_pix = int(np.fromfile(fin, dtype=np.int32, count=1)[0])
+        if num_data is not None and num_pix is not None:
+            self.num_data = num_data
+            self.num_pix = num_pix
+        else:
+            with open(self._fn, "rb") as fin:
+                self.num_data = int(np.fromfile(fin, dtype=np.int32, count=1)[0])
+                self.num_pix = int(np.fromfile(fin, dtype=np.int32, count=1)[0])
         self.ndim = 2
         self._init_idx = False
 
