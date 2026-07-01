@@ -269,13 +269,20 @@ class PatternsSOneEMC(PatternsSOneFile):
     num_pix : int
         The number of pixels in each pattern.
     """
+
     HEADER_BYTES = 1024
 
-    def __init__(self, fn: "str | Path"):
+    def __init__(
+        self, fn: str | Path, num_data: None | int = None, num_pix: None | int = None
+    ):
         self._fn = Path(fn).resolve()
-        with open(self._fn, "rb") as fin:
-            self.num_data = int(np.fromfile(fin, dtype=np.int32, count=1)[0])
-            self.num_pix = int(np.fromfile(fin, dtype=np.int32, count=1)[0])
+        if num_data is not None and num_pix is not None:
+            self.num_data = num_data
+            self.num_pix = num_pix
+        else:
+            with open(self._fn, "rb") as fin:
+                self.num_data = int(np.fromfile(fin, dtype=np.int32, count=1)[0])
+                self.num_pix = int(np.fromfile(fin, dtype=np.int32, count=1)[0])
         self.ndim = 2
         self._init_idx = False
 
@@ -447,6 +454,7 @@ class PatternsSOneH5(PatternsSOneFile):
     num_pix : int
         The number of pixels in each pattern.
     """
+
     def __init__(self, fn: str | Path | H5Path):
         self._fn = h5path(fn).resolve()
         with self._fn.open_group() as (_, gp):
@@ -642,6 +650,7 @@ class PatternsSOneList(PatternsSOneFile):
         If the pattern list is empty or if the number of pixels is
         inconsistent across the source files.
     """
+
     def __init__(
         self,
         pattern_list: Sequence[Union[PATH_TYPE, PatternsSOneBase]],
@@ -688,18 +697,38 @@ class PatternsSOneList(PatternsSOneFile):
         index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
     ) -> npt.NDArray[np.int32] | PatternsSOne:
         match index:
-            case (ax0, ax1):
+            case tuple() as axes if len(axes) == 2:
+                ax0, ax1 = axes
                 return self[ax0][:, ax1]
             case int() | np.integer():
-                lidx = np.digitize(index, self._indptr[1:])
-                return self.pattern_list[lidx][int(index - self._indptr[lidx])]
+                pidx = int(index)
+                if pidx < 0:
+                    pidx += self.num_data
+                if pidx < 0 or pidx >= self.num_data:
+                    raise IndexError("index out of range")
+                lidx = np.digitize(pidx, self._indptr[1:])
+                return self.pattern_list[lidx][int(pidx - self._indptr[lidx])]
             case _:
                 pidx = np.arange(self.num_data)[index]
+                if len(pidx) == 0:
+                    return PatternsSOne(
+                        self.num_pix,
+                        np.array([], dtype=np.uint32),
+                        np.array([], dtype=np.uint32),
+                        np.array([], dtype=np.uint32),
+                        np.array([], dtype=np.uint32),
+                        np.array([], dtype=np.int32),
+                    )
+                # TODO: the performance can be improved by grouping the patterns by file first, and
+                # then read them in batch. Benchmark is needed to see if it's worth the effort.
                 lids = np.digitize(pidx, self._indptr[1:])
                 patns: list[PatternsSOne] = []
-                for i in np.sort(np.unique(lids)):
+                starts = np.r_[0, np.flatnonzero(lids[1:] != lids[:-1]) + 1]
+                ends = np.r_[starts[1:], len(pidx)]
+                for start, end in zip(starts, ends):
+                    i = lids[start]
                     patns.append(
-                        self.pattern_list[i][pidx[lids == i] - self._indptr[i]]
+                        self.pattern_list[i][pidx[start:end] - self._indptr[i]]
                     )
                 return np.concatenate(patns)
 
