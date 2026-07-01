@@ -781,10 +781,7 @@ class DetRender:
         np.add.at(
             self._count, (self.xy[:, 1], self.xy[:, 0]), np.ones(self.xy.shape[0])
         )
-        self._count /= cast(
-            np.float64,
-            self._count.mean(),  # type: ignore
-        )
+        self._count /= self._count.mean()
 
     def frame_pixels(self) -> list[npt.NDArray[np.float64]]:
         et = self.frame_extent()
@@ -796,17 +793,72 @@ class DetRender:
             ),
         )
 
-    def render(self, raw_img: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
+    def _prepare_renderer(self) -> None:
+        W, H = self.frame_shape
+        self._render_W = W
+        self._render_H = H
+
+        flat = self.xy[:, 1] * W + self.xy[:, 0]
+        self._render_flat = flat.astype(np.int64, copy=False)
+
+        self._count_flat = np.asarray(
+            self._count.filled(0), dtype=np.float64
+        ).ravel()
+        self._count_flat_bc = self._count_flat[None, :]
+        self._nonzero_flat = self._count_flat != 0
+        self._mask_flat = self._mask.ravel()
+
+    def render(self, raw_img: npt.NDArray[Any]) -> ma.MaskedArray:
         """
-        The right way to visualize the `raw_img` is
-        `plt.imshow(img, origin='lower', extent=self.frame_extent())`.
+        Render one raw image or many raw images.
+
+        1-D input returns shape ``(H, W)``. 2-D input returns shape
+        ``(n_images, H, W)``. The right way to visualize a single rendered image is
+        ``plt.imshow(img, origin="lower", extent=self.frame_extent())``.
         """
-        img = ma.masked_array(
-            np.zeros((self.frame_shape[1], self.frame_shape[0]), dtype="f8"),
-            mask=self._mask,
-        )  # type: ignore
-        np.add.at(img, (self.xy[:, 1], self.xy[:, 0]), raw_img)
-        return cast(npt.NDArray[np.float64], img / self._count)
+        if not hasattr(self, "_render_flat"):
+            self._prepare_renderer()
+
+        raw_img = np.asarray(raw_img, dtype=np.float64)
+
+        if raw_img.ndim == 2:
+            n_images = raw_img.shape[0]
+            W, H = self._render_W, self._render_H
+            n_frame = W * H
+
+            acc = np.empty((n_images, n_frame), dtype=np.float64)
+            flat = self._render_flat
+            for i in range(n_images):
+                acc[i] = np.bincount(flat, weights=raw_img[i], minlength=n_frame)
+
+            out = np.divide(
+                acc,
+                self._count_flat_bc,
+                out=acc,
+                where=self._nonzero_flat,
+            )
+            out[:, ~self._nonzero_flat] = 0.0
+
+            mask = np.broadcast_to(self._mask, (n_images, H, W))
+            return ma.masked_array(out.reshape(n_images, H, W), mask=mask)
+
+        W, H = self._render_W, self._render_H
+
+        acc = np.bincount(
+            self._render_flat,
+            weights=raw_img,
+            minlength=W * H,
+        )
+
+        out = np.divide(
+            acc,
+            self._count_flat,
+            out=acc,
+            where=self._nonzero_flat,
+        )
+        out[~self._nonzero_flat] = 0.0
+
+        return ma.masked_array(out.reshape(H, W), mask=self._mask)
 
     def to_cxy(self, xyz: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
         cxy = xyz_to_cxy(xyz, self._det.ewald_rad, self.direction)

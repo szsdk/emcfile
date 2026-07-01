@@ -7,6 +7,8 @@ import pytest
 
 import emcfile as ef
 
+DATA_DIR = Path(__file__).resolve().parent.parent / "tmp"
+
 
 @pytest.fixture()
 def det():
@@ -30,6 +32,16 @@ def det():
         norm_flag=False,
     )
     return det
+
+
+@pytest.fixture(scope="session")
+def real_det():
+    return ef.detector(DATA_DIR / "det_10482_v04_streak_lowq_bin4.h5")
+
+
+@pytest.fixture(scope="session")
+def real_patterns():
+    return ef.patterns(DATA_DIR / "test.emc")
 
 
 @pytest.fixture()
@@ -133,6 +145,53 @@ def test_det_render(det):
     )
     detr.frame_extent()
     detr.frame_pixels()
+
+
+def reference_render(detr, raw_img):
+    img = np.ma.masked_array(
+        np.zeros((detr.frame_shape[1], detr.frame_shape[0]), dtype="f8"),
+        mask=detr._mask,
+    )
+    np.add.at(img, (detr.xy[:, 1], detr.xy[:, 0]), raw_img)
+    return img / detr._count
+
+
+def test_render(det):
+    detr = ef.det_render(det)
+    raw_1d = det.coor[:, 0]
+    raw_2d = np.tile(raw_1d, (5, 1))
+
+    result = detr.render(raw_2d)
+    assert result.shape == (5, detr._render_H, detr._render_W)
+
+    single = detr.render(raw_1d)
+    np.testing.assert_array_almost_equal(single, reference_render(detr, raw_1d))
+    np.testing.assert_array_almost_equal(result[0], single)
+
+    result_1d = detr.render(raw_1d)
+    np.testing.assert_array_almost_equal(result_1d, result[0])
+    np.testing.assert_array_almost_equal(result[1], result[0])
+
+
+def test_render_real(real_det, real_patterns):
+    detr = ef.det_render(real_det)
+    dense = real_patterns.todense()
+    raw = dense[0].astype(np.float64)
+
+    img = detr.render(raw)
+    np.testing.assert_array_almost_equal(img, reference_render(detr, raw))
+
+
+def test_render_2d_real(real_det, real_patterns):
+    detr = ef.det_render(real_det)
+    dense = real_patterns.todense().astype(np.float64)
+
+    result = detr.render(dense)
+    assert result.shape == (real_patterns.num_data, detr._render_H, detr._render_W)
+
+    single = detr.render(dense[0])
+    np.testing.assert_array_almost_equal(result[0], single, decimal=4)
+    np.testing.assert_array_almost_equal(result[-1], detr.render(dense[-1]), decimal=4)
 
 
 def test_display(det):
