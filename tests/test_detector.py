@@ -173,6 +173,17 @@ def test_render(det):
     np.testing.assert_array_almost_equal(result[1], result[0])
 
 
+def test_render_uncovered_pixels_are_nan(det):
+    sparse_det = det[np.arange(0, det.num_pix, 2)]
+    detr = ef.det_render(sparse_det)
+    raw = np.ones(sparse_det.num_pix)
+    uncovered = np.asarray(detr._count.filled(0)) == 0
+
+    assert uncovered.any()
+    assert np.isnan(detr.render(raw).data[uncovered]).all()
+    assert np.isnan(detr.render(raw[None, :]).data[0, uncovered]).all()
+
+
 def test_render_real(real_det, real_patterns):
     detr = ef.det_render(real_det)
     dense = real_patterns.todense()

@@ -801,9 +801,7 @@ class DetRender:
         flat = self.xy[:, 1] * W + self.xy[:, 0]
         self._render_flat = flat.astype(np.int64, copy=False)
 
-        self._count_flat = np.asarray(
-            self._count.filled(0), dtype=np.float64
-        ).ravel()
+        self._count_flat = np.asarray(self._count.filled(0), dtype=np.float64).ravel()
         self._count_flat_bc = self._count_flat[None, :]
         self._nonzero_flat = self._count_flat != 0
         self._mask_flat = self._mask.ravel()
@@ -837,7 +835,7 @@ class DetRender:
                 out=acc,
                 where=self._nonzero_flat,
             )
-            out[:, ~self._nonzero_flat] = 0.0
+            out[:, ~self._nonzero_flat] = np.nan
 
             mask = np.broadcast_to(self._mask, (n_images, H, W))
             return ma.masked_array(out.reshape(n_images, H, W), mask=mask)
@@ -856,7 +854,7 @@ class DetRender:
             out=acc,
             where=self._nonzero_flat,
         )
-        out[~self._nonzero_flat] = 0.0
+        out[~self._nonzero_flat] = np.nan
 
         return ma.masked_array(out.reshape(H, W), mask=self._mask)
 
