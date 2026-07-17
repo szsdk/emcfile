@@ -167,23 +167,23 @@ class PatternsSOne:
 
     def check(self) -> bool:
         if self.num_data != len(self.multi):
-            raise Exception(
+            raise ValueError(
                 f"The `multi`{len(self.multi)} has different length with `ones`({self.num_data})"
             )
         ones_total = self.ones.sum()
         if ones_total != len(self.place_ones):
-            raise Exception(
+            raise ValueError(
                 f"The expected length of `place_ones`({len(self.place_ones)}) should be {ones_total}."
             )
 
         multi_total = self.multi.sum()
         if multi_total != len(self.place_multi):
-            raise Exception(
+            raise ValueError(
                 f"The expected length of `place_multi`({len(self.place_multi)}) should be {multi_total}."
             )
 
         if multi_total != len(self.count_multi):
-            raise Exception(
+            raise ValueError(
                 f"The expected length of `place_multi`({len(self.count_multi)}) should be {multi_total}."
             )
         return True
@@ -208,6 +208,8 @@ class PatternsSOne:
         return self.num_data, self.num_pix
 
     def get_mean_count(self) -> float:
+        if self.num_data == 0:
+            return 0.0
         return cast(int, self.sum()) / self.num_data
 
     def __repr__(self) -> str:
@@ -238,6 +240,8 @@ class PatternsSOne:
         return int(np.sum([getattr(self, i).nbytes for i in PatternsSOne.ATTRS]))
 
     def sparsity(self) -> float:
+        if self.num_data == 0 or self.num_pix == 0:
+            return 0.0
         return self.nbytes / (4 * self.num_data * self.num_pix)
 
     def __eq__(self, d: object) -> bool:
@@ -496,7 +500,7 @@ def iter_array_buffer(
 
 def _write_bin(datas: Sequence[PatternsSOneBase], path: Path, overwrite: bool) -> None:
     if path.exists() and not overwrite:
-        raise Exception(f"{path} exists")
+        raise FileExistsError(f"{path} exists")
     num_data = np.sum([data.num_data for data in datas])
     num_pix = datas[0].num_pix
     with path.open("wb") as fptr:
@@ -659,7 +663,7 @@ def concatenate_PatternsSOne(
                     a.resize(a.shape[0] + b.shape[0], refcheck=False)
                     a[a.shape[0] - b.shape[0] :] = b[:]
             return ans
-        raise Exception(casting)
+        raise ValueError(f"Unsupported casting mode: {casting}")
     elif axis == 1:
         ones = cast(csr_array, hstack([d._get_sparse_ones() for d in patterns_l]))
         multi = cast(csr_array, hstack([d._get_sparse_multi() for d in patterns_l]))

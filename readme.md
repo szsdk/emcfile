@@ -48,7 +48,8 @@ print(p_emc)
 
 ## Documentation
 
-For a comprehensive guide to using the package, please see the [tutorial](tutorial/tutorial.md).
+For a guided, interactive introduction, see the
+[Marimo tutorial](tutorial/tutorial_00.py).
 
 ## Conventions
 

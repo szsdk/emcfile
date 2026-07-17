@@ -122,8 +122,8 @@ def patterns(
     ------
     ValueError
         If the input `numpy.ndarray` has an unsupported data type.
-    Exception
-        If the source type is not recognized or cannot be parsed.
+    TypeError
+        If the source type is not recognized.
 
     See Also
     --------
@@ -194,4 +194,4 @@ def patterns(
             )
         case list() | np.ndarray() if all(isinstance(i, SPARSE_PATTERN) for i in src):
             return _from_sparse_patterns(cast(Sequence[SPARSE_PATTERN], src))
-    raise Exception()
+    raise TypeError(f"Unsupported pattern source type: {type(src).__name__}")

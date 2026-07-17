@@ -92,14 +92,17 @@ class PatternsSOneCollector:
             If the size of the input image does not match the number of pixels
             of the previously added patterns.
         """
-        if self.num_pix is not None and self.num_pix != img.size:
-            raise ValueError(
-                f"Size of the input image is {img.size}. "
-                f"It does not match the number of pixels {self.num_pix}."
-            )
+        self._validate_num_pix(img.size)
         self._buffer.append(img.ravel())
         if len(self._buffer) >= self.max_buffer_size:
             self._clear_buffer()
+
+    def _validate_num_pix(self, num_pix: int) -> None:
+        if self.num_pix is not None and self.num_pix != num_pix:
+            raise ValueError(
+                f"Size of the input image is {num_pix}. "
+                f"It does not match the number of pixels {self.num_pix}."
+            )
 
     def _clear_buffer(self) -> None:
         if len(self._buffer) <= 0:
@@ -121,18 +124,31 @@ class PatternsSOneCollector:
 
         Raises
         ------
-        Exception
-            If the input `imgs` is not a supported type.
+        TypeError
+            If `imgs` is not a supported collection or contains non-array items.
+        ValueError
+            If any pattern has a different number of pixels.
         """
-        if isinstance(imgs, (list, np.ndarray)):
-            self._buffer.extend(imgs)
-            if len(self._buffer) >= self.max_buffer_size:
-                self._clear_buffer()
-        elif isinstance(imgs, PatternsSOne):
+        if isinstance(imgs, PatternsSOne):
+            self._validate_num_pix(imgs.num_pix)
             self._clear_buffer()
             self._patterns.append(imgs)
-        else:
-            raise Exception()
+            return
+
+        if not isinstance(imgs, (Sequence, np.ndarray)) or isinstance(
+            imgs, (str, bytes)
+        ):
+            raise TypeError(
+                "imgs must be a sequence of NumPy arrays or a PatternsSOne object"
+            )
+
+        images = list(imgs)
+        if not all(isinstance(img, np.ndarray) for img in images):
+            raise TypeError("Each image must be a NumPy array")
+        for img in images:
+            self._validate_num_pix(img.size)
+        for img in images:
+            self.append(img)
 
     def patterns(self) -> PatternsSOneList:
         """
@@ -177,7 +193,9 @@ class PatternsSOneCollector:
         buffered_patterns = len(self._buffer)
         summary = {
             "pixels": self.num_pix,
-            "stored patterns": int(sum(len(p) for p in self._patterns) + buffered_patterns),
+            "stored patterns": int(
+                sum(len(p) for p in self._patterns) + buffered_patterns
+            ),
             "stored chunks": len(self._patterns),
             "buffer size": self.max_buffer_size,
         }

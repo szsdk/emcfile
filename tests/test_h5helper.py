@@ -84,7 +84,7 @@ def test_obj_h5(tmp_path_factory):
     }
     obj_path = f"{fn}::person"
     ef.write_obj_h5(obj_path, obj, overwrite=False)
-    with pytest.raises(Exception):
+    with pytest.raises(FileExistsError):
         ef.write_obj_h5(obj_path, obj, overwrite=False)
     ef.write_obj_h5(obj_path, obj, overwrite=True)
     assert _compare_dict(ef.read_obj_h5(obj_path), obj)

@@ -59,8 +59,8 @@ def h5group(
 
     Raises
     ------
-    Exception:
-        When the fname cannot be correctly parsed.
+    TypeError
+        If the selected HDF5 object is not a group.
     """
     fn, gn = parse_h5path(fname)
     with h5py.File(fn, *args, **kargs) as fptr:
@@ -68,7 +68,7 @@ def h5group(
             fptr.create_group(gn)
         g = fptr[gn]
         if not isinstance(g, h5py.Group):
-            raise Exception(f"{gn} is not a group.")
+            raise TypeError(f"{gn} is not an HDF5 group")
         yield fptr, g
 
 
@@ -135,7 +135,7 @@ class H5Path:
                 raise ValueError(group_mode)
             g = fptr[self.gn]
             if not isinstance(g, (h5py.Dataset, h5py.Group)):
-                raise Exception(f"{self.gn} is not a group.")
+                raise TypeError(f"{self.gn} is not an HDF5 group or dataset")
             yield fptr, g
 
     def __str__(self) -> str:
@@ -187,7 +187,7 @@ def read_array(
     elif f.suffix in [".bin", ".emc"]:
         ans = np.fromfile(f, dtype)
     else:
-        raise Exception(f"Cannot identify file({fname}) suffix.")
+        raise ValueError(f"Cannot identify file({fname}) suffix.")
     return cast(npt.NDArray[Any], ans)
 
 
@@ -364,7 +364,7 @@ def _check_exists(
     if verbose:
         _log.info(f"{group_name} already exists.")
     if not overwrite:
-        raise Exception(f"{group_name} already exists.")
+        raise FileExistsError(f"{group_name} already exists.")
     return True
 
 
@@ -383,7 +383,7 @@ def _write_single(
     match v:
         case np.ndarray():
             if not isinstance(group, (h5py.File, h5py.Group)):
-                raise Exception(f"Cannot write type {type(v)} to {type(group)}")
+                raise TypeError(f"Cannot write type {type(v)} to {type(group)}")
             if _check_exists(k, group, overwrite, verbose):
                 del group[k]
             group.create_dataset(
@@ -391,11 +391,11 @@ def _write_single(
             )
         case dict():
             if not isinstance(group, (h5py.File, h5py.Group)):
-                raise Exception(f"Cannot write type {type(v)} to {type(group)}")
+                raise TypeError(f"Cannot write type {type(v)} to {type(group)}")
             _write_group(group, k, v, overwrite, verbose, compression, compression_opts)
         case np.dtype():
             if not isinstance(group, (h5py.File, h5py.Group)):
-                raise Exception(f"Cannot write type {type(v)} to {type(group)}")
+                raise TypeError(f"Cannot write type {type(v)} to {type(group)}")
             if _check_exists(k, group, overwrite, verbose):
                 del group[k]
             group[k] = v
@@ -413,7 +413,7 @@ def _write_group(
     compression_opts: Union[None, str, int],
 ) -> None:
     if not isinstance(obj, dict):
-        raise Exception(f"Cannot write type {type(obj)}")
+        raise TypeError(f"Cannot write type {type(obj)}")
 
     obj_dot = obj.get(".")
     if obj_dot is not None:

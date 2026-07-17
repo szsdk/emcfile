@@ -206,6 +206,13 @@ def test_empty():
     empty_data = ef.patterns(num_pix)
     assert empty_data.num_pix == num_pix
     assert empty_data.num_data == 0
+    assert empty_data.get_mean_count() == 0.0
+    assert empty_data.sparsity() == 0.0
+
+
+def test_unsupported_pattern_source():
+    with pytest.raises(TypeError, match="Unsupported pattern source type"):
+        ef.patterns(object())
 
 
 @pytest.mark.parametrize(
@@ -382,10 +389,13 @@ def test_pow(n, request):
 
 @pytest.mark.parametrize("shape", [(10, 3), (10, 0)])
 def test_zeros(shape):
+    data = ef.patterns((shape, 0))
     np.testing.assert_equal(
-        ef.patterns((shape, 0)).todense(),
+        data.todense(),
         np.zeros(shape),
     )
+    if shape[1] == 0:
+        assert data.sparsity() == 0.0
 
 
 @pytest.mark.parametrize("shape", [(10, 3), (10, 0)])
@@ -429,6 +439,40 @@ def test_pattern_list(data_emc, data_h5, tmp_path_factory):
     assert plst2[: len(plst)][: len(p0)] == p0[:]
     html = plst._repr_html_()
     assert isinstance(html, str)
+
+
+def test_pattern_list_batches_random_indices_by_source():
+    class CountingPatterns(ef.PatternsSOne):
+        def __init__(self, source):
+            super().__init__(
+                source.num_pix,
+                source.ones,
+                source.multi,
+                source.place_ones,
+                source.place_multi,
+                source.count_multi,
+            )
+            self.selections = []
+
+        def __getitem__(self, index):
+            self.selections.append(index)
+            return super().__getitem__(index)
+
+    dense0 = np.arange(12).reshape(3, 4)
+    dense1 = np.arange(12, 24).reshape(3, 4)
+    source0 = CountingPatterns(ef.patterns(dense0))
+    source1 = CountingPatterns(ef.patterns(dense1))
+    pattern_list = ef.PatternsSOneList([source0, source1])
+    indices = np.array([0, 3, 1, 4, 2, 5, 0])
+
+    np.testing.assert_equal(
+        pattern_list[indices].todense(),
+        np.vstack([np.vstack([dense0, dense1])[i] for i in indices]),
+    )
+    assert len(source0.selections) == 1
+    assert len(source1.selections) == 1
+    np.testing.assert_array_equal(source0.selections[0], [0, 1, 2, 0])
+    np.testing.assert_array_equal(source1.selections[0], [0, 1, 2])
 
 
 @pytest.mark.parametrize("file", ["plst.emc", "plst.h5"])

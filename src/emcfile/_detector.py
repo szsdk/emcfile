@@ -528,9 +528,8 @@ def detector(
         consistent with the detector coordinates.
     FileNotFoundError
         If `src` is a path to a file that does not exist.
-    Exception
-        If the source `src` cannot be parsed or if required arguments are
-        missing when `src` is `None`.
+    TypeError
+        If the source `src` has an unsupported type.
 
     See Also
     --------
@@ -589,7 +588,12 @@ def detector(
         det = _from_file(src)
 
     if det is None:
-        raise Exception(f"Can not parse {src}({type(src)}")
+        if src is None:
+            raise ValueError(
+                "Creating a detector requires either complete detector arrays "
+                "or a coordinate shape and detector distance"
+            )
+        raise TypeError(f"Unsupported detector source type: {type(src).__name__}")
     if norm_flag:
         det.norm()
     if check_consistency and (not det.check_ewald_rad()):
@@ -828,10 +832,19 @@ class DetRender:
             self._prepare_renderer()
 
         raw_img = np.asarray(raw_img, dtype=np.float64)
+        if raw_img.ndim not in (1, 2):
+            raise ValueError(
+                "raw_img must be a one-dimensional image or a two-dimensional batch"
+            )
+        if raw_img.shape[-1] != self._det.num_pix:
+            raise ValueError(
+                f"raw_img has {raw_img.shape[-1]} pixels; "
+                f"the detector requires {self._det.num_pix}"
+            )
 
         W, H = self._render_W, self._render_H
         n_frame = W * H
-        single_image = raw_img.ndim != 2
+        single_image = raw_img.ndim == 1
         images = raw_img[None, :] if single_image else raw_img
 
         acc = np.empty((images.shape[0], n_frame), dtype=np.float64)

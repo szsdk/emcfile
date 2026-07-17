@@ -64,9 +64,9 @@ def test_simple_detector():
 
 def test_det_read(det_file):
     ef.detector(det_file, norm_flag=False)
-    with pytest.raises(Exception):
+    with pytest.raises(FileNotFoundError):
         ef.detector("data/det_sim.foo", norm_flag=False)
-    with pytest.raises(Exception):
+    with pytest.raises(TypeError, match="Unsupported detector source type"):
         ef.detector(12, norm_flag=False)
 
 
@@ -182,6 +182,20 @@ def test_render_uncovered_pixels_are_nan(det):
     assert uncovered.any()
     assert np.isnan(detr.render(raw).data[uncovered]).all()
     assert np.isnan(detr.render(raw[None, :]).data[0, uncovered]).all()
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (),
+        (2, 3, 4),
+        (10,),
+        (2, 10),
+    ],
+)
+def test_render_validates_input_shape(det, shape):
+    with pytest.raises(ValueError):
+        ef.det_render(det).render(np.zeros(shape))
 
 
 def test_render_real(real_det, real_patterns):

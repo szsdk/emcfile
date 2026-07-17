@@ -131,6 +131,8 @@ class PatternsSOneFile:
         )
 
     def sparsity(self) -> float:
+        if self.num_data == 0 or self.num_pix == 0:
+            return 0.0
         return float(self.nbytes / (4 * self.num_data * self.num_pix))
 
     def _read_patterns(
@@ -724,18 +726,27 @@ class PatternsSOneList(PatternsSOneFile):
                         np.array([], dtype=np.uint32),
                         np.array([], dtype=np.int32),
                     )
-                # TODO: the performance can be improved by grouping the patterns by file first, and
-                # then read them in batch. Benchmark is needed to see if it's worth the effort.
                 lids = np.digitize(selected, self._indptr[1:])
+                source_order = np.argsort(lids, kind="stable")
+                grouped_lids = lids[source_order]
+                grouped_indices = selected[source_order]
+
                 patns: list[PatternsSOne] = []
-                starts = np.r_[0, np.flatnonzero(lids[1:] != lids[:-1]) + 1]
-                ends = np.r_[starts[1:], len(selected)]
+                starts = np.r_[
+                    0, np.flatnonzero(grouped_lids[1:] != grouped_lids[:-1]) + 1
+                ]
+                ends = np.r_[starts[1:], len(grouped_indices)]
                 for start, end in zip(starts, ends):
-                    i = lids[start]
+                    i = grouped_lids[start]
                     patns.append(
-                        self.pattern_list[i][selected[start:end] - self._indptr[i]]
+                        self.pattern_list[i][
+                            grouped_indices[start:end] - self._indptr[i]
+                        ]
                     )
-                return np.concatenate(patns)
+                grouped = cast(PatternsSOne, np.concatenate(patns))
+                if np.all(source_order == np.arange(len(source_order))):
+                    return grouped
+                return grouped[np.argsort(source_order)]
 
     def write(
         self,
