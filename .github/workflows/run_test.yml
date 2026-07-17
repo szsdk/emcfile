@@ -25,7 +25,7 @@ jobs:
         continue-on-error: true
       - name: Test with pytest
         run: |
-          uv run pytest --cov emcfile -xs .
+          uv run pytest --cov=src/emcfile -xs .
       - name: Generate Coverage Report
         run: |
           uv run coverage report -m

@@ -10,6 +10,13 @@ import emcfile as ef
 DATA_DIR = Path(__file__).resolve().parent.parent / "tmp"
 
 
+def _require_real_data(filename):
+    path = DATA_DIR / filename
+    if not path.is_file():
+        pytest.skip(f"Optional real-data fixture is unavailable: {path}")
+    return path
+
+
 @pytest.fixture()
 def det():
     coor2d = np.mgrid[-32:33, -32:33].reshape(2, -1).T.astype(np.float64)
@@ -36,12 +43,12 @@ def det():
 
 @pytest.fixture(scope="session")
 def real_det():
-    return ef.detector(DATA_DIR / "det_10482_v04_streak_lowq_bin4.h5")
+    return ef.detector(_require_real_data("det_10482_v04_streak_lowq_bin4.h5"))
 
 
 @pytest.fixture(scope="session")
 def real_patterns():
-    return ef.patterns(DATA_DIR / "test.emc")
+    return ef.patterns(_require_real_data("test.emc"))
 
 
 @pytest.fixture()

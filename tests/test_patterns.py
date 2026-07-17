@@ -127,7 +127,7 @@ def test_pattern_not_equal(small_data):
     assert a != small_data
 
 
-@pytest.mark.parametrize("inp, ref", gen_pattern_inputs())
+@pytest.mark.parametrize("inp, ref", tuple(gen_pattern_inputs()))
 def test_patterns(inp, ref):
     p = ef.patterns(inp)
     assert p == ref
@@ -191,7 +191,7 @@ def gen_sum_inputs():
         yield axis, keepdims, dtype, "small_data", "small_dense"
 
 
-@pytest.mark.parametrize("axis, keepdims, dtype, data, dense", gen_sum_inputs())
+@pytest.mark.parametrize("axis, keepdims, dtype, data, dense", tuple(gen_sum_inputs()))
 def test_sum(axis, keepdims, dtype, data, dense, request):
     data = request.getfixturevalue(data)
     dense = request.getfixturevalue(dense)
@@ -257,7 +257,7 @@ def gen_write_patterns():
         yield ".h5", [data] * i
 
 
-@pytest.mark.parametrize("suffix, data_list", gen_write_patterns())
+@pytest.mark.parametrize("suffix, data_list", tuple(gen_write_patterns()))
 def test_write_patterns(suffix, data_list):
     with (
         tempfile.NamedTemporaryFile(suffix=suffix) as f0,
