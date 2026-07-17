@@ -221,11 +221,19 @@ class Detector:
             self.ewald_rad,
         )
 
-    def __array__(self) -> npt.NDArray[Any]:
+    def __array__(
+        self,
+        dtype: Optional[npt.DTypeLike] = None,
+        copy: Optional[bool] = None,
+    ) -> npt.NDArray[Any]:
         ans = np.empty(self.num_pix, dtype=Detector.dtype)
         ans["coor"] = self.coor
         ans["factor"] = self.factor
         ans["mask"] = self.mask
+        if dtype is not None:
+            ans = ans.astype(dtype, copy=False)
+        if copy:
+            ans = ans.copy()
         return ans
 
     def __array_function__(
@@ -289,7 +297,7 @@ class Detector:
         return cast(npt.NDArray[np.bool_], (self.mask & f) == v)
 
 
-HANDLED_FUNCTIONS = {}
+HANDLED_FUNCTIONS: dict[Callable[..., Any], Callable[..., Any]] = {}
 
 FT = TypeVar("FT", bound=Callable[..., Any])
 
@@ -561,13 +569,17 @@ def detector(
             and (detd is not None)
             and (ewald_rad is not None)
         ):
-            coor_, mask_, factor_ = _init_detector(coor, mask, factor)
+            coor_, mask_, factor_ = _init_detector(
+                cast(npt.NDArray[Any], coor), mask, factor
+            )
             det = Detector(coor_, factor_, mask_, float(detd), float(ewald_rad))
         elif (coor is not None) and (detd is not None):
-            det = simple_detector(coor, detd)
+            det = simple_detector(cast(tuple[int, int], coor), detd)
     elif isinstance(src, Detector):
         det = Detector(
-            src.coor if coor is None else coor.astype(np.float64),
+            src.coor
+            if coor is None
+            else cast(npt.NDArray[Any], coor).astype(np.float64),
             src.factor if factor is None else factor.astype(np.float64),
             src.mask if mask is None else mask.astype(np.int32),
             src.detd if detd is None else float(detd),
@@ -774,7 +786,7 @@ class DetRender:
         pix_idx = self._det.mask == 2
         self._mask[self.xy[pix_idx, 0], self.xy[pix_idx, 1]] = 1
         self._mask = self._mask.T.copy()
-        self._count: npt.NDArray[np.float64] = ma.masked_array(
+        self._count: ma.MaskedArray = ma.masked_array(
             np.zeros((self.frame_shape[1], self.frame_shape[0]), dtype="f8"),
             mask=self._mask,
         )  # type: ignore
@@ -802,9 +814,7 @@ class DetRender:
         self._render_flat = flat.astype(np.int64, copy=False)
 
         self._count_flat = np.asarray(self._count.filled(0), dtype=np.float64).ravel()
-        self._count_flat_bc = self._count_flat[None, :]
         self._nonzero_flat = self._count_flat != 0
-        self._mask_flat = self._mask.ravel()
 
     def render(self, raw_img: npt.NDArray[Any]) -> ma.MaskedArray:
         """
@@ -819,44 +829,33 @@ class DetRender:
 
         raw_img = np.asarray(raw_img, dtype=np.float64)
 
-        if raw_img.ndim == 2:
-            n_images = raw_img.shape[0]
-            W, H = self._render_W, self._render_H
-            n_frame = W * H
-
-            acc = np.empty((n_images, n_frame), dtype=np.float64)
-            flat = self._render_flat
-            for i in range(n_images):
-                acc[i] = np.bincount(flat, weights=raw_img[i], minlength=n_frame)
-
-            out = np.divide(
-                acc,
-                self._count_flat_bc,
-                out=acc,
-                where=self._nonzero_flat,
-            )
-            out[:, ~self._nonzero_flat] = np.nan
-
-            mask = np.broadcast_to(self._mask, (n_images, H, W))
-            return ma.masked_array(out.reshape(n_images, H, W), mask=mask)
-
         W, H = self._render_W, self._render_H
+        n_frame = W * H
+        single_image = raw_img.ndim != 2
+        images = raw_img[None, :] if single_image else raw_img
 
-        acc = np.bincount(
-            self._render_flat,
-            weights=raw_img,
-            minlength=W * H,
-        )
+        acc = np.empty((images.shape[0], n_frame), dtype=np.float64)
+        for i, image in enumerate(images):
+            acc[i] = np.bincount(
+                self._render_flat,
+                weights=image,
+                minlength=n_frame,
+            )
 
-        out = np.divide(
+        np.divide(
             acc,
             self._count_flat,
             out=acc,
             where=self._nonzero_flat,
         )
-        out[~self._nonzero_flat] = np.nan
+        acc[:, ~self._nonzero_flat] = np.nan
+        rendered = acc.reshape(images.shape[0], H, W)
 
-        return ma.masked_array(out.reshape(H, W), mask=self._mask)
+        if single_image:
+            return ma.masked_array(rendered[0], mask=self._mask)
+
+        mask = np.broadcast_to(self._mask, rendered.shape)
+        return ma.masked_array(rendered, mask=mask)
 
     def to_cxy(self, xyz: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
         cxy = xyz_to_cxy(xyz, self._det.ewald_rad, self.direction)

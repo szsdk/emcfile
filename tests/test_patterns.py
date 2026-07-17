@@ -38,6 +38,7 @@ def test_get_mean_count(big_data, big_dense):
 
 def test_todense(big_data, big_dense):
     np.testing.assert_equal(big_data.todense(), big_dense)
+    np.testing.assert_equal(np.asarray(big_data, dtype=float), big_dense)
 
 
 def test_tocsr(big_data, big_dense):

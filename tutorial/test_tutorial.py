@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-scripts = Path(__file__).parent.glob("tutorial*.py")
+scripts = tuple(Path(__file__).parent.glob("tutorial*.py"))
 
 
 @pytest.mark.parametrize("script", scripts)

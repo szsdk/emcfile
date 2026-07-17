@@ -415,7 +415,7 @@ def _write_group(
     if not isinstance(obj, dict):
         raise Exception(f"Cannot write type {type(obj)}")
 
-    obj_dot = obj.pop(".", None)
+    obj_dot = obj.get(".")
     if obj_dot is not None:
         if _check_exists(group_name, fp, overwrite, verbose):
             del fp[group_name]
@@ -427,9 +427,9 @@ def _write_group(
     if isinstance(g, h5py.Datatype):
         raise NotImplementedError("The support for h5py.Datatype is not implemented.")
     for k, v in obj.items():
+        if k == ".":
+            continue
         _write_single(g, k, v, overwrite, verbose, compression, compression_opts)
-    if obj_dot is not None:
-        obj["."] = obj_dot
 
 
 def write_obj_h5(

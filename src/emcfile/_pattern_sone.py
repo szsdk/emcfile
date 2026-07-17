@@ -45,6 +45,15 @@ HANDLED_FUNCTIONS: Dict[Callable[..., Any], Callable[..., Any]] = {}
 TRANGE = slice | npt.NDArray[np.bool_ | np.int32 | np.int64 | np.uint32 | np.uint64]
 
 
+def _count_offsets(
+    counts: npt.NDArray[np.integer[Any]],
+) -> npt.NDArray[np.uint64]:
+    """Return cumulative event offsets for per-pattern counts."""
+    offsets = np.zeros(len(counts) + 1, dtype=np.uint64)
+    np.cumsum(counts, out=offsets[1:])
+    return offsets
+
+
 @runtime_checkable
 class PatternsSOneBase(Protocol):
     @property
@@ -153,10 +162,8 @@ class PatternsSOne:
         self.update_idx()
 
     def update_idx(self) -> None:
-        self.ones_idx = np.zeros(self.num_data + 1, dtype="u8")
-        np.cumsum(self.ones, out=self.ones_idx[1:])
-        self.multi_idx = np.zeros(self.num_data + 1, dtype="u8")
-        np.cumsum(self.multi, out=self.multi_idx[1:])
+        self.ones_idx = _count_offsets(self.ones)
+        self.multi_idx = _count_offsets(self.multi)
 
     def check(self) -> bool:
         if self.num_data != len(self.multi):
@@ -286,7 +293,7 @@ class PatternsSOne:
         self,
         axis: Optional[int] = None,
         keepdims: bool = False,
-        dtype: npt.DTypeLike = None,
+        dtype: Optional[npt.DTypeLike] = None,
     ) -> Union[
         npt.NDArray[Any],
         np.int32,
@@ -305,22 +312,13 @@ class PatternsSOne:
             ans += np.squeeze(self._get_sparse_multi().sum(axis=1, dtype=dtype))
             return ans[:, None] if keepdims else ans
         elif axis == 0:
-            ans: npt.NDArray[Any] = np.zeros(self.num_pix, dtype=dtype)
-            np.add.at(ans, self.place_ones, 1)
-            np.add.at(ans, self.place_multi, self.count_multi)
-            return ans[None, :] if keepdims else ans
+            column_sum: npt.NDArray[Any] = np.zeros(self.num_pix, dtype=dtype)
+            np.add.at(column_sum, self.place_ones, 1)
+            np.add.at(column_sum, self.place_multi, self.count_multi)
+            return column_sum[None, :] if keepdims else column_sum
         raise ValueError(f"Do not support axis={axis}.")
 
-    @overload
-    def __getitem__(self, index: int | np.integer) -> npt.NDArray[np.int32]: ...
-
-    @overload
-    def __getitem__(self, index: TRANGE) -> PatternsSOne: ...
-
-    @overload
-    def __getitem__(self, index: tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
-
-    def _get_subdataset0(self, i) -> PatternsSOne:
+    def _get_subdataset0(self, i: npt.NDArray[np.integer[Any]]) -> PatternsSOne:
         if len(i) == 0:
             return _zeros((0, self.num_pix))
         c = concat_continous(i)
@@ -336,6 +334,15 @@ class PatternsSOne:
             count_multi=np.concatenate([self.count_multi[s:e] for s, e in multi_s]),
         )
 
+    @overload
+    def __getitem__(self, index: int | np.integer) -> npt.NDArray[np.int32]: ...
+
+    @overload
+    def __getitem__(self, index: TRANGE) -> PatternsSOne: ...
+
+    @overload
+    def __getitem__(self, index: tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
+
     def __getitem__(
         self,
         index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
@@ -346,7 +353,7 @@ class PatternsSOne:
             case np.ndarray() if np.issubdtype(index.dtype, bool):
                 return self._get_subdataset0(np.where(index)[0])
             case np.ndarray() if np.issubdtype(index.dtype, np.integer):
-                return self._get_subdataset0(index)
+                return self._get_subdataset0(cast(npt.NDArray[np.integer[Any]], index))
             case slice():
                 return self._get_subdataset((index,))
             case _:
@@ -392,8 +399,17 @@ class PatternsSOne:
         ans += self._get_sparse_multi()
         return cast(npt.NDArray[np.int32], np.squeeze(ans))
 
-    def __array__(self) -> npt.NDArray[np.int32]:
-        return self.todense()
+    def __array__(
+        self,
+        dtype: Optional[npt.DTypeLike] = None,
+        copy: Optional[bool] = None,
+    ) -> npt.NDArray[Any]:
+        ans = self.todense()
+        if dtype is not None:
+            ans = ans.astype(dtype, copy=False)
+        if copy:
+            ans = ans.copy()
+        return ans
 
     def __matmul__(self, mtx: npt.NDArray[Any]) -> npt.NDArray[Any]:
         return cast(
@@ -594,10 +610,8 @@ def _write_h5_v1(
 
         place_ones = fp.create_dataset("place_ones", (data.num_data,), dtype=dt)
 
-        ones_idx = np.zeros(data.num_data + 1, dtype="u8")
-        np.cumsum(data.ones, out=ones_idx[1:])
-        multi_idx = np.zeros(data.num_data + 1, dtype="u8")
-        np.cumsum(data.multi, out=multi_idx[1:])
+        ones_idx = _count_offsets(data.ones)
+        multi_idx = _count_offsets(data.multi)
 
         for idx, d in enumerate(np.split(data.place_ones, ones_idx[1:-1]), start):
             place_ones[idx] = d

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from html import escape
-from typing import Sequence
+from collections.abc import Mapping, Sequence
 
 
 def _format_value(value: object) -> str:
@@ -16,13 +16,13 @@ def _format_value(value: object) -> str:
 
 def html_card(
     title: str,
-    metrics: dict[str, object],
+    metrics: Mapping[str, object],
     *,
-    details: dict[str, object] | None = None,
+    details: Mapping[str, object] | None = None,
     bars: Sequence[tuple[str, float, str]] = (),
 ) -> str:
     """Generate HTML for a card display compatible with _repr_html_.
-    
+
     Returns a pure HTML string that can be used with IPython's _repr_html_
     protocol.
     """

@@ -94,6 +94,15 @@ def test_obj_h5(tmp_path_factory):
     assert _compare_dict(ef.read_obj_h5(obj_path), obj)
 
 
+def test_write_obj_h5_does_not_mutate_input_on_error(tmp_path):
+    obj = {".": np.arange(3), "invalid": object()}
+
+    with pytest.raises(TypeError):
+        ef.write_obj_h5(f"{tmp_path / 'test.h5'}::data", obj)
+
+    np.testing.assert_array_equal(obj["."], np.arange(3))
+
+
 @pytest.fixture(
     params=[
         ("numpy.npy", np.random.rand(10)),

@@ -7,7 +7,7 @@ import os
 from collections.abc import Sequence
 from io import BufferedReader, BytesIO
 from pathlib import Path
-from typing import Any, Optional, TypeVar, Union, cast, overload
+from typing import Any, Optional, Union, cast, overload
 
 import h5py
 import numpy as np
@@ -21,6 +21,7 @@ from ._pattern_sone import (
     TRANGE,
     PatternsSOne,
     PatternsSOneBase,
+    _count_offsets,
     write_patterns,
 )
 from ._utils import concat_continous
@@ -30,13 +31,13 @@ _log = logging.getLogger(__name__)
 
 I4 = np.dtype("i4").itemsize
 
-T1 = TypeVar("T1", np.int32, np.int64)
+INDEX_ARRAY = npt.NDArray[np.integer[Any]]
 
 
 def read_indexed_array(
     fin: Union[BufferedReader, BytesIO],
-    idx_con: npt.NDArray[T1],
-    arr_idx: npt.NDArray[T1],
+    idx_con: INDEX_ARRAY,
+    arr_idx: INDEX_ARRAY,
     e0: int,
 ) -> tuple[npt.NDArray[np.int32], int]:
     if len(idx_con) == 1:
@@ -63,9 +64,9 @@ def read_indexed_array(
 
 def read_patterns(
     fin: Union[BufferedReader, BytesIO],
-    idx_con: npt.NDArray[T1],
-    ones_idx: npt.NDArray[T1],
-    multi_idx: npt.NDArray[T1],
+    idx_con: INDEX_ARRAY,
+    ones_idx: INDEX_ARRAY,
+    multi_idx: INDEX_ARRAY,
 ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
     seek_start = PatternsSOneEMC.HEADER_BYTES + I4 * (len(ones_idx) - 1) * 2
     fin.seek(seek_start)
@@ -109,13 +110,16 @@ class PatternsSOneFile:
         return self._multi
 
     @property
-    def place_ones(self) -> npt.NDArray[np.uint32]: ...
+    def place_ones(self) -> npt.NDArray[np.uint32]:
+        raise NotImplementedError()
 
     @property
-    def place_multi(self) -> npt.NDArray[np.uint32]: ...
+    def place_multi(self) -> npt.NDArray[np.uint32]:
+        raise NotImplementedError()
 
     @property
-    def count_multi(self) -> npt.NDArray[np.int32]: ...
+    def count_multi(self) -> npt.NDArray[np.int32]:
+        raise NotImplementedError()
 
     @property
     def nbytes(self) -> int:
@@ -130,7 +134,7 @@ class PatternsSOneFile:
         return float(self.nbytes / (4 * self.num_data * self.num_pix))
 
     def _read_patterns(
-        self, idx_con: npt.NDArray[T1]
+        self, idx_con: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         raise NotImplementedError()
 
@@ -141,10 +145,8 @@ class PatternsSOneFile:
         if self._init_idx:
             return
         self._ones, self._multi = self._read_ones_multi()
-        self.ones_idx = np.zeros(self.num_data + 1, dtype="u8")
-        np.cumsum(self._ones, out=self.ones_idx[1:])
-        self.multi_idx = np.zeros(self.num_data + 1, dtype="u8")
-        np.cumsum(self._multi, out=self.multi_idx[1:])
+        self.ones_idx = _count_offsets(self._ones)
+        self.multi_idx = _count_offsets(self._multi)
         self._init_idx = True
 
     def __repr__(self) -> str:
@@ -230,7 +232,7 @@ class PatternsSOneFile:
         self,
         axis: Optional[int] = None,
         keepdims: bool = False,
-        dtype: npt.DTypeLike = None,
+        dtype: Optional[npt.DTypeLike] = None,
         chunk_size: Optional[int] = None,
     ) -> Union[int, float, npt.NDArray[Any]]:
         if chunk_size is None:
@@ -299,7 +301,7 @@ class PatternsSOneEMC(PatternsSOneFile):
             )
 
     def _read_patterns(
-        self, idx_con: npt.NDArray[T1]
+        self, idx_con: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
         with self._fn.open("rb") as fin:
@@ -374,7 +376,7 @@ class _PatternsSOneBytes(PatternsSOneFile):
         )
 
     def _read_patterns(
-        self, idx_con: npt.NDArray[T1]
+        self, idx_con: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
         self._fn.seek(0)
@@ -404,7 +406,7 @@ class PatternsSOneEMCReadBuffer(PatternsSOneEMC):
         )
 
     def _read_patterns(
-        self, idx_con: npt.NDArray[T1]
+        self, idx_con: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
         return read_patterns(self._file_handle, idx_con, self.ones_idx, self.multi_idx)
@@ -412,8 +414,8 @@ class PatternsSOneEMCReadBuffer(PatternsSOneEMC):
 
 def read_indexed_array_h5(
     fin: h5py.Dataset,
-    idx_con: npt.NDArray[T1],
-    arr_idx: npt.NDArray[T1],
+    idx_con: INDEX_ARRAY,
+    arr_idx: INDEX_ARRAY,
 ) -> npt.NDArray[np.int32]:
     if len(idx_con) == 1:
         s, e = idx_con[0]
@@ -471,7 +473,7 @@ class PatternsSOneH5(PatternsSOneFile):
             ]
 
     def _read_patterns(
-        self, idx_con: npt.NDArray[T1]
+        self, idx_con: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
         with self._fn.open_group() as (_, gp):
@@ -532,7 +534,7 @@ class PatternsSOneH5ReadBuffer(PatternsSOneH5):
         return cast(h5py.Dataset, gp["ones"])[...], cast(h5py.Dataset, gp["multi"])[...]
 
     def _read_patterns(
-        self, idx_con: npt.NDArray[T1]
+        self, idx_con: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
         assert self._file_handle is not None
@@ -709,8 +711,11 @@ class PatternsSOneList(PatternsSOneFile):
                 lidx = np.digitize(pidx, self._indptr[1:])
                 return self.pattern_list[lidx][int(pidx - self._indptr[lidx])]
             case _:
-                pidx = np.arange(self.num_data)[index]
-                if len(pidx) == 0:
+                selected = cast(
+                    npt.NDArray[np.int32 | np.int64],
+                    np.arange(self.num_data)[index],
+                )
+                if len(selected) == 0:
                     return PatternsSOne(
                         self.num_pix,
                         np.array([], dtype=np.uint32),
@@ -721,14 +726,14 @@ class PatternsSOneList(PatternsSOneFile):
                     )
                 # TODO: the performance can be improved by grouping the patterns by file first, and
                 # then read them in batch. Benchmark is needed to see if it's worth the effort.
-                lids = np.digitize(pidx, self._indptr[1:])
+                lids = np.digitize(selected, self._indptr[1:])
                 patns: list[PatternsSOne] = []
                 starts = np.r_[0, np.flatnonzero(lids[1:] != lids[:-1]) + 1]
-                ends = np.r_[starts[1:], len(pidx)]
+                ends = np.r_[starts[1:], len(selected)]
                 for start, end in zip(starts, ends):
                     i = lids[start]
                     patns.append(
-                        self.pattern_list[i][pidx[start:end] - self._indptr[i]]
+                        self.pattern_list[i][selected[start:end] - self._indptr[i]]
                     )
                 return np.concatenate(patns)
 

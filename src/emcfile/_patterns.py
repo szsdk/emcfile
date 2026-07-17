@@ -170,7 +170,7 @@ def patterns(
             (int() | np.integer(), int() | np.integer()) as shape,
             int() | np.integer() as v,
         ):
-            return _full(shape, v)
+            return _full(shape, int(v))
         case np.ndarray():
             if not np.issubdtype(src.dtype, np.integer):
                 raise ValueError(f"{src.dtype} is not supported")
@@ -193,5 +193,5 @@ def patterns(
                 ),
             )
         case list() | np.ndarray() if all(isinstance(i, SPARSE_PATTERN) for i in src):
-            return _from_sparse_patterns(src)
+            return _from_sparse_patterns(cast(Sequence[SPARSE_PATTERN], src))
     raise Exception()
