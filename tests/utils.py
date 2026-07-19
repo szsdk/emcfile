@@ -5,10 +5,8 @@ import numpy as np
 
 
 @contextlib.contextmanager
-def temp_seed(seed: int) -> Iterator[None]:
-    """
-    keep the global random state in a temporary variable and reset it once the function is done
-    """
+def temporary_random_seed(seed: int) -> Iterator[None]:
+    """Temporarily set NumPy's global random seed, then restore its state."""
     state = np.random.get_state()
     np.random.seed(seed)
     try:
@@ -17,7 +15,7 @@ def temp_seed(seed: int) -> Iterator[None]:
         np.random.set_state(state)
 
 
-class FakeMarimoHtml:
+class FakeMarimoHTML:
     def __init__(self, text: str):
         self.text = text
 
@@ -26,7 +24,7 @@ class FakeMarimoHtml:
 
 
 class FakeMarimo:
-    Html = FakeMarimoHtml
+    Html = FakeMarimoHTML
 
     @staticmethod
     def as_html(value: object) -> str:

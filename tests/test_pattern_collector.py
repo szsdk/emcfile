@@ -5,41 +5,43 @@ import emcfile as ef
 
 
 def test_collector(tmp_path):
-    cl = ef.PatternsSOneCollector(16)
-    html = cl._repr_html_()
+    collector = ef.EMCPatternCollector(batch_size=16)
+    html = collector._repr_html_()
     assert isinstance(html, str)
     assert "Pattern collector" in html or "collector" in html.lower()
 
-    imgs = []
+    images = []
     for _ in range(30):
-        img = np.random.randint(32, size=34)
-        cl.append(img)
-        imgs.append(img)
-    ref = ef.patterns(np.array(imgs))
-    assert ref == cl.to_patterns()[:]
+        image = np.random.randint(32, size=34)
+        collector.append(image)
+        images.append(image)
+    expected = ef.patterns(np.array(images))
+    assert expected == collector.to_patterns()[:]
 
     # test write
-    cl.write(tmp_path / "test.emc")
-    assert ref == ef.patterns(tmp_path / "test.emc")
+    collector.write(tmp_path / "test.emc")
+    assert expected == ef.patterns(tmp_path / "test.emc")
 
     # test append with wrong size
     with pytest.raises(ValueError):
-        cl.append(np.random.randint(32, size=35))
+        collector.append(np.random.randint(32, size=35))
 
-    cl.extend(imgs)
-    cl.extend(tuple(imgs))
-    cl.extend(np.array(imgs))
-    cl.extend(ef.patterns(np.array(imgs)))
-    assert np.concatenate(cl.pattern_batches()) == ef.patterns(np.array(imgs * 5))
+    collector.extend(images)
+    collector.extend(tuple(images))
+    collector.extend(np.array(images))
+    collector.extend(ef.patterns(np.array(images)))
+    assert np.concatenate(collector.pattern_batches()) == ef.patterns(
+        np.array(images * 5)
+    )
 
     with pytest.raises(ValueError):
-        cl.extend([np.random.randint(32, size=35)])
+        collector.extend([np.random.randint(32, size=35)])
     with pytest.raises(ValueError):
-        cl.extend(ef.patterns(np.zeros((1, 35), dtype=int)))
+        collector.extend(ef.patterns(np.zeros((1, 35), dtype=int)))
     with pytest.raises(TypeError):
-        cl.extend([object()])
+        collector.extend([object()])
     with pytest.raises(TypeError):
-        cl.extend(iter(imgs))
+        collector.extend(iter(images))
 
-    html = cl._repr_html_()
+    html = collector._repr_html_()
     assert isinstance(html, str)

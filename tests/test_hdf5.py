@@ -9,17 +9,17 @@ import pytest
 import emcfile as ef
 
 
-def test_h5group(tmp_path_factory):
-    fn = tmp_path_factory.mktemp("data") / "test.h5"
-    rand_data = np.random.rand(222)
-    with ef.h5group(f"{fn}::group", "a") as (_, g):
-        g.create_dataset("data", data=rand_data)
-    with ef.h5group(f"{fn}::group", "r") as (_, g):
-        np.testing.assert_array_equal(cast(h5py.Dataset, g["data"])[...], rand_data)
+def test_hdf5_group(tmp_path_factory):
+    path = tmp_path_factory.mktemp("data") / "test.h5"
+    expected = np.random.rand(222)
+    with ef.h5group(f"{path}::group", "a") as (_, group):
+        group.create_dataset("data", data=expected)
+    with ef.h5group(f"{path}::group", "r") as (_, group):
+        np.testing.assert_array_equal(cast(h5py.Dataset, group["data"])[...], expected)
 
 
 @pytest.mark.parametrize(
-    "fname, result",
+    "path_string, expected",
     [
         ("/tmp/tmpl6ppiovx.h5::inten", (Path("/tmp/tmpl6ppiovx.h5"), "inten")),
         ("few.h5", (Path("few.h5"), "/")),
@@ -30,77 +30,76 @@ def test_h5group(tmp_path_factory):
         ("fewf.txt::32::33", None),
     ],
 )
-def test_h5path(fname, result):
-    if result is None:
+def test_as_hdf5_path(path_string, expected):
+    if expected is None:
         with pytest.raises(ValueError):
-            ef.h5path(fname)
+            ef.as_hdf5_path(path_string)
     else:
-        assert tuple(ef.h5path(fname)) == result
+        assert tuple(ef.as_hdf5_path(path_string)) == expected
 
 
 @pytest.mark.parametrize(
-    "fname, result",
+    "path_string, expected",
     [
-        ("/tmp/vx.h5::inten", ef.h5path("/tmp/vx.h5", "inten")),
-        ("/tmp/vx.h5", ef.h5path("/tmp/vx.h5", "/")),
+        ("/tmp/vx.h5::inten", ef.as_hdf5_path("/tmp/vx.h5", "inten")),
+        ("/tmp/vx.h5", ef.as_hdf5_path("/tmp/vx.h5", "/")),
         ("/tmp/vx.txt", Path("/tmp/vx.txt")),
     ],
 )
-def test_make_path(fname, result):
-    assert ef.make_path(fname) == result
+def test_as_path(path_string, expected):
+    assert ef.as_path(path_string) == expected
 
 
-def test_h5path_display(tmp_path):
-    path = ef.h5path(tmp_path / "test.h5", "group")
+def test_hdf5_path_display(tmp_path):
+    path = ef.as_hdf5_path(tmp_path / "test.h5", "group")
     html = path._repr_html_()
-    # Verify it's a string containing expected content
     assert isinstance(html, str)
     assert "test.h5" in html or "HDF5" in html
 
 
-def _compare_dict(d1, d2):
-    if d1.keys() != d2.keys():
+def _objects_equal(actual, expected):
+    if actual.keys() != expected.keys():
         return False
-    for k, v in d1.items():
-        if isinstance(v, np.ndarray):
-            if not np.all(v == d2[k]):
+    for key, value in actual.items():
+        if isinstance(value, np.ndarray):
+            if not np.all(value == expected[key]):
                 return False
-        elif isinstance(v, dict):
-            if not _compare_dict(v, d2[k]):
+        elif isinstance(value, dict):
+            if not _objects_equal(value, expected[key]):
                 return False
         else:
-            if not v == d2[k]:
+            if value != expected[key]:
                 return False
     return True
 
 
-def test_obj_h5(tmp_path_factory):
-    fn = tmp_path_factory.mktemp("data") / "test.h5"
-    obj = {
+def test_hdf5_object_roundtrip(tmp_path_factory):
+    path = tmp_path_factory.mktemp("data") / "test.h5"
+    value = {
         "name": "sz",
         "age": 27,
         "data": {"test": np.random.rand(3, 5)},
         "datatype": np.dtype([("a", int), ("b", float)]),
     }
-    obj_path = f"{fn}::person"
-    ef.write_obj_h5(obj_path, obj, overwrite=False)
+    object_path = f"{path}::person"
+    ef.write_hdf5_object(object_path, value, overwrite=False)
     with pytest.raises(FileExistsError):
-        ef.write_obj_h5(obj_path, obj, overwrite=False)
-    ef.write_obj_h5(obj_path, obj, overwrite=True)
-    assert _compare_dict(ef.read_obj_h5(obj_path), obj)
+        ef.write_hdf5_object(object_path, value, overwrite=False)
+    ef.write_hdf5_object(object_path, value, overwrite=True)
+    assert _objects_equal(ef.read_hdf5_object(object_path), value)
 
-    obj = {"name": "sz", "age": 27, ".": np.random.rand(3, 5)}
-    ef.write_obj_h5(obj_path, obj, overwrite=True, verbose=True)
-    assert _compare_dict(ef.read_obj_h5(obj_path), obj)
+    value = {"name": "sz", "age": 27, ".": np.random.rand(3, 5)}
+    ef.write_hdf5_object(object_path, value, overwrite=True, verbose=True)
+    assert _objects_equal(ef.read_hdf5_object(object_path), value)
 
 
-def test_write_obj_h5_does_not_mutate_input_on_error(tmp_path):
-    obj = {".": np.arange(3), "invalid": object()}
+def test_write_hdf5_object_does_not_mutate_input_on_error(tmp_path):
+    value = {".": np.arange(3), "invalid": object()}
 
     with pytest.raises(TypeError):
-        ef.write_obj_h5(f"{tmp_path / 'test.h5'}::data", obj)
+        ef.write_hdf5_object(f"{tmp_path / 'test.h5'}::data", value)
 
-    np.testing.assert_array_equal(obj["."], np.arange(3))
+    np.testing.assert_array_equal(value["."], np.arange(3))
 
 
 @pytest.fixture(
@@ -112,16 +111,16 @@ def test_write_obj_h5_does_not_mutate_input_on_error(tmp_path):
         ("g.npy", None),
     ]
 )
-def cases_read_array(request, tmp_path):
-    fn = tmp_path / request.param[0]
-    result = request.param[1]
+def array_file_case(request, tmp_path):
+    path = tmp_path / request.param[0]
+    expected = request.param[1]
     if request.param[1] is None:
-        return fn, result, pytest.raises(FileNotFoundError)
-    ef.write_array(fn, result)
-    return fn, result, does_not_raise()
+        return path, expected, pytest.raises(FileNotFoundError)
+    ef.write_array(path, expected)
+    return path, expected, does_not_raise()
 
 
-def test_read_array(cases_read_array):
-    filename, result, expectation = cases_read_array
+def test_read_array(array_file_case):
+    path, expected, expectation = array_file_case
     with expectation:
-        np.testing.assert_array_equal(ef.read_array(filename), result)
+        np.testing.assert_array_equal(ef.read_array(path), expected)
