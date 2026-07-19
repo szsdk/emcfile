@@ -86,6 +86,22 @@ and `H5Path.object_path` are synchronized alternatives to `fn` and `gn`.
 Pattern writers accept `hdf5_version` as an alternative to `h5version`.
 Collectors accept `batch_size` as an alternative to `max_buffer_size`.
 
+## Implementation modules
+
+Internal imports now use focused module names. The former module paths remain
+as deprecated compatibility aliases, including access to private attributes in
+the one-to-one aliases.
+
+| Preferred module | Deprecated module |
+| --- | --- |
+| `emcfile._emc_patterns` | `emcfile._pattern_sone` |
+| `emcfile._pattern_files` | `emcfile._pattern_sone_file` |
+| `emcfile._pattern_factory` | `emcfile._patterns` |
+| `emcfile._pattern_collector` | `emcfile._collector` |
+| `emcfile._hdf5` | `emcfile._h5helper` |
+| `emcfile._formatting` | formatting helpers from `emcfile._misc` |
+| `emcfile._indexing` | `emcfile._utils` and indexing helpers from `emcfile._misc` |
+
 ## Deprecation policy
 
 Superseded callable names use the PEP 702-compatible

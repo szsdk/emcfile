@@ -1,6 +1,6 @@
 import numpy as np
 
-from emcfile._utils import contiguous_ranges
+from emcfile._indexing import contiguous_ranges
 
 
 def test_contiguous_ranges():

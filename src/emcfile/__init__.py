@@ -1,4 +1,3 @@
-from ._collector import EMCPatternCollector, PatternsSOneCollector
 from ._detector import (
     Detector,
     DetectorRenderer,
@@ -16,7 +15,15 @@ from ._detector import (
     project_detector_to_2d,
     resample_detector,
 )
-from ._h5helper import (
+from ._emc_patterns import (
+    SPARSE_PATTERN,
+    EMCPatternArray,
+    EMCPatternSource,
+    PatternsSOne,
+    SparsePattern,
+    write_patterns,
+)
+from ._hdf5 import (
     PATH_TYPE,
     H5Path,
     as_hdf5_path,
@@ -33,15 +40,9 @@ from ._h5helper import (
     write_hdf5_object,
     write_obj_h5,
 )
-from ._pattern_sone import (
-    SPARSE_PATTERN,
-    EMCPatternArray,
-    EMCPatternSource,
-    PatternsSOne,
-    SparsePattern,
-    write_patterns,
-)
-from ._pattern_sone_file import (
+from ._pattern_collector import EMCPatternCollector, PatternsSOneCollector
+from ._pattern_factory import patterns
+from ._pattern_files import (
     EMCBinaryPatternFile,
     EMCPatternCollection,
     FileBackedEMCPatterns,
@@ -54,7 +55,6 @@ from ._pattern_sone_file import (
     file_patterns,
     open_patterns,
 )
-from ._patterns import patterns
 
 __all__ = [
     "EMCPatternArray",

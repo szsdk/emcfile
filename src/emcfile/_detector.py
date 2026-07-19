@@ -15,7 +15,7 @@ import numpy.typing as npt
 from numpy import ma
 from typing_extensions import deprecated
 
-from ._h5helper import PATH_TYPE, H5Path, make_path
+from ._hdf5 import PATH_TYPE, H5Path, make_path
 from ._html_display import html_card
 
 __all__ = [

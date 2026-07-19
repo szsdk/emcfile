@@ -1,4 +1,8 @@
+import importlib
+import sys
+
 import numpy as np
+import pytest
 
 import emcfile as ef
 
@@ -87,3 +91,35 @@ def test_superseded_callables_have_pep_702_deprecation_markers():
     assert all(
         hasattr(callable_, "__deprecated__") for callable_ in deprecated_callables
     )
+
+
+@pytest.mark.parametrize(
+    ("old_name", "new_name"),
+    [
+        ("_collector", "_pattern_collector"),
+        ("_h5helper", "_hdf5"),
+        ("_pattern_sone", "_emc_patterns"),
+        ("_pattern_sone_file", "_pattern_files"),
+        ("_patterns", "_pattern_factory"),
+        ("_utils", "_indexing"),
+    ],
+)
+def test_deprecated_modules_are_exact_aliases(old_name, new_name):
+    old_qualified_name = f"emcfile.{old_name}"
+    sys.modules.pop(old_qualified_name, None)
+
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        old_module = importlib.import_module(old_qualified_name)
+
+    new_module = importlib.import_module(f"emcfile.{new_name}")
+    assert old_module is new_module
+
+
+def test_deprecated_misc_module_preserves_both_utility_groups():
+    sys.modules.pop("emcfile._misc", None)
+
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        old_module = importlib.import_module("emcfile._misc")
+
+    assert old_module.pretty_size(1024) == "1.00 KB"
+    assert old_module.split_range(0, 4, 2) == [(0, 2), (2, 4)]
