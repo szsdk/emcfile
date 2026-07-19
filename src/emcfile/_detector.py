@@ -13,11 +13,18 @@ import h5py
 import numpy as np
 import numpy.typing as npt
 from numpy import ma
+from typing_extensions import deprecated
 
-from ._h5helper import PATH_TYPE, H5Path, make_path
+from ._hdf5 import PATH_TYPE, H5Path, make_path
 from ._html_display import html_card
 
 __all__ = [
+    "detector_renderer",
+    "DetectorRenderer",
+    "detectors_allclose",
+    "fit_ewald_sphere_center",
+    "project_detector_to_2d",
+    "resample_detector",
     "det_render",
     "Detector",
     "DetRender",
@@ -44,13 +51,13 @@ class PixelType(IntEnum):
 _BITMAP = Union[Sequence[int], int]
 
 
-def _bitmap_to_int(bm: _BITMAP) -> np.uint8:
-    if isinstance(bm, int):
-        return np.uint8(bm)
-    ans = 0
-    for i in bm:
-        ans |= 1 << i
-    return np.uint8(ans)
+def _bitmap_to_int(bitmap: _BITMAP) -> np.uint8:
+    if isinstance(bitmap, int):
+        return np.uint8(bitmap)
+    result = 0
+    for bit_position in bitmap:
+        result |= 1 << bit_position
+    return np.uint8(result)
 
 
 class Detector:
@@ -110,8 +117,53 @@ class Detector:
         return self.detd / self.ewald_rad
 
     @property
+    def coordinates(self) -> npt.NDArray[np.float64]:
+        """Detector pixel coordinates.
+
+        ``coor`` remains available as the EMC-compatible field name.
+        """
+        return self.coor
+
+    @coordinates.setter
+    def coordinates(self, value: npt.NDArray[np.float64]) -> None:
+        self.coor = value
+
+    @property
+    def correction_factors(self) -> npt.NDArray[np.float64]:
+        """Per-pixel correction factors (the EMC ``factor`` field)."""
+        return self.factor
+
+    @correction_factors.setter
+    def correction_factors(self, value: npt.NDArray[np.float64]) -> None:
+        self.factor = value
+        self._norm_flag = None
+
+    @property
+    def detector_distance(self) -> float:
+        """Distance between the sample and detector in millimeters."""
+        return self.detd
+
+    @detector_distance.setter
+    def detector_distance(self, value: float) -> None:
+        self.detd = value
+
+    @property
+    def ewald_radius(self) -> float:
+        """Ewald sphere radius in pixels."""
+        return self.ewald_rad
+
+    @ewald_radius.setter
+    def ewald_radius(self, value: float) -> None:
+        self.ewald_rad = value
+
+    @property
     def coor_factor(self) -> npt.NDArray[np.float64]:
         return np.concatenate([self.coor, self.factor[:, None]], axis=1)
+
+    @property
+    def geometry_array(self) -> npt.NDArray[np.float64]:
+        """Coordinates and correction factors in a single array."""
+        return self.coor_factor
 
     @property
     def den_size(self) -> int:
@@ -120,6 +172,10 @@ class Detector:
     def norm(self) -> None:
         self.factor /= self.factor.mean()
         self._norm_flag = None
+
+    def normalize_correction_factors(self) -> None:
+        """Normalize the mean pixel correction factor to one."""
+        self.norm()
 
     def __repr__(self) -> str:
         r = np.linalg.norm(self.coor, axis=1)
@@ -188,6 +244,11 @@ class Detector:
         if self._norm_flag is not None:
             return self._norm_flag
         return bool(np.isclose(self.factor.mean(), 1.0))
+
+    @property
+    def is_normalized(self) -> bool:
+        """Whether the correction factors have a mean close to one."""
+        return self.norm_flag
 
     def write(self, fname: PATH_TYPE, overwrite: bool = False) -> None:
         fn = make_path(fname)
@@ -258,7 +319,7 @@ class Detector:
         coor = self.coor
         if coor.shape[0] >= 128:
             coor = coor[:: coor.shape[0] // 67]
-        vec = get_ewald_vec(coor)
+        vec = fit_ewald_sphere_center(coor)
         if vec[3] == 0 and np.isinf(self.ewald_rad):
             return True
         r = np.linalg.norm(vec[:3]) / vec[3]
@@ -296,6 +357,35 @@ class Detector:
         v = _bitmap_to_int(values)
         return cast(npt.NDArray[np.bool_], (self.mask & f) == v)
 
+    def set_mask_bits(
+        self,
+        flags: _BITMAP,
+        values: _BITMAP,
+        pixel_indices: None
+        | slice
+        | npt.NDArray[np.bool_]
+        | npt.NDArray[np.integer[Any]] = None,
+    ) -> None:
+        """Set selected mask bits for the requested pixels."""
+        self.mask_set(flags, values, pixel_indices)
+
+    def toggle_mask_bits(
+        self,
+        flags: _BITMAP,
+        pixel_indices: None
+        | slice
+        | npt.NDArray[np.bool_]
+        | npt.NDArray[np.integer[Any]] = None,
+    ) -> None:
+        """Toggle selected mask bits for the requested pixels."""
+        self.mask_flip(flags, pixel_indices)
+
+    def select_mask_bits(
+        self, flags: _BITMAP, values: _BITMAP
+    ) -> npt.NDArray[np.bool_]:
+        """Return pixels whose selected mask bits match ``values``."""
+        return self.mask_select(flags, values)
+
 
 HANDLED_FUNCTIONS: dict[Callable[..., Any], Callable[..., Any]] = {}
 
@@ -313,13 +403,22 @@ def implements(np_function: Callable[..., Any]) -> Callable[[FT], FT]:
 
 
 @implements(np.concatenate)
-def concatenate_Detector(dets: Sequence[Detector]) -> Detector:
-    ewald_rad = dets[0].ewald_rad
-    np.testing.assert_array_equal([d.ewald_rad for d in dets], dets[0].ewald_rad)
-    detd = dets[0].detd
-    np.testing.assert_array_equal([d.detd for d in dets], dets[0].detd)
-    data = np.concatenate([np.asarray(d) for d in dets], axis=0)
+def _concatenate_detectors(detectors: Sequence[Detector]) -> Detector:
+    ewald_rad = detectors[0].ewald_rad
+    np.testing.assert_array_equal(
+        [detector.ewald_rad for detector in detectors], detectors[0].ewald_rad
+    )
+    detd = detectors[0].detd
+    np.testing.assert_array_equal(
+        [detector.detd for detector in detectors], detectors[0].detd
+    )
+    data = np.concatenate([np.asarray(detector) for detector in detectors], axis=0)
     return Detector(data["coor"], data["factor"], data["mask"], detd, ewald_rad)
+
+
+@deprecated("Use numpy.concatenate() instead.")
+def concatenate_Detector(dets: Sequence[Detector]) -> Detector:
+    return _concatenate_detectors(dets)
 
 
 def _from_asciidet(fname: Path) -> Detector:
@@ -481,6 +580,11 @@ def detector(
     ewald_rad: Union[float, int, None] = None,
     norm_flag: bool = True,
     check_consistency: bool = True,
+    coordinates: Union[npt.NDArray[T1], tuple[int, int], None] = None,
+    correction_factors: Optional[npt.NDArray[T1]] = None,
+    detector_distance: Union[float, int, None] = None,
+    ewald_radius: Union[float, int, None] = None,
+    normalize: Optional[bool] = None,
 ) -> Detector:
     """
     Factory function for creating and loading `Detector` objects.
@@ -559,6 +663,25 @@ def detector(
     110.0
     """
 
+    if coordinates is not None:
+        if coor is not None:
+            raise TypeError("Use either 'coordinates' or 'coor', not both")
+        coor = coordinates
+    if correction_factors is not None:
+        if factor is not None:
+            raise TypeError("Use either 'correction_factors' or 'factor', not both")
+        factor = correction_factors
+    if detector_distance is not None:
+        if detd is not None:
+            raise TypeError("Use either 'detector_distance' or 'detd', not both")
+        detd = detector_distance
+    if ewald_radius is not None:
+        if ewald_rad is not None:
+            raise TypeError("Use either 'ewald_radius' or 'ewald_rad', not both")
+        ewald_rad = ewald_radius
+    if normalize is not None:
+        norm_flag = normalize
+
     det = None
     if src is None:
         if (
@@ -603,7 +726,7 @@ def detector(
     return det
 
 
-def get_2ddet(
+def project_detector_to_2d(
     det: Detector,
     /,
     *,
@@ -644,8 +767,19 @@ def get_2ddet(
     return ans
 
 
-def det_isclose(
-    det1: Detector, det2: Detector, /, *, rtol: float = 1e-6
+@deprecated("Use project_detector_to_2d() instead.")
+def get_2ddet(
+    det: Detector,
+    /,
+    *,
+    inplace: bool = False,
+    pixel_space: Literal["real", "reciprocal"] = "reciprocal",
+) -> Detector:
+    return project_detector_to_2d(det, inplace=inplace, pixel_space=pixel_space)
+
+
+def detectors_allclose(
+    first: Detector, second: Detector, /, *, rtol: float = 1e-6
 ) -> bool:  # pragma: no cover
     """
     Check whether two detectors are close to each other.
@@ -666,26 +800,35 @@ def det_isclose(
     bool:
         Result
     """
-    if not np.allclose(det1.detd, det2.detd, rtol=rtol):
+    if not np.allclose(first.detd, second.detd, rtol=rtol):
         return False
-    if not np.allclose(det1.ewald_rad, det2.ewald_rad, rtol=rtol):
+    if not np.allclose(first.ewald_rad, second.ewald_rad, rtol=rtol):
         return False
-    if not np.all(det1.mask == det2.mask):
+    if not np.all(first.mask == second.mask):
         return False
-    if not np.allclose(det1.coor, det2.coor, rtol=rtol):
+    if not np.allclose(first.coor, second.coor, rtol=rtol):
         return False
-    if not np.allclose(det1.factor, det2.factor, rtol=rtol):
+    if not np.allclose(first.factor, second.factor, rtol=rtol):
         return False
     return True
 
 
-def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
+@deprecated("Use detectors_allclose() instead.")
+def det_isclose(
+    det1: Detector, det2: Detector, /, *, rtol: float = 1e-6
+) -> bool:  # pragma: no cover
+    return detectors_allclose(det1, det2, rtol=rtol)
+
+
+def fit_ewald_sphere_center(
+    coordinates: npt.NDArray[Any],
+) -> npt.NDArray[np.float64]:
     """
-    Calcualte the center of a sphere with a point cloud distributed on it.
+    Calculate the center of a sphere fitted to a point cloud.
 
     Parameters
     ----------
-    coor : np.ndarray
+    coordinates : np.ndarray
         The point cloud whose shape is (number of points, 3)
 
     Returns
@@ -699,10 +842,10 @@ def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
     # 2d detector test
     from scipy.optimize import minimize
 
-    for ca, cb, cc in itertools.combinations(range(coor.shape[0]), 3):
-        db = coor[cb] - coor[ca]
+    for ca, cb, cc in itertools.combinations(range(coordinates.shape[0]), 3):
+        db = coordinates[cb] - coordinates[ca]
         db /= np.linalg.norm(db)
-        dc = coor[cc] - coor[ca]
+        dc = coordinates[cc] - coordinates[ca]
         dc /= np.linalg.norm(dc)
         n0 = np.cross(db, dc)
         if np.linalg.norm(n0) > 1e-1:
@@ -712,7 +855,7 @@ def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
     # if np.linalg.norm(n0) < 1e-1:
     #     raise ValueError("The input coor is degenerated to a line.")
 
-    coor_shift = coor - coor[ca]
+    coor_shift = coordinates - coordinates[ca]
     with np.errstate(divide="ignore", invalid="ignore"):
         coor_shift /= np.linalg.norm(coor_shift, axis=1, keepdims=True)
     coor_shift[ca] = 0
@@ -729,16 +872,25 @@ def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
         np.array([-0.0, 0.0, -1.0]),
         method="Nelder-Mead",
         options={"xatol": 1e-8, "disp": False},
-        args=(coor if len(coor) < 32 else coor[:: len(coor) // 32],),
+        args=(
+            coordinates
+            if len(coordinates) < 32
+            else coordinates[:: len(coordinates) // 32],
+        ),
     )
     res = minimize(
         _f,
         res.x,
         method="Nelder-Mead",
         options={"xatol": 1e-8, "disp": False},
-        args=(coor,),
+        args=(coordinates,),
     )
     return np.concatenate([res.x, [1.0]])
+
+
+@deprecated("Use fit_ewald_sphere_center() instead.")
+def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
+    return fit_ewald_sphere_center(coor)
 
 
 def xyz_to_cxy(
@@ -767,6 +919,9 @@ def cxy_to_xyz(
 
 class DetRender:
     """
+
+    `DetectorRenderer` is the preferred descriptive public name. `DetRender`
+    remains an exact alias for compatibility.
 
     Attributes
     ----------
@@ -799,6 +954,21 @@ class DetRender:
         )
         self._count /= self._count.mean()
 
+    @property
+    def detector(self) -> Detector:
+        """Detector geometry used by this renderer."""
+        return self._det
+
+    @property
+    def projected_coordinates(self) -> npt.NDArray[np.float64]:
+        """Detector coordinates projected onto the rendering plane."""
+        return self.cxy
+
+    @property
+    def pixel_coordinates(self) -> npt.NDArray[np.int32]:
+        """Integer frame coordinates for detector pixels."""
+        return self.xy
+
     def frame_pixels(self) -> list[npt.NDArray[np.float64]]:
         et = self.frame_extent()
         return cast(
@@ -810,12 +980,15 @@ class DetRender:
         )
 
     def _prepare_renderer(self) -> None:
-        W, H = self.frame_shape
-        self._render_W = W
-        self._render_H = H
+        width, height = self.frame_shape
+        self._render_width = width
+        self._render_height = height
+        # Preserve private compatibility for downstream render integrations.
+        self._render_W = width
+        self._render_H = height
 
-        flat = self.xy[:, 1] * W + self.xy[:, 0]
-        self._render_flat = flat.astype(np.int64, copy=False)
+        flat_indices = self.xy[:, 1] * width + self.xy[:, 0]
+        self._render_flat = flat_indices.astype(np.int64, copy=False)
 
         self._count_flat = np.asarray(self._count.filled(0), dtype=np.float64).ravel()
         self._nonzero_flat = self._count_flat != 0
@@ -842,27 +1015,27 @@ class DetRender:
                 f"the detector requires {self._det.num_pix}"
             )
 
-        W, H = self._render_W, self._render_H
-        n_frame = W * H
+        width, height = self._render_width, self._render_height
+        num_frame_pixels = width * height
         single_image = raw_img.ndim == 1
         images = raw_img[None, :] if single_image else raw_img
 
-        acc = np.empty((images.shape[0], n_frame), dtype=np.float64)
+        accumulated = np.empty((images.shape[0], num_frame_pixels), dtype=np.float64)
         for i, image in enumerate(images):
-            acc[i] = np.bincount(
+            accumulated[i] = np.bincount(
                 self._render_flat,
                 weights=image,
-                minlength=n_frame,
+                minlength=num_frame_pixels,
             )
 
         np.divide(
-            acc,
+            accumulated,
             self._count_flat,
-            out=acc,
+            out=accumulated,
             where=self._nonzero_flat,
         )
-        acc[:, ~self._nonzero_flat] = np.nan
-        rendered = acc.reshape(images.shape[0], H, W)
+        accumulated[:, ~self._nonzero_flat] = np.nan
+        rendered = accumulated.reshape(images.shape[0], height, width)
 
         if single_image:
             return ma.masked_array(rendered[0], mask=self._mask)
@@ -906,7 +1079,16 @@ class DetRender:
         )
 
 
-def det_render(det: Detector) -> DetRender:
+DetectorRenderer = DetRender
+
+
+def detector_renderer(det: Detector) -> DetectorRenderer:
+    """Create a renderer for ``det``."""
+    return DetectorRenderer(det)
+
+
+@deprecated("Use DetectorRenderer or detector_renderer() instead.")
+def det_render(det: Detector) -> DetectorRenderer:
     """
     The factory function of `DetRender`
 
@@ -920,7 +1102,7 @@ def det_render(det: Detector) -> DetRender:
     DetRender
 
     """
-    return DetRender(det)
+    return detector_renderer(det)
 
 
 def grid_position(shape: tuple[int, ...]) -> list[npt.NDArray[np.float64]]:
@@ -941,7 +1123,7 @@ def grid_position(shape: tuple[int, ...]) -> list[npt.NDArray[np.float64]]:
     )
 
 
-def get_3ddet_from_shape(
+def resample_detector(
     shape: tuple[int, int], det: Detector, apply_mask: bool = True
 ) -> Detector:
     """
@@ -997,3 +1179,10 @@ def get_3ddet_from_shape(
         mask[r < det_r.min()] = PixelType.BAD
         mask[r > det_r.max()] = PixelType.BAD
     return Detector(coor, factor, mask, detd, ewald_rad)
+
+
+@deprecated("Use resample_detector() instead.")
+def get_3ddet_from_shape(
+    shape: tuple[int, int], det: Detector, apply_mask: bool = True
+) -> Detector:
+    return resample_detector(shape, det, apply_mask)

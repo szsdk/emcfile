@@ -2,6 +2,10 @@
 
 `emcfile` is a Python package providing essential utilities for handling the `emc` photon format and its associated detector files. It offers a streamlined interface for reading, writing, and manipulating diffraction patterns and detector geometry, with a focus on performance and ease of use.
 
+The preferred in-memory type name is `EMCPatternArray`. Existing names and
+serialized EMC/HDF5 fields remain compatible; see
+[Naming modernization](NAMING_CHANGES.md) for the migration table.
+
 ## Key Features
 
 - **Pattern Manipulation**: Create, access, and modify diffraction patterns with a `numpy`-like API.
@@ -33,10 +37,13 @@ import numpy as np
 import emcfile as ef
 
 # Create random patterns
-num_data = 5
-num_pix = 10
-patterns_data = np.random.rand(num_data, num_pix) ** 3 * 5
+num_patterns = 5
+num_pixels = 10
+patterns_data = np.random.rand(num_patterns, num_pixels) ** 3 * 5
 patterns = ef.patterns(patterns_data.astype("int"))
+
+assert isinstance(patterns, ef.EMCPatternArray)
+print(patterns.num_patterns, patterns.num_pixels)
 
 # Write patterns to an .emc file
 patterns.write("test_pattern.emc", overwrite=True)

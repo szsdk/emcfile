@@ -308,7 +308,7 @@ def _(coor2d, ewald_rad, np, num_pix_1):
     coor = np.zeros((num_pix_1, 3))
     coor[:, :2] = coor2d
     r2d = np.linalg.norm(coor2d, axis=1)
-    coor[:, 2] = np.sqrt(ewald_rad ** 2 - r2d ** 2) - ewald_rad
+    coor[:, 2] = np.sqrt(ewald_rad**2 - r2d**2) - ewald_rad
     return coor, r2d
 
 
@@ -460,14 +460,14 @@ def _(ef):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ### `DetRender`: render with a detector
+    ### `DetectorRenderer`: render with a detector
     """)
     return
 
 
 @app.cell
 def _(det, ef):
-    detr = ef.det_render(det)
+    detr = ef.detector_renderer(det)
     detr
     return (detr,)
 
