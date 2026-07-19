@@ -4,6 +4,7 @@ from typing import Optional, Union
 import numpy as np
 import numpy.typing as npt
 from typing_extensions import TypeAlias
+from typing_extensions import deprecated
 
 from ._h5helper import PATH_TYPE
 from ._html_display import html_card
@@ -18,6 +19,9 @@ class PatternsSOneCollector:
     """
     Collects `np.ndarray` patterns and efficiently converts them into a
     `PatternsSOne` object.
+
+    `EMCPatternCollector` is the preferred descriptive public name. The
+    historical class name remains an exact alias for compatibility.
 
     This class is designed to incrementally build a `PatternsSOne` pattern set
     from a series of NumPy arrays. It uses a buffer to accumulate patterns
@@ -51,11 +55,26 @@ class PatternsSOneCollector:
     100
     """
 
-    def __init__(self, max_buffer_size: int = 128):
+    def __init__(self, max_buffer_size: int = 128, *, batch_size: Optional[int] = None):
+        if batch_size is not None:
+            if max_buffer_size != 128:
+                raise TypeError(
+                    "Use either 'batch_size' or 'max_buffer_size', not both"
+                )
+            max_buffer_size = batch_size
         self.max_buffer_size = max_buffer_size
         self._patterns: list[PatternsSOne] = []
         self._buffer: list[NP_IMG] = []
         self._num_pix: Optional[int] = None
+
+    @property
+    def batch_size(self) -> int:
+        """Maximum number of patterns converted in one batch."""
+        return self.max_buffer_size
+
+    @batch_size.setter
+    def batch_size(self, value: int) -> None:
+        self.max_buffer_size = value
 
     @property
     def num_pix(self) -> Optional[int]:
@@ -72,6 +91,11 @@ class PatternsSOneCollector:
             elif len(self._buffer) > 0:
                 self._num_pix = self._buffer[0].size
         return self._num_pix
+
+    @property
+    def num_pixels(self) -> Optional[int]:
+        """Number of pixels in each collected pattern."""
+        return self.num_pix
 
     def append(self, img: NP_IMG) -> None:
         """
@@ -95,7 +119,7 @@ class PatternsSOneCollector:
         self._validate_num_pix(img.size)
         self._buffer.append(img.ravel())
         if len(self._buffer) >= self.max_buffer_size:
-            self._clear_buffer()
+            self._flush_buffer()
 
     def _validate_num_pix(self, num_pix: int) -> None:
         if self.num_pix is not None and self.num_pix != num_pix:
@@ -104,7 +128,7 @@ class PatternsSOneCollector:
                 f"It does not match the number of pixels {self.num_pix}."
             )
 
-    def _clear_buffer(self) -> None:
+    def _flush_buffer(self) -> None:
         if len(self._buffer) <= 0:
             return
         self._patterns.append(patterns(np.array(self._buffer)))
@@ -131,7 +155,7 @@ class PatternsSOneCollector:
         """
         if isinstance(imgs, PatternsSOne):
             self._validate_num_pix(imgs.num_pix)
-            self._clear_buffer()
+            self._flush_buffer()
             self._patterns.append(imgs)
             return
 
@@ -150,7 +174,7 @@ class PatternsSOneCollector:
         for img in images:
             self.append(img)
 
-    def patterns(self) -> PatternsSOneList:
+    def to_patterns(self) -> PatternsSOneList:
         """
         Finalizes the collection process and returns the collected patterns.
 
@@ -167,12 +191,16 @@ class PatternsSOneCollector:
         ValueError
             If no patterns have been added to the collector.
         """
-        self._clear_buffer()
+        self._flush_buffer()
         if len(self._patterns) == 0:
             raise ValueError("No pattern is added.")
         return PatternsSOneList(self._patterns)
 
-    def pattern_list(self) -> list[PatternsSOne]:
+    @deprecated("Use to_patterns() instead.")
+    def patterns(self) -> PatternsSOneList:
+        return self.to_patterns()
+
+    def pattern_batches(self) -> list[PatternsSOne]:
         """
         Returns a list of `PatternsSOne` objects.
 
@@ -186,8 +214,12 @@ class PatternsSOneCollector:
         list[PatternsSOne]
             A list of `PatternsSOne` objects.
         """
-        self._clear_buffer()
+        self._flush_buffer()
         return self._patterns
+
+    @deprecated("Use pattern_batches() instead.")
+    def pattern_list(self) -> list[PatternsSOne]:
+        return self.pattern_batches()
 
     def _repr_html_(self) -> str:
         buffered_patterns = len(self._buffer)
@@ -222,6 +254,7 @@ class PatternsSOneCollector:
         h5version: str = "2",
         overwrite: bool = False,
         buffer_size: int = 1073741824,  # 2 ** 30 bytes = 1 GB
+        hdf5_version: Optional[str] = None,
     ) -> None:
         """
         Writes the collected patterns to a file.
@@ -242,11 +275,15 @@ class PatternsSOneCollector:
             The buffer size in bytes for writing the patterns to the file.
             Defaults to 1 GB.
         """
-        self._clear_buffer()
+        self._flush_buffer()
         write_patterns(
             self._patterns,
             path,
             h5version=h5version,
             overwrite=overwrite,
             buffer_size=buffer_size,
+            hdf5_version=hdf5_version,
         )
+
+
+EMCPatternCollector = PatternsSOneCollector

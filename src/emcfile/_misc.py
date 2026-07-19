@@ -1,9 +1,10 @@
 from typing import List, Tuple
+from typing_extensions import deprecated
 
 _units = ["B", "KB", "MB", "GB", "TB", "PB"]
 
 
-def pretty_size(s: float) -> str:
+def pretty_size(num_bytes: float) -> str:
     """
     Converts a size in bytes to a human-readable string with an appropriate unit.
 
@@ -12,7 +13,7 @@ def pretty_size(s: float) -> str:
 
     Parameters
     ----------
-    s
+    num_bytes
         The size in bytes.
 
     Returns
@@ -33,17 +34,17 @@ def pretty_size(s: float) -> str:
     >>> pretty_size(500)
     '500.0 B'
     """
-    unit = 0
-    while s >= 1024:
-        s /= 1024
-        unit += 1
-    if unit == 0:
-        return f"{s} B"
+    unit_index = 0
+    while num_bytes >= 1024:
+        num_bytes /= 1024
+        unit_index += 1
+    if unit_index == 0:
+        return f"{num_bytes} B"
     else:
-        return f"{s:.2f} {_units[unit]}"
+        return f"{num_bytes:.2f} {_units[unit_index]}"
 
 
-def divide_range(s: int, e: int, n: int) -> List[Tuple[int, int]]:
+def split_range(start: int, stop: int, num_chunks: int) -> List[Tuple[int, int]]:
     """
     Divides a numerical range into a specified number of nearly equal sub-ranges.
 
@@ -52,11 +53,11 @@ def divide_range(s: int, e: int, n: int) -> List[Tuple[int, int]]:
 
     Parameters
     ----------
-    s
+    start
         The starting integer of the range.
-    e
+    stop
         The ending integer of the range.
-    n
+    num_chunks
         The number of sub-ranges to divide the main range into.
 
     Returns
@@ -67,29 +68,34 @@ def divide_range(s: int, e: int, n: int) -> List[Tuple[int, int]]:
     Raises
     ------
     ValueError
-        If `n` is not a positive integer.
+        If `num_chunks` is not a positive integer.
 
     Examples
     --------
-    >>> from emcfile._misc import divide_range
+    >>> from emcfile._misc import split_range
 
-    >>> divide_range(0, 10, 3)
+    >>> split_range(0, 10, 3)
     [(0, 4), (4, 7), (7, 10)]
 
-    >>> divide_range(0, 10, 5)
+    >>> split_range(0, 10, 5)
     [(0, 2), (2, 4), (4, 6), (6, 8), (8, 10)]
     """
-    if n <= 0:
-        raise ValueError(f"n(={n}) should be positive")
-    base = (e - s) // n
-    size = (e - s) % n
-    ans = []
-    for _ in range(size):
-        ans.append((s, s + base + 1))
-        s += base + 1
+    if num_chunks <= 0:
+        raise ValueError(f"num_chunks(={num_chunks}) should be positive")
+    base = (stop - start) // num_chunks
+    remainder = (stop - start) % num_chunks
+    ranges = []
+    for _ in range(remainder):
+        ranges.append((start, start + base + 1))
+        start += base + 1
     if base == 0:
-        return ans
-    for _ in range(size, n):
-        ans.append((s, s + base))
-        s += base
-    return ans
+        return ranges
+    for _ in range(remainder, num_chunks):
+        ranges.append((start, start + base))
+        start += base
+    return ranges
+
+
+@deprecated("Use split_range() instead.")
+def divide_range(s: int, e: int, n: int) -> List[Tuple[int, int]]:
+    return split_range(s, e, n)

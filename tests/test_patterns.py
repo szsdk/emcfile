@@ -32,8 +32,10 @@ def big_data(big_dense):
     return ef.patterns(big_dense)
 
 
-def test_get_mean_count(big_data, big_dense):
-    np.testing.assert_almost_equal(big_data.get_mean_count(), big_dense.sum(1).mean())
+def test_mean_photon_count(big_data, big_dense):
+    np.testing.assert_almost_equal(
+        big_data.mean_photon_count(), big_dense.sum(1).mean()
+    )
 
 
 def test_todense(big_data, big_dense):
@@ -81,7 +83,7 @@ def test_from_sparse_patterns(big_data):
 
 
 def test_operation(big_data):
-    big_data.get_mean_count()
+    big_data.mean_photon_count()
     big_data.nbytes
     big_data.sparsity()
 
@@ -206,7 +208,7 @@ def test_empty():
     empty_data = ef.patterns(num_pix)
     assert empty_data.num_pix == num_pix
     assert empty_data.num_data == 0
-    assert empty_data.get_mean_count() == 0.0
+    assert empty_data.mean_photon_count() == 0.0
     assert empty_data.sparsity() == 0.0
 
 
@@ -294,7 +296,7 @@ def test_pattern_mul(big_data):
 
 
 @pytest.mark.parametrize("file", ["data_emc", "data_h5", "data_h5_v1"])
-def test_PatternsSOneFile_shape(file, request):
+def test_pattern_file_shape(file, request):
     p = Path(request.getfixturevalue(file))
     d = ef.file_patterns(p)
     assert len(d) == d.num_data
@@ -317,7 +319,7 @@ def test_PatternsSOneFile_shape(file, request):
 )
 @pytest.mark.parametrize("axis", [None, 0, 1])
 @pytest.mark.parametrize("keepdims", [True, False])
-def test_PatternsSOneFile_sum(file, axis, keepdims, chunk_size, request):
+def test_pattern_file_sum(file, axis, keepdims, chunk_size, request):
     p = Path(request.getfixturevalue(file))
     d1 = ef.patterns(p)
     d2 = ef.file_patterns(p)
@@ -329,7 +331,7 @@ def test_PatternsSOneFile_sum(file, axis, keepdims, chunk_size, request):
 
 # @pytest.mark.parametrize("file", ["data_emc", "data_h5"])
 @pytest.mark.parametrize("file", ["data_emc"])
-def test_PatternsSOneFile_attrs(file, request):
+def test_pattern_file_attributes(file, request):
     p = Path(request.getfixturevalue(file))
     d1 = ef.patterns(p)
     d2 = ef.file_patterns(p)
@@ -338,7 +340,7 @@ def test_PatternsSOneFile_attrs(file, request):
 
 
 @pytest.mark.parametrize("file", ["data_emc", "data_h5", "data_h5_v1"])
-def test_PatternsSOneFile_getitem(file, request):
+def test_pattern_file_getitem(file, request):
     p = Path(request.getfixturevalue(file))
     d1 = ef.patterns(p)
     d2 = ef.file_patterns(p)
@@ -354,7 +356,7 @@ def test_PatternsSOneFile_getitem(file, request):
 
 
 @pytest.mark.parametrize("file", ["data_emc", "data_h5", "data_h5_v1"])
-def test_PatternsSOneFile_spase_pattern(file, request):
+def test_pattern_file_sparse_pattern(file, request):
     p = Path(request.getfixturevalue(file))
     d1 = ef.patterns(p, end=10)
     d2 = ef.file_patterns(p)
@@ -374,9 +376,9 @@ def test_index(big_data, big_dense):
     idx = np.arange(big_data.shape[1])
     idx[0], idx[-1] = idx[-1], idx[0]
     p = big_data[:, idx]
-    assert p.check_indices_ordered() is False
-    p.ensure_indices_ordered()
-    assert p.check_indices_ordered() is True
+    assert p.has_sorted_indices() is False
+    p.sort_indices()
+    assert p.has_sorted_indices() is True
     assert np.all(np.asarray(p.todense()) == big_dense[:, idx])
 
 
@@ -417,7 +419,7 @@ def test_full(shape):
 def test_pattern_list(data_emc, data_h5, tmp_path_factory):
     p0 = ef.file_patterns(data_emc)
     p1 = ef.file_patterns(data_h5)
-    plst = ef.PatternsSOneList([p0, p1[:]])
+    plst = ef.EMCPatternCollection([p0, p1[:]])
     np.testing.assert_equal(plst[0], p0[0])
     np.testing.assert_equal(plst[len(p0) + 2], p1[2])
     assert len(plst) == len(p0) + len(p1)
@@ -435,14 +437,14 @@ def test_pattern_list(data_emc, data_h5, tmp_path_factory):
     )
     plst.init_idx()
     np.testing.assert_equal(plst.ones, np.concatenate([p0.ones, p1.ones]))
-    plst2 = ef.PatternsSOneList([plst, p0])
+    plst2 = ef.EMCPatternCollection([plst, p0])
     assert plst2[: len(plst)][: len(p0)] == p0[:]
     html = plst._repr_html_()
     assert isinstance(html, str)
 
 
 def test_pattern_list_batches_random_indices_by_source():
-    class CountingPatterns(ef.PatternsSOne):
+    class CountingPatterns(ef.EMCPatternArray):
         def __init__(self, source):
             super().__init__(
                 source.num_pix,
@@ -462,7 +464,7 @@ def test_pattern_list_batches_random_indices_by_source():
     dense1 = np.arange(12, 24).reshape(3, 4)
     source0 = CountingPatterns(ef.patterns(dense0))
     source1 = CountingPatterns(ef.patterns(dense1))
-    pattern_list = ef.PatternsSOneList([source0, source1])
+    pattern_list = ef.EMCPatternCollection([source0, source1])
     indices = np.array([0, 3, 1, 4, 2, 5, 0])
 
     np.testing.assert_equal(
@@ -476,15 +478,15 @@ def test_pattern_list_batches_random_indices_by_source():
 
 
 @pytest.mark.parametrize("file", ["plst.emc", "plst.h5"])
-def test_PatternsSOneList_write(data_emc, data_h5, file, tmp_path_factory):
+def test_pattern_collection_write(data_emc, data_h5, file, tmp_path_factory):
     fn = tmp_path_factory.mktemp("data") / file
     p0 = data_emc
     p1 = ef.file_patterns(data_h5)
     p2 = p1[:]
-    plst = ef.PatternsSOneList([p0, p1, p2])
+    plst = ef.EMCPatternCollection([p0, p1, p2])
     plst.write(fn, overwrite=True)
     assert ef.patterns(fn) == np.concatenate([ef.patterns(p0), p1[:], p2])
 
 
-def test_aaa(small_data):
+def test_pattern_repr(small_data):
     print(small_data)

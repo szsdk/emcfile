@@ -16,7 +16,7 @@ def test_collector(tmp_path):
         cl.append(img)
         imgs.append(img)
     ref = ef.patterns(np.array(imgs))
-    assert ref == cl.patterns()[:]
+    assert ref == cl.to_patterns()[:]
 
     # test write
     cl.write(tmp_path / "test.emc")
@@ -30,7 +30,7 @@ def test_collector(tmp_path):
     cl.extend(tuple(imgs))
     cl.extend(np.array(imgs))
     cl.extend(ef.patterns(np.array(imgs)))
-    assert np.concatenate(cl.pattern_list()) == ef.patterns(np.array(imgs * 5))
+    assert np.concatenate(cl.pattern_batches()) == ef.patterns(np.array(imgs * 5))
 
     with pytest.raises(ValueError):
         cl.extend([np.random.randint(32, size=35)])

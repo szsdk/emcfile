@@ -24,9 +24,20 @@ from ._pattern_sone import (
     _count_offsets,
     write_patterns,
 )
-from ._utils import concat_continous
+from ._utils import contiguous_ranges
 
-__all__ = ["PatternsSOneEMC", "PatternsSOneH5", "file_patterns", "PatternsSOneList"]
+__all__ = [
+    "EMCBinaryPatternFile",
+    "EMCPatternCollection",
+    "FileBackedEMCPatterns",
+    "HDF5PatternFile",
+    "LegacyHDF5PatternFile",
+    "PatternsSOneEMC",
+    "PatternsSOneH5",
+    "PatternsSOneList",
+    "file_patterns",
+    "open_patterns",
+]
 _log = logging.getLogger(__name__)
 
 I4 = np.dtype("i4").itemsize
@@ -35,55 +46,64 @@ INDEX_ARRAY = npt.NDArray[np.integer[Any]]
 
 
 def read_indexed_array(
-    fin: Union[BufferedReader, BytesIO],
-    idx_con: INDEX_ARRAY,
-    arr_idx: INDEX_ARRAY,
-    e0: int,
+    file_obj: Union[BufferedReader, BytesIO],
+    index_ranges: INDEX_ARRAY,
+    offsets: INDEX_ARRAY,
+    current_offset: int,
 ) -> tuple[npt.NDArray[np.int32], int]:
-    if len(idx_con) == 1:
-        s, e = idx_con[0]
-        e = arr_idx[e]
-        s = arr_idx[s]
-        fin.seek(I4 * (int(s) - e0), os.SEEK_CUR)
+    if len(index_ranges) == 1:
+        start, stop = index_ranges[0]
+        stop = offsets[stop]
+        start = offsets[start]
+        file_obj.seek(I4 * (int(start) - current_offset), os.SEEK_CUR)
         return np.frombuffer(
-            fin.read(int(e - s) * I4), count=int(e - s), dtype=np.int32
-        ), int(e) - int(arr_idx[-1])
+            file_obj.read(int(stop - start) * I4),
+            count=int(stop - start),
+            dtype=np.int32,
+        ), int(stop) - int(offsets[-1])
 
-    ans = []
-    for s, e in idx_con:
-        e = arr_idx[e]
-        s = arr_idx[s]
-        fin.seek(I4 * (int(s) - e0), os.SEEK_CUR)
-        ans.append(np.frombuffer(fin.read(int(e - s) * I4), dtype=np.int32))
-        e0 = int(e)
+    arrays = []
+    for start, stop in index_ranges:
+        stop = offsets[stop]
+        start = offsets[start]
+        file_obj.seek(I4 * (int(start) - current_offset), os.SEEK_CUR)
+        arrays.append(
+            np.frombuffer(file_obj.read(int(stop - start) * I4), dtype=np.int32)
+        )
+        current_offset = int(stop)
     return (
-        np.concatenate(ans) if len(ans) > 0 else np.array([], np.int32),
-        int(e0) - int(arr_idx[-1]),
+        np.concatenate(arrays) if arrays else np.array([], np.int32),
+        int(current_offset) - int(offsets[-1]),
     )
 
 
 def read_patterns(
-    fin: Union[BufferedReader, BytesIO],
-    idx_con: INDEX_ARRAY,
+    file_obj: Union[BufferedReader, BytesIO],
+    index_ranges: INDEX_ARRAY,
     ones_idx: INDEX_ARRAY,
     multi_idx: INDEX_ARRAY,
 ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
     seek_start = PatternsSOneEMC.HEADER_BYTES + I4 * (len(ones_idx) - 1) * 2
-    fin.seek(seek_start)
-    place_ones, e0 = read_indexed_array(fin, idx_con, ones_idx, 0)
-    place_multi, e0 = read_indexed_array(fin, idx_con, multi_idx, e0)
-    count_multi, e0 = read_indexed_array(fin, idx_con, multi_idx, e0)
-    fin.seek(I4 * (-e0), os.SEEK_CUR)
-    if fin.read(1):
+    file_obj.seek(seek_start)
+    place_ones, current_offset = read_indexed_array(file_obj, index_ranges, ones_idx, 0)
+    place_multi, current_offset = read_indexed_array(
+        file_obj, index_ranges, multi_idx, current_offset
+    )
+    count_multi, current_offset = read_indexed_array(
+        file_obj, index_ranges, multi_idx, current_offset
+    )
+    file_obj.seek(I4 * (-current_offset), os.SEEK_CUR)
+    if file_obj.read(1):
         total = seek_start + place_ones.nbytes + place_multi.nbytes + count_multi.nbytes
         _log.error(
-            "START: %d, place_ones: %d, place_multi: %d, count_multi: %d, total=%d; e0: %d",
+            "START: %d, place_ones: %d, place_multi: %d, "
+            "count_multi: %d, total=%d; offset: %d",
             seek_start,
             place_ones.nbytes,
             place_multi.nbytes,
             count_multi.nbytes,
             total,
-            e0,
+            current_offset,
         )
         raise ValueError("Error when parsing")
     return place_ones.view("u4"), place_multi.view("u4"), count_multi
@@ -94,6 +114,16 @@ class PatternsSOneFile:
     num_data: int
     num_pix: int
     _init_idx: bool
+
+    @property
+    def num_patterns(self) -> int:
+        """Number of patterns exposed by this source."""
+        return self.num_data
+
+    @property
+    def num_pixels(self) -> int:
+        """Number of pixels in each pattern."""
+        return self.num_pix
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -136,7 +166,7 @@ class PatternsSOneFile:
         return float(self.nbytes / (4 * self.num_data * self.num_pix))
 
     def _read_patterns(
-        self, idx_con: INDEX_ARRAY
+        self, index_ranges: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         raise NotImplementedError()
 
@@ -150,6 +180,19 @@ class PatternsSOneFile:
         self.ones_idx = _count_offsets(self._ones)
         self.multi_idx = _count_offsets(self._multi)
         self._init_idx = True
+
+    def _ensure_offsets_loaded(self) -> None:
+        self.init_idx()
+
+    @property
+    def ones_offsets(self) -> npt.NDArray[np.uint64]:
+        self._ensure_offsets_loaded()
+        return self.ones_idx
+
+    @property
+    def multi_offsets(self) -> npt.NDArray[np.uint64]:
+        self._ensure_offsets_loaded()
+        return self.multi_idx
 
     def __repr__(self) -> str:
         return f"""PatternFile(1-sparse) <{hex(id(self))}>
@@ -195,22 +238,22 @@ class PatternsSOneFile:
             case (ax0, ax1):
                 return self[ax0][:, ax1]
             case int() | np.integer():
-                idx_con = np.array([[index, index + 1]])
+                index_ranges = np.array([[index, index + 1]])
             case np.ndarray() if np.issubdtype(index.dtype, bool):
-                idx_con = concat_continous(np.where(index)[0])
+                index_ranges = contiguous_ranges(np.where(index)[0])
             case np.ndarray():
-                idx_con = concat_continous(index)
+                index_ranges = contiguous_ranges(index)
             case slice():
                 start = 0 if index.start is None else index.start
                 stop = self.num_data if index.stop is None else index.stop
                 if index.step is None or index.step == 1:
-                    idx_con = np.array([(start, stop)])
+                    index_ranges = np.array([(start, stop)])
                 else:
-                    idx_con = np.array(
+                    index_ranges = np.array(
                         [(i, i + 1) for i in range(start, stop, index.step)]
                     )
 
-        place_ones, place_multi, count_multi = self._read_patterns(idx_con)
+        place_ones, place_multi, count_multi = self._read_patterns(index_ranges)
         match index:
             case int() | np.integer():
                 ans = np.zeros(self.num_pix, np.int32)
@@ -303,11 +346,11 @@ class PatternsSOneEMC(PatternsSOneFile):
             )
 
     def _read_patterns(
-        self, idx_con: INDEX_ARRAY
+        self, index_ranges: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
         with self._fn.open("rb") as fin:
-            return read_patterns(fin, idx_con, self.ones_idx, self.multi_idx)
+            return read_patterns(fin, index_ranges, self.ones_idx, self.multi_idx)
 
     def open(self) -> PatternsSOneEMCReadBuffer:
         return PatternsSOneEMCReadBuffer(self._fn)
@@ -378,11 +421,11 @@ class _PatternsSOneBytes(PatternsSOneFile):
         )
 
     def _read_patterns(
-        self, idx_con: INDEX_ARRAY
+        self, index_ranges: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
         self._fn.seek(0)
-        return read_patterns(self._fn, idx_con, self.ones_idx, self.multi_idx)
+        return read_patterns(self._fn, index_ranges, self.ones_idx, self.multi_idx)
 
 
 class PatternsSOneEMCReadBuffer(PatternsSOneEMC):
@@ -408,31 +451,33 @@ class PatternsSOneEMCReadBuffer(PatternsSOneEMC):
         )
 
     def _read_patterns(
-        self, idx_con: INDEX_ARRAY
+        self, index_ranges: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
-        return read_patterns(self._file_handle, idx_con, self.ones_idx, self.multi_idx)
+        return read_patterns(
+            self._file_handle, index_ranges, self.ones_idx, self.multi_idx
+        )
 
 
 def read_indexed_array_h5(
-    fin: h5py.Dataset,
-    idx_con: INDEX_ARRAY,
-    arr_idx: INDEX_ARRAY,
+    dataset: h5py.Dataset,
+    index_ranges: INDEX_ARRAY,
+    offsets: INDEX_ARRAY,
 ) -> npt.NDArray[np.int32]:
-    if len(idx_con) == 1:
-        s, e = idx_con[0]
-        e = arr_idx[e]
-        s = arr_idx[s]
-        return cast(npt.NDArray[np.int32], fin[s:e])
+    if len(index_ranges) == 1:
+        start, stop = index_ranges[0]
+        stop = offsets[stop]
+        start = offsets[start]
+        return cast(npt.NDArray[np.int32], dataset[start:stop])
 
-    ans = []
-    for s, e in idx_con:
-        e = arr_idx[e]
-        s = arr_idx[s]
-        ans.append(fin[s:e])
+    arrays = []
+    for start, stop in index_ranges:
+        stop = offsets[stop]
+        start = offsets[start]
+        arrays.append(dataset[start:stop])
     return (
-        cast(npt.NDArray[np.int32], np.concatenate(ans))
-        if len(ans) > 0
+        cast(npt.NDArray[np.int32], np.concatenate(arrays))
+        if arrays
         else np.array([], np.int32)
     )
 
@@ -475,19 +520,19 @@ class PatternsSOneH5(PatternsSOneFile):
             ]
 
     def _read_patterns(
-        self, idx_con: INDEX_ARRAY
+        self, index_ranges: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
         with self._fn.open_group() as (_, gp):
             assert isinstance(gp, (h5py.Group, h5py.File))
             place_ones = read_indexed_array_h5(
-                cast(h5py.Dataset, gp["place_ones"]), idx_con, self.ones_idx
+                cast(h5py.Dataset, gp["place_ones"]), index_ranges, self.ones_idx
             )
             place_multi = read_indexed_array_h5(
-                cast(h5py.Dataset, gp["place_multi"]), idx_con, self.multi_idx
+                cast(h5py.Dataset, gp["place_multi"]), index_ranges, self.multi_idx
             )
             count_multi = read_indexed_array_h5(
-                cast(h5py.Dataset, gp["count_multi"]), idx_con, self.multi_idx
+                cast(h5py.Dataset, gp["count_multi"]), index_ranges, self.multi_idx
             )
             return place_ones.view("u4"), place_multi.view("u4"), count_multi
 
@@ -536,20 +581,20 @@ class PatternsSOneH5ReadBuffer(PatternsSOneH5):
         return cast(h5py.Dataset, gp["ones"])[...], cast(h5py.Dataset, gp["multi"])[...]
 
     def _read_patterns(
-        self, idx_con: INDEX_ARRAY
+        self, index_ranges: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
         assert self._file_handle is not None
         gp = self._file_handle[self._fn.gn]
         assert isinstance(gp, (h5py.Group, h5py.File))
         place_ones = read_indexed_array_h5(
-            cast(h5py.Dataset, gp["place_ones"]), idx_con, self.ones_idx
+            cast(h5py.Dataset, gp["place_ones"]), index_ranges, self.ones_idx
         )
         place_multi = read_indexed_array_h5(
-            cast(h5py.Dataset, gp["place_multi"]), idx_con, self.multi_idx
+            cast(h5py.Dataset, gp["place_multi"]), index_ranges, self.multi_idx
         )
         count_multi = read_indexed_array_h5(
-            cast(h5py.Dataset, gp["count_multi"]), idx_con, self.multi_idx
+            cast(h5py.Dataset, gp["count_multi"]), index_ranges, self.multi_idx
         )
         return place_ones.view("u4"), place_multi.view("u4"), count_multi
 
@@ -682,6 +727,11 @@ class PatternsSOneList(PatternsSOneFile):
         self.num_data = int(self._indptr[-1])
         self._init_idx = False
 
+    @property
+    def pattern_sources(self) -> list[PatternsSOneBase]:
+        """Underlying pattern sources in collection order."""
+        return self.pattern_list
+
     def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
         return np.concatenate([p.ones for p in self.pattern_list]), np.concatenate(
             [p.multi for p in self.pattern_list]
@@ -755,6 +805,7 @@ class PatternsSOneList(PatternsSOneFile):
         h5version: str = "2",
         overwrite: bool = False,
         compression: Union[None, int, str] = None,
+        hdf5_version: Optional[str] = None,
     ) -> None:
         return write_patterns(
             self.pattern_list,
@@ -762,6 +813,7 @@ class PatternsSOneList(PatternsSOneFile):
             h5version=h5version,
             overwrite=overwrite,
             compression=compression,
+            hdf5_version=hdf5_version,
         )
 
 
@@ -783,3 +835,17 @@ def file_patterns(fn: Union[Sequence[PATH_TYPE], PATH_TYPE]) -> PatternsSOneFile
         if gp.attrs.get("version", "1") == "1":
             return PatternsSOneH5V1(p)
         return PatternsSOneH5(p)
+
+
+def open_patterns(path: Union[Sequence[PATH_TYPE], PATH_TYPE]) -> PatternsSOneFile:
+    """Open one or more file-backed EMC pattern sources."""
+    return file_patterns(path)
+
+
+# Descriptive alternatives. These remain aliases, rather than wrapper
+# subclasses, to preserve exact ``isinstance`` behavior in downstream code.
+FileBackedEMCPatterns = PatternsSOneFile
+EMCBinaryPatternFile = PatternsSOneEMC
+HDF5PatternFile = PatternsSOneH5
+LegacyHDF5PatternFile = PatternsSOneH5V1
+EMCPatternCollection = PatternsSOneList

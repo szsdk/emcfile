@@ -23,11 +23,12 @@ import h5py
 import numpy as np
 import numpy.typing as npt
 from scipy.sparse import csr_array, hstack
+from typing_extensions import deprecated
 
 from ._h5helper import PATH_TYPE, H5Path, check_remove_groups, make_path
 from ._html_display import html_card
 from ._misc import pretty_size
-from ._utils import concat_continous
+from ._utils import contiguous_ranges
 
 _log = logging.getLogger(__name__)
 
@@ -37,6 +38,16 @@ class SPARSE_PATTERN(NamedTuple):
     place_ones: npt.NDArray[np.uint32]
     place_multi: npt.NDArray[np.uint32]
     count_multi: npt.NDArray[np.int32]
+
+    @property
+    def num_pixels(self) -> int:
+        """Number of pixels in this pattern."""
+        return self.num_pix
+
+
+# Canonical public spelling. ``SPARSE_PATTERN`` remains an exact alias so
+# tuple identity, pattern matching, and pickled data stay compatible.
+SparsePattern = SPARSE_PATTERN
 
 
 HANDLED_FUNCTIONS: Dict[Callable[..., Any], Callable[..., Any]] = {}
@@ -100,6 +111,9 @@ class PatternsSOneBase(Protocol):
     ) -> npt.NDArray[np.int32] | PatternsSOne: ...
 
 
+EMCPatternSource = PatternsSOneBase
+
+
 def _patterns_preview(
     patterns: PatternsSOneBase,
     preview_rows: int = 8,
@@ -116,6 +130,9 @@ def _patterns_preview(
 class PatternsSOne:
     """
     Represents a collection of diffraction patterns in a sparse format.
+
+    `EMCPatternArray` is the preferred descriptive public name. The historical
+    `PatternsSOne` name remains an exact alias for compatibility.
 
     This class is optimized for storing and manipulating large sets of diffraction
     patterns where the data is sparse (i.e., most pixel values are zero). It
@@ -159,11 +176,35 @@ class PatternsSOne:
         self.place_ones = place_ones
         self.place_multi = place_multi
         self.count_multi = count_multi
-        self.update_idx()
+        self._update_offsets()
 
-    def update_idx(self) -> None:
+    def _update_offsets(self) -> None:
         self.ones_idx = _count_offsets(self.ones)
         self.multi_idx = _count_offsets(self.multi)
+
+    @deprecated("Offsets are updated automatically; use _update_offsets() internally.")
+    def update_idx(self) -> None:
+        self._update_offsets()
+
+    @property
+    def num_pixels(self) -> int:
+        """Number of pixels in each pattern."""
+        return self.num_pix
+
+    @property
+    def num_patterns(self) -> int:
+        """Number of patterns in the array."""
+        return self.num_data
+
+    @property
+    def ones_offsets(self) -> npt.NDArray[np.uint64]:
+        """Cumulative offsets into ``place_ones``."""
+        return self.ones_idx
+
+    @property
+    def multi_offsets(self) -> npt.NDArray[np.uint64]:
+        """Cumulative offsets into ``place_multi`` and ``count_multi``."""
+        return self.multi_idx
 
     def check(self) -> bool:
         if self.num_data != len(self.multi):
@@ -207,16 +248,20 @@ class PatternsSOne:
     def shape(self) -> Tuple[int, int]:
         return self.num_data, self.num_pix
 
-    def get_mean_count(self) -> float:
+    def mean_photon_count(self) -> float:
         if self.num_data == 0:
             return 0.0
         return cast(int, self.sum()) / self.num_data
+
+    @deprecated("Use mean_photon_count() instead.")
+    def get_mean_count(self) -> float:
+        return self.mean_photon_count()
 
     def __repr__(self) -> str:
         return f"""Pattern(1-sparse) <{hex(id(self))}>
   Number of patterns: {self.num_data}
   Number of pixels: {self.num_pix}
-  Mean number of counts: {self.get_mean_count():.3f}
+  Mean number of counts: {self.mean_photon_count():.3f}
   Size: {pretty_size(self.nbytes)}
   Sparsity: {self.sparsity() * 100:.2f} %
 """
@@ -225,7 +270,7 @@ class PatternsSOne:
         summary = {
             "patterns": self.num_data,
             "pixels": self.num_pix,
-            "mean count": self.get_mean_count() if self.num_data > 0 else 0.0,
+            "mean count": self.mean_photon_count() if self.num_data > 0 else 0.0,
             "size": pretty_size(self.nbytes),
         }
         return html_card(
@@ -325,7 +370,7 @@ class PatternsSOne:
     def _get_subdataset0(self, i: npt.NDArray[np.integer[Any]]) -> PatternsSOne:
         if len(i) == 0:
             return _zeros((0, self.num_pix))
-        c = concat_continous(i)
+        c = contiguous_ranges(i)
         multi_s = self.multi_idx[c]
         return PatternsSOne(
             num_pix=self.num_pix,
@@ -370,6 +415,7 @@ class PatternsSOne:
         h5version: str = "2",
         overwrite: bool = False,
         compression: Union[None, int, str] = None,
+        hdf5_version: Optional[str] = None,
     ) -> None:
         return write_patterns(
             [self],
@@ -377,6 +423,7 @@ class PatternsSOne:
             h5version=h5version,
             overwrite=overwrite,
             compression=compression,
+            hdf5_version=hdf5_version,
         )
 
     def _get_sparse_ones(self) -> csr_array:
@@ -439,7 +486,7 @@ class PatternsSOne:
             return NotImplemented
         return HANDLED_FUNCTIONS[func](*args, **kwargs)
 
-    def check_indices_ordered(self) -> bool:
+    def has_sorted_indices(self) -> bool:
         a = np.subtract(self.place_multi[1:], self.place_multi[:-1], dtype=int)
         a[self.multi_idx[1:-1] - 1] = 1
         if np.any(a <= 0):
@@ -448,8 +495,12 @@ class PatternsSOne:
         a[self.ones_idx[1:-1] - 1] = 1
         return not np.any(a <= 0)
 
-    def ensure_indices_ordered(self) -> None:
-        if self.check_indices_ordered():
+    @deprecated("Use has_sorted_indices() instead.")
+    def check_indices_ordered(self) -> bool:
+        return self.has_sorted_indices()
+
+    def sort_indices(self) -> None:
+        if self.has_sorted_indices():
             return
         for i in range(self.num_data):
             s, e = self.ones_idx[i], self.ones_idx[i + 1]
@@ -459,6 +510,15 @@ class PatternsSOne:
             t = np.argsort(self.place_multi[s:e])
             self.place_multi[s:e] = self.place_multi[s:e][t]
             self.count_multi[s:e] = self.count_multi[s:e][t]
+
+    @deprecated("Use sort_indices() instead.")
+    def ensure_indices_ordered(self) -> None:
+        self.sort_indices()
+
+
+# Keep one runtime class object for full ``isinstance`` and subclass
+# compatibility across downstream projects.
+EMCPatternArray = PatternsSOne
 
 
 FT = TypeVar("FT", bound=Callable[..., Any])
@@ -474,13 +534,13 @@ def implements(np_function: Callable[..., Any]) -> Callable[[FT], FT]:
     return decorator
 
 
-def iter_array_buffer(
-    datas: Sequence[PatternsSOneBase], buffer_size: int, g: str
+def _iter_buffered_arrays(
+    pattern_sets: Sequence[PatternsSOneBase], buffer_size: int, attribute: str
 ) -> Iterable[Union[npt.NDArray[np.int32], npt.NDArray[np.uint32]]]:
     buffer = []
     nbytes = 0
-    for a in datas:
-        ag = getattr(a, g)
+    for pattern_set in pattern_sets:
+        ag = getattr(pattern_set, attribute)
         nbytes += ag.nbytes
         buffer.append(ag)
         if nbytes < buffer_size:
@@ -496,6 +556,13 @@ def iter_array_buffer(
             yield buffer[0]
         else:
             yield np.concatenate(buffer)
+
+
+@deprecated("Use _iter_buffered_arrays() internally.")
+def iter_array_buffer(
+    datas: Sequence[PatternsSOneBase], buffer_size: int, g: str
+) -> Iterable[Union[npt.NDArray[np.int32], npt.NDArray[np.uint32]]]:
+    return _iter_buffered_arrays(datas, buffer_size, g)
 
 
 def _write_bin(datas: Sequence[PatternsSOneBase], path: Path, overwrite: bool) -> None:
@@ -556,7 +623,7 @@ def _write_h5_v2(
         fp.attrs["version"] = "2"
         for g in PatternsSOne.ATTRS:
             n = 0
-            for a in iter_array_buffer(datas, buffer_size, g):
+            for a in _iter_buffered_arrays(datas, buffer_size, g):
                 fg = fp[g]
                 assert isinstance(fg, h5py.Dataset)
                 fg[n : n + a.shape[0]] = a
@@ -571,7 +638,12 @@ def write_patterns(
     overwrite: bool = False,
     buffer_size: int = 1073741824,  # 2 ** 30 bytes = 1 GB
     compression: Union[None, int, str] = None,
+    hdf5_version: Optional[str] = None,
 ) -> None:
+    if hdf5_version is not None:
+        if h5version != "2":
+            raise TypeError("Use either 'hdf5_version' or 'h5version', not both")
+        h5version = hdf5_version
     if isinstance(path, io.BytesIO):
         return _write_bytes(datas, path)
 
@@ -631,7 +703,7 @@ def _write_h5_v1(
 
 
 @implements(np.concatenate)
-def concatenate_PatternsSOne(
+def _concatenate_emc_pattern_arrays(
     patterns_l: "Sequence[PatternsSOne]", axis: int = 0, casting: str = "safe"
 ) -> PatternsSOne:
     "stack pattern sets together"
@@ -677,6 +749,13 @@ def concatenate_PatternsSOne(
             count_multi=cast(np.ndarray, multi.data),
         )
     raise ValueError("The axis should be 0 or 1.")
+
+
+@deprecated("Use numpy.concatenate() instead.")
+def concatenate_PatternsSOne(
+    patterns_l: "Sequence[PatternsSOne]", axis: int = 0, casting: str = "safe"
+) -> PatternsSOne:
+    return _concatenate_emc_pattern_arrays(patterns_l, axis, casting)
 
 
 def _full(shape: Tuple[int, int], val: int) -> PatternsSOne:

@@ -8,9 +8,10 @@ from typing import Optional, TypeVar, cast
 import numpy as np
 import numpy.typing as npt
 from scipy.sparse import coo_array, coo_matrix, sparray, spmatrix
+from typing_extensions import deprecated
 
 from ._h5helper import PATH_TYPE, H5Path
-from ._misc import divide_range
+from ._misc import split_range
 from ._pattern_sone import SPARSE_PATTERN, PatternsSOne, _full, _ones, _zeros
 from ._pattern_sone_file import _PatternsSOneBytes, file_patterns
 
@@ -20,7 +21,7 @@ __all__ = ["patterns"]
 T1 = TypeVar("T1", bound=npt.NBitBase)
 
 
-def dense_to_PatternsSOne(arr: npt.NDArray["np.integer[T1]"]) -> PatternsSOne:
+def _from_dense_array(arr: npt.NDArray["np.integer[T1]"]) -> PatternsSOne:
     idx = arr == 1
     ones = idx.sum(axis=1)
     place_ones = idx.nonzero()[1]
@@ -39,7 +40,7 @@ def dense_to_PatternsSOne(arr: npt.NDArray["np.integer[T1]"]) -> PatternsSOne:
     )
 
 
-def coo_to_SOne_kernel(coo: coo_matrix | coo_array) -> PatternsSOne:
+def _from_coo_array(coo: coo_matrix | coo_array) -> PatternsSOne:
     coo = coo.copy()
     idx = coo.data == 1
     c = coo_matrix((np.ones(idx.sum(), "i4"), (coo.row[idx], coo.col[idx])), coo.shape)
@@ -56,6 +57,18 @@ def coo_to_SOne_kernel(coo: coo_matrix | coo_array) -> PatternsSOne:
         cast(np.ndarray, coo_csr.indices),
         cast(np.ndarray, coo_csr.data),
     )
+
+
+@deprecated("Use patterns() with a dense array instead.")
+def dense_to_PatternsSOne(
+    arr: npt.NDArray["np.integer[T1]"],
+) -> PatternsSOne:
+    return _from_dense_array(arr)
+
+
+@deprecated("Use patterns() with a COO array instead.")
+def coo_to_SOne_kernel(coo: coo_matrix | coo_array) -> PatternsSOne:
+    return _from_coo_array(coo)
 
 
 def _from_sparse_patterns(src: Sequence[SPARSE_PATTERN]) -> PatternsSOne:
@@ -163,30 +176,30 @@ def patterns(
                 np.empty((0,), np.int32),
             )
         case ((int() | np.integer(), int() | np.integer()) as shape, 0):
-            return _zeros(shape)
+            return _zeros(cast(tuple[int, int], shape))
         case ((int() | np.integer(), int() | np.integer()) as shape, 1):
-            return _ones(shape)
+            return _ones(cast(tuple[int, int], shape))
         case (
             (int() | np.integer(), int() | np.integer()) as shape,
             int() | np.integer() as v,
         ):
-            return _full(shape, int(v))
+            return _full(cast(tuple[int, int], shape), int(v))
         case np.ndarray():
             if not np.issubdtype(src.dtype, np.integer):
                 raise ValueError(f"{src.dtype} is not supported")
-            ans = dense_to_PatternsSOne(src)
+            ans = _from_dense_array(src)
             if (start is not None) or (end is not None):
                 ans = ans[start:end]
             return ans
         case coo_array() | coo_matrix():
-            return coo_to_SOne_kernel(src)
+            return _from_coo_array(src)
         case sparray() | spmatrix():
             return cast(
                 PatternsSOne,
                 np.concatenate(
                     [
                         patterns(np.asarray((src[a:b]).todense()))
-                        for a, b in divide_range(
+                        for a, b in split_range(
                             0, src.shape[0], src.shape[0] // 1024 + 1
                         )
                     ]

@@ -88,12 +88,12 @@ def test_det_write(det):
                 det1.write(f / f"det{suffix}")
             det2 = ef.detector(f / f"det{suffix}", norm_flag=False)
             ef.detector(det2)
-        assert ef.det_isclose(det1, det2)
+            assert ef.detectors_allclose(det1, det2)
 
 
-def test_get_ewald_vec(det):
+def test_fit_ewald_sphere_center(det):
     np.testing.assert_almost_equal(det.pixel_size, 0.1)
-    x = ef.get_ewald_vec(det.coor)
+    x = ef.fit_ewald_sphere_center(det.coordinates)
     np.testing.assert_allclose(np.linalg.norm(x), det.ewald_rad, rtol=1e-4)
 
 
@@ -117,19 +117,19 @@ def test_repr(det_file):
 def test_getitem(det):
     det1 = det[[ef.PixelType.GOOD]]
     det2 = det[det.mask == ef.PixelType.GOOD]
-    assert ef.det_isclose(det1, det2)
+    assert ef.detectors_allclose(det1, det2)
 
 
-def test_get_2ddet(det):
-    det_2d = ef.get_2ddet(det)
-    ef.get_2ddet(det, inplace=True)
+def test_project_detector_to_2d(det):
+    det_2d = ef.project_detector_to_2d(det)
+    ef.project_detector_to_2d(det, inplace=True)
     det.check_ewald_rad()
-    assert ef.det_isclose(det, det_2d)
+    assert ef.detectors_allclose(det, det_2d)
     assert det_2d.ndim == 2
 
 
-def test_get_3ddet_from_shape(det):
-    ef.get_3ddet_from_shape((100, 100), det)
+def test_resample_detector(det):
+    ef.resample_detector((100, 100), det)
 
 
 def test_cxy_xyz_conversion(det):
@@ -141,8 +141,8 @@ def test_cxy_xyz_conversion(det):
     np.testing.assert_almost_equal(xyz, det.coor, decimal=4)
 
 
-def test_det_render(det):
-    detr = ef.det_render(det)
+def test_detector_renderer(det):
+    detr = ef.detector_renderer(det)
     np.testing.assert_almost_equal(
         detr.to_xyz(detr.to_cxy(det.coor)), det.coor, decimal=4
     )
@@ -164,7 +164,7 @@ def reference_render(detr, raw_img):
 
 
 def test_render(det):
-    detr = ef.det_render(det)
+    detr = ef.detector_renderer(det)
     raw_1d = det.coor[:, 0]
     raw_2d = np.tile(raw_1d, (5, 1))
 
@@ -182,7 +182,7 @@ def test_render(det):
 
 def test_render_uncovered_pixels_are_nan(det):
     sparse_det = det[np.arange(0, det.num_pix, 2)]
-    detr = ef.det_render(sparse_det)
+    detr = ef.detector_renderer(sparse_det)
     raw = np.ones(sparse_det.num_pix)
     uncovered = np.asarray(detr._count.filled(0)) == 0
 
@@ -202,11 +202,11 @@ def test_render_uncovered_pixels_are_nan(det):
 )
 def test_render_validates_input_shape(det, shape):
     with pytest.raises(ValueError):
-        ef.det_render(det).render(np.zeros(shape))
+        ef.detector_renderer(det).render(np.zeros(shape))
 
 
 def test_render_real(real_det, real_patterns):
-    detr = ef.det_render(real_det)
+    detr = ef.detector_renderer(real_det)
     dense = real_patterns.todense()
     raw = dense[0].astype(np.float64)
 
@@ -215,7 +215,7 @@ def test_render_real(real_det, real_patterns):
 
 
 def test_render_2d_real(real_det, real_patterns):
-    detr = ef.det_render(real_det)
+    detr = ef.detector_renderer(real_det)
     dense = real_patterns.todense().astype(np.float64)
 
     result = detr.render(dense)
@@ -231,7 +231,7 @@ def test_display(det):
     assert isinstance(html, str)
     assert "Detector" in html or "detector" in html.lower()
 
-    render_html = ef.det_render(det)._repr_html_()
+    render_html = ef.detector_renderer(det)._repr_html_()
     assert isinstance(render_html, str)
 
 
