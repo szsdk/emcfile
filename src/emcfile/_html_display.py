@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from html import escape
 from collections.abc import Mapping, Sequence
+from html import escape
 
 
 def _format_value(value: object) -> str:

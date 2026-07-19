@@ -3,8 +3,7 @@ from typing import Optional, Union
 
 import numpy as np
 import numpy.typing as npt
-from typing_extensions import TypeAlias
-from typing_extensions import deprecated
+from typing_extensions import TypeAlias, deprecated
 
 from ._h5helper import PATH_TYPE
 from ._html_display import html_card
