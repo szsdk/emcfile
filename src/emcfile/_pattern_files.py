@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Optional, Union, cast, overload
 
 import h5py
+import hdf5plugin  # noqa: F401  # Registers optional standard HDF5 filters.
 import numpy as np
 import numpy.typing as npt
 
@@ -21,6 +22,8 @@ from ._emc_patterns import (
     _count_offsets,
     write_patterns,
 )
+from ._delta import decode_pattern_local_delta
+from ._h5_full_scan import full_scan
 from ._formatting import pretty_size
 from ._hdf5 import PATH_TYPE, H5Path, h5path, make_path
 from ._html_display import html_card
@@ -482,6 +485,11 @@ def read_indexed_array_h5(
     )
 
 
+def _selected_counts(counts: npt.NDArray[np.uint32], index_ranges: INDEX_ARRAY) -> npt.NDArray[np.uint32]:
+    selected = [counts[start:stop] for start, stop in index_ranges]
+    return np.concatenate(selected) if selected else np.array([], dtype=np.uint32)
+
+
 class PatternsSOneH5(PatternsSOneFile):
     """
     Represents a collection of patterns stored in an HDF5 file.
@@ -509,6 +517,12 @@ class PatternsSOneH5(PatternsSOneFile):
         with self._fn.open_group() as (_, gp):
             self.num_data = int(cast(int, gp.attrs["num_data"]))
             self.num_pix = int(cast(int, gp.attrs["num_pix"]))
+            self.h5version = str(gp.attrs.get("version", "2"))
+            self.position_encoding = str(gp.attrs.get("position_encoding", "absolute"))
+        if self.h5version != "2":
+            raise ValueError(f"Unsupported HDF5 EMC format version {self.h5version!r}")
+        if self.position_encoding not in {"absolute", "delta"}:
+            raise ValueError(f"Unsupported HDF5 position encoding {self.position_encoding!r}")
         self.ndim = 2
         self._init_idx = False
 
@@ -525,6 +539,10 @@ class PatternsSOneH5(PatternsSOneFile):
         self.init_idx()
         with self._fn.open_group() as (_, gp):
             assert isinstance(gp, (h5py.Group, h5py.File))
+            if self.position_encoding == "delta" and np.array_equal(index_ranges, [[0, self.num_data]]):
+                result = full_scan(gp, self.ones_idx, self.multi_idx)
+                if result is not None:
+                    return result
             place_ones = read_indexed_array_h5(
                 cast(h5py.Dataset, gp["place_ones"]), index_ranges, self.ones_idx
             )
@@ -534,6 +552,8 @@ class PatternsSOneH5(PatternsSOneFile):
             count_multi = read_indexed_array_h5(
                 cast(h5py.Dataset, gp["count_multi"]), index_ranges, self.multi_idx
             )
+            if self.position_encoding == "delta":
+                return (decode_pattern_local_delta(place_ones, _selected_counts(self.ones, index_ranges)), decode_pattern_local_delta(place_multi, _selected_counts(self.multi, index_ranges)), count_multi)
             return place_ones.view("u4"), place_multi.view("u4"), count_multi
 
     def open(self) -> PatternsSOneH5ReadBuffer:
@@ -543,13 +563,15 @@ class PatternsSOneH5(PatternsSOneFile):
     def place_ones(self) -> npt.NDArray[np.uint32]:
         with self._fn.open_group() as (_, gp):
             assert isinstance(gp, (h5py.Group, h5py.File))
-            return cast(h5py.Dataset, gp["place_ones"])[...]
+            values = cast(h5py.Dataset, gp["place_ones"])[...]
+            return decode_pattern_local_delta(values, self.ones) if self.position_encoding == "delta" else values
 
     @property
     def place_multi(self) -> npt.NDArray[np.uint32]:
         with self._fn.open_group() as (_, gp):
             assert isinstance(gp, (h5py.Group, h5py.File))
-            return cast(h5py.Dataset, gp["place_multi"])[...]
+            values = cast(h5py.Dataset, gp["place_multi"])[...]
+            return decode_pattern_local_delta(values, self.multi) if self.position_encoding == "delta" else values
 
     @property
     def count_multi(self) -> npt.NDArray[np.int32]:
@@ -587,6 +609,10 @@ class PatternsSOneH5ReadBuffer(PatternsSOneH5):
         assert self._file_handle is not None
         gp = self._file_handle[self._fn.gn]
         assert isinstance(gp, (h5py.Group, h5py.File))
+        if self.position_encoding == "delta" and np.array_equal(index_ranges, [[0, self.num_data]]):
+            result = full_scan(gp, self.ones_idx, self.multi_idx)
+            if result is not None:
+                return result
         place_ones = read_indexed_array_h5(
             cast(h5py.Dataset, gp["place_ones"]), index_ranges, self.ones_idx
         )
@@ -596,6 +622,8 @@ class PatternsSOneH5ReadBuffer(PatternsSOneH5):
         count_multi = read_indexed_array_h5(
             cast(h5py.Dataset, gp["count_multi"]), index_ranges, self.multi_idx
         )
+        if self.position_encoding == "delta":
+            return (decode_pattern_local_delta(place_ones, _selected_counts(self.ones, index_ranges)), decode_pattern_local_delta(place_multi, _selected_counts(self.multi, index_ranges)), count_multi)
         return place_ones.view("u4"), place_multi.view("u4"), count_multi
 
 
@@ -805,6 +833,9 @@ class PatternsSOneList(PatternsSOneFile):
         h5version: str = "2",
         overwrite: bool = False,
         compression: Union[None, int, str] = None,
+        compression_opts: Any = None,
+        shuffle: bool = False,
+        position_encoding: str = "absolute",
         hdf5_version: Optional[str] = None,
     ) -> None:
         return write_patterns(
@@ -813,6 +844,9 @@ class PatternsSOneList(PatternsSOneFile):
             h5version=h5version,
             overwrite=overwrite,
             compression=compression,
+            compression_opts=compression_opts,
+            shuffle=shuffle,
+            position_encoding=position_encoding,
             hdf5_version=hdf5_version,
         )
 
@@ -832,9 +866,12 @@ def file_patterns(fn: Union[Sequence[PATH_TYPE], PATH_TYPE]) -> PatternsSOneFile
     if not isinstance(p, H5Path):
         return PatternsSOneEMC(p)
     with p.open_group() as (_, gp):
-        if gp.attrs.get("version", "1") == "1":
+        version = str(gp.attrs.get("version", "1"))
+        if version == "1":
             return PatternsSOneH5V1(p)
-        return PatternsSOneH5(p)
+        if version == "2":
+            return PatternsSOneH5(p)
+        raise ValueError(f"Unsupported HDF5 EMC format version {version!r}")
 
 
 def open_patterns(path: Union[Sequence[PATH_TYPE], PATH_TYPE]) -> PatternsSOneFile:

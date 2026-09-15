@@ -201,6 +201,25 @@ patterns.write(
 )
 ```
 
+Version 2 separates EMC's semantic position encoding from physical HDF5
+filters. Positions can be stored as `absolute` (the default) or pattern-local
+`delta`; byte shuffle and the compressor are independent. The recommended
+portable configuration is delta positions, byte shuffle, and Zstd level 1:
+
+```python
+patterns.write(
+    "run001.h5", position_encoding="delta", compression="zstd",
+    compression_opts=1, shuffle=True,
+)
+```
+
+`count_multi` remains absolute. These are ordinary HDF5 shuffle+Zstd files and
+can be read with h5py after importing `hdf5plugin`. emcfile automatically uses
+its direct-chunk implementation only for complete reads of the compatible
+delta+shuffle+Zstd layout; partial reads, VDS files, and other filter pipelines
+use h5py's generic reader. Set `EMCFILE_H5_FULL_SCAN_WORKERS=0` to disable the
+full-scan optimization.
+
 General arrays and nested Python dictionaries can be stored with the HDF5
 helpers:
 

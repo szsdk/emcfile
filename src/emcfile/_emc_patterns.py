@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import (
@@ -20,12 +21,15 @@ from typing import (
 )
 
 import h5py
+import hdf5plugin
 import numpy as np
 import numpy.typing as npt
 from scipy.sparse import csr_array, hstack
 from typing_extensions import deprecated
 
 from ._formatting import pretty_size
+from ._delta import encode_pattern_local_delta_parallel
+from ._h5_direct_write import PrefilteredDatasetWriter
 from ._hdf5 import PATH_TYPE, H5Path, check_remove_groups, make_path
 from ._html_display import html_card
 from ._indexing import contiguous_ranges
@@ -78,6 +82,9 @@ class PatternsSOneBase(Protocol):
 
     @property
     def ndim(self) -> int: ...
+
+    @property
+    def nbytes(self) -> int: ...
 
     @property
     def ones(self) -> npt.NDArray[np.uint32]: ...
@@ -415,6 +422,9 @@ class PatternsSOne:
         h5version: str = "2",
         overwrite: bool = False,
         compression: Union[None, int, str] = None,
+        compression_opts: Any = None,
+        shuffle: bool = False,
+        position_encoding: str = "absolute",
         hdf5_version: Optional[str] = None,
     ) -> None:
         return write_patterns(
@@ -423,6 +433,9 @@ class PatternsSOne:
             h5version=h5version,
             overwrite=overwrite,
             compression=compression,
+            compression_opts=compression_opts,
+            shuffle=shuffle,
+            position_encoding=position_encoding,
             hdf5_version=hdf5_version,
         )
 
@@ -591,43 +604,84 @@ def _write_bytes(datas: Sequence[PatternsSOneBase], path: io.BytesIO) -> None:
             path.write(getattr(data, g).tobytes())
 
 
+def _h5_filter_kwargs(
+    compression: Union[None, int, str], compression_opts: Any, shuffle: bool
+) -> dict[str, Any]:
+    if compression == "zstd":
+        return {
+            "shuffle": shuffle,
+            **hdf5plugin.Zstd(clevel=1 if compression_opts is None else compression_opts),
+        }
+    result: dict[str, Any] = {"shuffle": shuffle}
+    if compression is not None:
+        result["compression"] = compression
+        if compression_opts is not None:
+            result["compression_opts"] = compression_opts
+    return result
+
+
 def _write_h5_v2(
     datas: Sequence[PatternsSOneBase],
     path: H5Path,
     overwrite: bool,
     buffer_size: int,
     compression: Union[None, int, str] = None,
+    compression_opts: Any = None,
+    shuffle: bool = False,
+    position_encoding: str = "absolute",
 ) -> None:
-    num_ones = np.sum([d.ones.sum() for d in datas])
-    num_multi = np.sum([d.multi.sum() for d in datas])
-    num_data = np.sum([data.num_data for data in datas])
+    if position_encoding not in {"absolute", "delta"}:
+        raise ValueError("position_encoding must be 'absolute' or 'delta'")
+    if not datas:
+        raise ValueError("at least one pattern source is required")
+    num_ones = int(sum(int(d.ones.sum(dtype=np.uint64)) for d in datas))
+    num_multi = int(sum(int(d.multi.sum(dtype=np.uint64)) for d in datas))
+    num_data = int(sum(data.num_data for data in datas))
     num_pix = datas[0].num_pix
+    if any(data.num_pix != num_pix for data in datas):
+        raise ValueError("all pattern sources must have the same number of pixels")
+    direct_zstd = position_encoding == "delta" and compression == "zstd" and shuffle and all(size > 0 for size in (num_data, num_ones, num_multi))
+    chunk_bytes = int(os.environ.get("EMCFILE_H5_DIRECT_CHUNK_BYTES", str(16 << 20)))
+    if chunk_bytes <= 0 or chunk_bytes % np.dtype("u4").itemsize:
+        raise ValueError("EMCFILE_H5_DIRECT_CHUNK_BYTES must be a positive multiple of 4")
+    workers = max(1, int(os.environ.get("EMCFILE_H5_WRITE_WORKERS", "8")))
+    kwargs = _h5_filter_kwargs(compression, compression_opts, shuffle)
     with path.open_group("a", "a") as (_, fp):
         assert isinstance(fp, (h5py.Group, h5py.File))
-        check_remove_groups(
-            fp, ["ones", "multi", "place_ones", "place_multi", "count_multi"], overwrite
-        )
-        fp.create_dataset("ones", (num_data,), dtype="i4", compression=compression)
-        fp.create_dataset("multi", (num_data,), dtype="i4", compression=compression)
-        fp.create_dataset(
-            "place_ones", (num_ones,), dtype="i4", compression=compression
-        )
-        fp.create_dataset(
-            "place_multi", (num_multi,), dtype="i4", compression=compression
-        )
-        fp.create_dataset(
-            "count_multi", (num_multi,), dtype="i4", compression=compression
-        )
-        fp.attrs["num_pix"] = num_pix
-        fp.attrs["num_data"] = num_data
-        fp.attrs["version"] = "2"
-        for g in PatternsSOne.ATTRS:
-            n = 0
-            for a in _iter_buffered_arrays(datas, buffer_size, g):
-                fg = fp[g]
-                assert isinstance(fg, h5py.Dataset)
-                fg[n : n + a.shape[0]] = a
-                n += a.shape[0]
+        names = ["ones", "multi", "place_ones", "place_multi", "count_multi"]
+        check_remove_groups(fp, names, overwrite)
+        shapes = {"ones": (num_data, "i4"), "multi": (num_data, "i4"), "place_ones": (num_ones, "u4"), "place_multi": (num_multi, "u4"), "count_multi": (num_multi, "i4")}
+        datasets = {}
+        for name, (size, dtype) in shapes.items():
+            dataset_kwargs = dict(kwargs)
+            if direct_zstd:
+                dataset_kwargs["chunks"] = (max(1, min(size, chunk_bytes // 4)),)
+            datasets[name] = fp.create_dataset(name, (size,), dtype=dtype, **dataset_kwargs)
+        fp.attrs.update(num_pix=num_pix, num_data=num_data, version="2", position_encoding=position_encoding)
+        writers = {name: PrefilteredDatasetWriter(dataset, 1 if compression_opts is None else int(compression_opts), workers) for name, dataset in datasets.items()} if direct_zstd else None
+        offsets = {name: 0 for name in names}
+        try:
+            for data in datas:
+                patterns_per_batch = max(1, buffer_size // max(1, data.nbytes // max(1, data.num_data)))
+                for start in range(0, data.num_data, patterns_per_batch):
+                    batch = data[start : min(start + patterns_per_batch, data.num_data)]
+                    assert isinstance(batch, PatternsSOne)
+                    arrays = {
+                        "ones": np.asarray(batch.ones), "multi": np.asarray(batch.multi),
+                        "place_ones": encode_pattern_local_delta_parallel(batch.place_ones, batch.ones, workers) if position_encoding == "delta" else np.asarray(batch.place_ones),
+                        "place_multi": encode_pattern_local_delta_parallel(batch.place_multi, batch.multi, workers) if position_encoding == "delta" else np.asarray(batch.place_multi),
+                        "count_multi": np.asarray(batch.count_multi),
+                    }
+                    for name, array in arrays.items():
+                        if writers is None:
+                            datasets[name][offsets[name] : offsets[name] + array.size] = array
+                            offsets[name] += array.size
+                        else:
+                            writers[name].write(array)
+        finally:
+            if writers is not None:
+                for writer in writers.values():
+                    writer.close()
 
 
 def write_patterns(
@@ -638,6 +692,9 @@ def write_patterns(
     overwrite: bool = False,
     buffer_size: int = 1073741824,  # 2 ** 30 bytes = 1 GB
     compression: Union[None, int, str] = None,
+    compression_opts: Any = None,
+    shuffle: bool = False,
+    position_encoding: str = "absolute",
     hdf5_version: Optional[str] = None,
 ) -> None:
     if hdf5_version is not None:
@@ -660,7 +717,7 @@ def write_patterns(
             )
             return _write_h5_v1(datas[0], f, overwrite)
         elif h5version == "2":
-            return _write_h5_v2(datas, f, overwrite, buffer_size, compression)
+            return _write_h5_v2(datas, f, overwrite, buffer_size, compression, compression_opts, shuffle, position_encoding)
         else:
             raise ValueError(f"The h5version(={h5version}) should be '1' or '2'.")
     raise ValueError(f"Wrong file name {path}")

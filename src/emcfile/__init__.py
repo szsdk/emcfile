@@ -41,6 +41,7 @@ from ._hdf5 import (
     write_obj_h5,
 )
 from ._pattern_collector import EMCPatternCollector, PatternsSOneCollector
+from ._vds import create_vds
 from ._pattern_factory import patterns
 from ._pattern_files import (
     EMCBinaryPatternFile,
@@ -101,6 +102,7 @@ __all__ = [
     "patterns",
     "PatternsSOne",
     "write_patterns",
+    "create_vds",
     "PatternsSOneFile",
     "PatternsSOneEMC",
     "PatternsSOneH5",

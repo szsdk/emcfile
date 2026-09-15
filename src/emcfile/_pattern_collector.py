@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -253,6 +253,10 @@ class PatternsSOneCollector:
         h5version: str = "2",
         overwrite: bool = False,
         buffer_size: int = 1073741824,  # 2 ** 30 bytes = 1 GB
+        compression: Union[None, int, str] = None,
+        compression_opts: Any = None,
+        shuffle: bool = False,
+        position_encoding: str = "absolute",
         hdf5_version: Optional[str] = None,
     ) -> None:
         """
@@ -281,6 +285,10 @@ class PatternsSOneCollector:
             h5version=h5version,
             overwrite=overwrite,
             buffer_size=buffer_size,
+            compression=compression,
+            compression_opts=compression_opts,
+            shuffle=shuffle,
+            position_encoding=position_encoding,
             hdf5_version=hdf5_version,
         )
 
