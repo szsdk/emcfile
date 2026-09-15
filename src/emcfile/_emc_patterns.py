@@ -425,6 +425,7 @@ class PatternsSOne:
         compression_opts: Any = None,
         shuffle: bool = False,
         position_encoding: str = "absolute",
+        check_sorted: bool = False,
         hdf5_version: Optional[str] = None,
     ) -> None:
         return write_patterns(
@@ -436,6 +437,7 @@ class PatternsSOne:
             compression_opts=compression_opts,
             shuffle=shuffle,
             position_encoding=position_encoding,
+            check_sorted=check_sorted,
             hdf5_version=hdf5_version,
         )
 
@@ -629,6 +631,7 @@ def _write_h5_v2(
     compression_opts: Any = None,
     shuffle: bool = False,
     position_encoding: str = "absolute",
+    check_sorted: bool = False,
 ) -> None:
     if position_encoding not in {"absolute", "delta"}:
         raise ValueError("position_encoding must be 'absolute' or 'delta'")
@@ -668,8 +671,8 @@ def _write_h5_v2(
                     assert isinstance(batch, PatternsSOne)
                     arrays = {
                         "ones": np.asarray(batch.ones), "multi": np.asarray(batch.multi),
-                        "place_ones": encode_pattern_local_delta_parallel(batch.place_ones, batch.ones, workers) if position_encoding == "delta" else np.asarray(batch.place_ones),
-                        "place_multi": encode_pattern_local_delta_parallel(batch.place_multi, batch.multi, workers) if position_encoding == "delta" else np.asarray(batch.place_multi),
+                        "place_ones": encode_pattern_local_delta_parallel(batch.place_ones, batch.ones, workers, check_sorted=check_sorted) if position_encoding == "delta" else np.asarray(batch.place_ones),
+                        "place_multi": encode_pattern_local_delta_parallel(batch.place_multi, batch.multi, workers, check_sorted=check_sorted) if position_encoding == "delta" else np.asarray(batch.place_multi),
                         "count_multi": np.asarray(batch.count_multi),
                     }
                     for name, array in arrays.items():
@@ -695,6 +698,7 @@ def write_patterns(
     compression_opts: Any = None,
     shuffle: bool = False,
     position_encoding: str = "absolute",
+    check_sorted: bool = False,
     hdf5_version: Optional[str] = None,
 ) -> None:
     if hdf5_version is not None:
@@ -717,7 +721,7 @@ def write_patterns(
             )
             return _write_h5_v1(datas[0], f, overwrite)
         elif h5version == "2":
-            return _write_h5_v2(datas, f, overwrite, buffer_size, compression, compression_opts, shuffle, position_encoding)
+            return _write_h5_v2(datas, f, overwrite, buffer_size, compression, compression_opts, shuffle, position_encoding, check_sorted)
         else:
             raise ValueError(f"The h5version(={h5version}) should be '1' or '2'.")
     raise ValueError(f"Wrong file name {path}")

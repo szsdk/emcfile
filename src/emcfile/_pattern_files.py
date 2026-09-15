@@ -836,6 +836,7 @@ class PatternsSOneList(PatternsSOneFile):
         compression_opts: Any = None,
         shuffle: bool = False,
         position_encoding: str = "absolute",
+        check_sorted: bool = False,
         hdf5_version: Optional[str] = None,
     ) -> None:
         return write_patterns(
@@ -847,6 +848,7 @@ class PatternsSOneList(PatternsSOneFile):
             compression_opts=compression_opts,
             shuffle=shuffle,
             position_encoding=position_encoding,
+            check_sorted=check_sorted,
             hdf5_version=hdf5_version,
         )
 

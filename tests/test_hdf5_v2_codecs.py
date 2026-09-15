@@ -26,6 +26,13 @@ def test_delta_roundtrip_and_explicit_sortedness_check():
         encode_pattern_local_delta(np.array([2, 1], "u4"), [2], check_sorted=True)
 
 
+def test_writer_sortedness_check_is_opt_in(tmp_path: Path):
+    invalid = ef.PatternsSOne(8, np.array([2], "u4"), np.array([0], "u4"), np.array([4, 3], "u4"), np.array([], "u4"), np.array([], "i4"))
+    invalid.write(tmp_path / "unchecked.h5", position_encoding="delta")
+    with pytest.raises(ValueError, match="sorted"):
+        invalid.write(tmp_path / "checked.h5", position_encoding="delta", check_sorted=True)
+
+
 @pytest.mark.parametrize("compression,options,shuffle", [(None, None, False), ("lzf", None, True), ("gzip", 1, True), ("zstd", 1, True)])
 @pytest.mark.parametrize("encoding", ["absolute", "delta"])
 def test_v2_codec_roundtrip(tmp_path: Path, compression, options, shuffle, encoding):

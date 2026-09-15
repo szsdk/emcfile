@@ -213,6 +213,10 @@ patterns.write(
 )
 ```
 
+Delta encoding assumes positions are sorted within each pattern. This avoids a
+costly validation pass on the normal writer path. Pass `check_sorted=True` to
+validate that invariant and raise `ValueError` before writing.
+
 `count_multi` remains absolute. These are ordinary HDF5 shuffle+Zstd files and
 can be read with h5py after importing `hdf5plugin`. emcfile automatically uses
 its direct-chunk implementation only for complete reads of the compatible
