@@ -224,6 +224,10 @@ delta+shuffle+Zstd layout; partial reads, VDS files, and other filter pipelines
 use h5py's generic reader. Set `EMCFILE_H5_FULL_SCAN_WORKERS=0` to disable the
 full-scan optimization.
 
+The optimized paths use four workers by default. Power users can set
+`EMCFILE_H5_WRITE_WORKERS` or `EMCFILE_H5_FULL_SCAN_WORKERS` before starting
+Python; set the latter to `0` to force the generic reader.
+
 General arrays and nested Python dictionaries can be stored with the HDF5
 helpers:
 

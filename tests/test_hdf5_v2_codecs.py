@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 import emcfile as ef
+import emcfile._emc_patterns as implementation
 import emcfile._h5_full_scan as fast
 from emcfile._delta import decode_pattern_local_delta, encode_pattern_local_delta
 
@@ -55,6 +56,22 @@ def test_direct_layout_is_standard_and_full_scan_falls_back_cleanly(tmp_path: Pa
     assert ef.open_patterns(path)[:] == expected
     monkeypatch.setenv("EMCFILE_H5_FULL_SCAN_WORKERS", "0")
     assert ef.open_patterns(path)[:] == expected
+
+
+def test_direct_writer_default_workers_is_four(tmp_path: Path, monkeypatch):
+    workers = []
+    original = implementation.PrefilteredDatasetWriter
+
+    def writer(*args, **kwargs):
+        workers.append(args[2])
+        return original(*args, **kwargs)
+
+    monkeypatch.delenv("EMCFILE_H5_WRITE_WORKERS", raising=False)
+    monkeypatch.setattr(implementation, "PrefilteredDatasetWriter", writer)
+    _patterns().write(
+        tmp_path / "defaults.h5", position_encoding="delta", compression="zstd", shuffle=True
+    )
+    assert workers == [4] * 5
 
 
 def test_vds_preserves_delta_and_uses_generic_reading(tmp_path: Path, monkeypatch):

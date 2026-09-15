@@ -647,7 +647,7 @@ def _write_h5_v2(
     chunk_bytes = int(os.environ.get("EMCFILE_H5_DIRECT_CHUNK_BYTES", str(16 << 20)))
     if chunk_bytes <= 0 or chunk_bytes % np.dtype("u4").itemsize:
         raise ValueError("EMCFILE_H5_DIRECT_CHUNK_BYTES must be a positive multiple of 4")
-    workers = max(1, int(os.environ.get("EMCFILE_H5_WRITE_WORKERS", "8")))
+    workers = max(1, int(os.environ.get("EMCFILE_H5_WRITE_WORKERS", "4")))
     kwargs = _h5_filter_kwargs(compression, compression_opts, shuffle)
     with path.open_group("a", "a") as (_, fp):
         assert isinstance(fp, (h5py.Group, h5py.File))
