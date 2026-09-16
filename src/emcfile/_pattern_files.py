@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Optional, Union, cast, overload
 
 import h5py
-import hdf5plugin  # noqa: F401  # Registers optional standard HDF5 filters.
 import numpy as np
 import numpy.typing as npt
 
@@ -23,7 +22,7 @@ from ._emc_patterns import (
     write_patterns,
 )
 from ._delta import decode_pattern_local_delta
-from ._h5_full_scan import full_scan
+from ._h5_filters import ensure_group_filters
 from ._formatting import pretty_size
 from ._hdf5 import PATH_TYPE, H5Path, h5path, make_path
 from ._html_display import html_card
@@ -529,6 +528,7 @@ class PatternsSOneH5(PatternsSOneFile):
     def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
         with self._fn.open_group() as (fp, gp):
             assert isinstance(gp, (h5py.Group, h5py.File))
+            ensure_group_filters(gp)
             return cast(h5py.Dataset, gp["ones"])[...], cast(h5py.Dataset, gp["multi"])[
                 ...
             ]
@@ -539,7 +539,9 @@ class PatternsSOneH5(PatternsSOneFile):
         self.init_idx()
         with self._fn.open_group() as (_, gp):
             assert isinstance(gp, (h5py.Group, h5py.File))
+            ensure_group_filters(gp)
             if self.position_encoding == "delta" and np.array_equal(index_ranges, [[0, self.num_data]]):
+                from ._h5_full_scan import full_scan
                 result = full_scan(gp, self.ones_idx, self.multi_idx)
                 if result is not None:
                     return result
@@ -563,6 +565,7 @@ class PatternsSOneH5(PatternsSOneFile):
     def place_ones(self) -> npt.NDArray[np.uint32]:
         with self._fn.open_group() as (_, gp):
             assert isinstance(gp, (h5py.Group, h5py.File))
+            ensure_group_filters(gp)
             values = cast(h5py.Dataset, gp["place_ones"])[...]
             return decode_pattern_local_delta(values, self.ones) if self.position_encoding == "delta" else values
 
@@ -570,6 +573,7 @@ class PatternsSOneH5(PatternsSOneFile):
     def place_multi(self) -> npt.NDArray[np.uint32]:
         with self._fn.open_group() as (_, gp):
             assert isinstance(gp, (h5py.Group, h5py.File))
+            ensure_group_filters(gp)
             values = cast(h5py.Dataset, gp["place_multi"])[...]
             return decode_pattern_local_delta(values, self.multi) if self.position_encoding == "delta" else values
 
@@ -577,6 +581,7 @@ class PatternsSOneH5(PatternsSOneFile):
     def count_multi(self) -> npt.NDArray[np.int32]:
         with self._fn.open_group() as (_, gp):
             assert isinstance(gp, (h5py.Group, h5py.File))
+            ensure_group_filters(gp)
             return cast(h5py.Dataset, gp["count_multi"])[...]
 
 
@@ -600,6 +605,7 @@ class PatternsSOneH5ReadBuffer(PatternsSOneH5):
         assert self._file_handle is not None
         gp = self._file_handle[self._fn.gn]
         assert isinstance(gp, (h5py.Group, h5py.File))
+        ensure_group_filters(gp)
         return cast(h5py.Dataset, gp["ones"])[...], cast(h5py.Dataset, gp["multi"])[...]
 
     def _read_patterns(
@@ -609,7 +615,9 @@ class PatternsSOneH5ReadBuffer(PatternsSOneH5):
         assert self._file_handle is not None
         gp = self._file_handle[self._fn.gn]
         assert isinstance(gp, (h5py.Group, h5py.File))
+        ensure_group_filters(gp)
         if self.position_encoding == "delta" and np.array_equal(index_ranges, [[0, self.num_data]]):
+            from ._h5_full_scan import full_scan
             result = full_scan(gp, self.ones_idx, self.multi_idx)
             if result is not None:
                 return result

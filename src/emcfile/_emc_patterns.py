@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 import logging
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import (
@@ -21,7 +23,6 @@ from typing import (
 )
 
 import h5py
-import hdf5plugin
 import numpy as np
 import numpy.typing as npt
 from scipy.sparse import csr_array, hstack
@@ -29,7 +30,9 @@ from typing_extensions import deprecated
 
 from ._formatting import pretty_size
 from ._delta import encode_pattern_local_delta_parallel
-from ._h5_direct_write import PrefilteredDatasetWriter
+from ._h5_direct_write import PrefilteredDatasetWriter, available as direct_zstd_available
+from ._h5_filters import hdf5plugin
+from ._h5_workers import env_workers
 from ._hdf5 import PATH_TYPE, H5Path, check_remove_groups, make_path
 from ._html_display import html_card
 from ._indexing import contiguous_ranges
@@ -610,9 +613,10 @@ def _h5_filter_kwargs(
     compression: Union[None, int, str], compression_opts: Any, shuffle: bool
 ) -> dict[str, Any]:
     if compression == "zstd":
+        plugin = hdf5plugin()
         return {
             "shuffle": shuffle,
-            **hdf5plugin.Zstd(clevel=1 if compression_opts is None else compression_opts),
+            **plugin.Zstd(clevel=1 if compression_opts is None else compression_opts),
         }
     result: dict[str, Any] = {"shuffle": shuffle}
     if compression is not None:
@@ -643,11 +647,11 @@ def _write_h5_v2(
     num_pix = datas[0].num_pix
     if any(data.num_pix != num_pix for data in datas):
         raise ValueError("all pattern sources must have the same number of pixels")
-    direct_zstd = position_encoding == "delta" and compression == "zstd" and shuffle and all(size > 0 for size in (num_data, num_ones, num_multi))
+    direct_zstd = position_encoding == "delta" and compression == "zstd" and shuffle and all(size > 0 for size in (num_data, num_ones, num_multi)) and direct_zstd_available()
     chunk_bytes = int(os.environ.get("EMCFILE_H5_DIRECT_CHUNK_BYTES", str(16 << 20)))
     if chunk_bytes <= 0 or chunk_bytes % np.dtype("u4").itemsize:
         raise ValueError("EMCFILE_H5_DIRECT_CHUNK_BYTES must be a positive multiple of 4")
-    workers = max(1, int(os.environ.get("EMCFILE_H5_WRITE_WORKERS", "4")))
+    workers = env_workers("EMCFILE_H5_WRITE_WORKERS", 4)
     kwargs = _h5_filter_kwargs(compression, compression_opts, shuffle)
     with path.open_group("a", "a") as (_, fp):
         assert isinstance(fp, (h5py.Group, h5py.File))
@@ -661,7 +665,9 @@ def _write_h5_v2(
                 dataset_kwargs["chunks"] = (max(1, min(size, chunk_bytes // 4)),)
             datasets[name] = fp.create_dataset(name, (size,), dtype=dtype, **dataset_kwargs)
         fp.attrs.update(num_pix=num_pix, num_data=num_data, version="2", position_encoding=position_encoding)
-        writers = {name: PrefilteredDatasetWriter(dataset, 1 if compression_opts is None else int(compression_opts), workers) for name, dataset in datasets.items()} if direct_zstd else None
+        pool = ThreadPoolExecutor(max_workers=workers) if direct_zstd else None
+        slots = threading.Semaphore(max(2, workers * 2)) if direct_zstd else None
+        writers = {name: PrefilteredDatasetWriter(dataset, 1 if compression_opts is None else int(compression_opts), workers, pool=pool, slots=slots) for name, dataset in datasets.items()} if direct_zstd else None
         offsets = {name: 0 for name in names}
         try:
             for data in datas:
@@ -681,10 +687,13 @@ def _write_h5_v2(
                             offsets[name] += array.size
                         else:
                             writers[name].write(array)
+                            writers[name].drain()
         finally:
             if writers is not None:
                 for writer in writers.values():
                     writer.close()
+            if pool is not None:
+                pool.shutdown(cancel_futures=True)
 
 
 def write_patterns(
