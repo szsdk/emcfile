@@ -290,4 +290,7 @@ Zstd uses the portable `hdf5plugin` filter; direct read/write acceleration is
 automatic and falls back to generic h5py when its optional native helpers are
 unavailable. The HDF5 reader and writer use four aggregate workers by default.
 Set `EMCFILE_H5_WRITE_WORKERS` or `EMCFILE_H5_FULL_SCAN_WORKERS` to override
-that budget (reader `0` disables its direct full-scan path).
+that budget (reader `0` disables its direct full-scan path). Four workers is a
+conservative desktop default; eight is a useful HPC starting point for large
+full writes, with little additional benefit expected beyond sixteen workers
+for the benchmarked workloads.
