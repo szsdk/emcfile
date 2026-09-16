@@ -49,26 +49,6 @@ def _compress(values: np.ndarray, chunk_size: int, level: int, state: threading.
     return compressor.compress(memoryview(shuffled))
 
 
-class SharedWriteBudget:
-    """Aggregate bounded pending-work budget for one HDF5 write operation."""
-
-    def __init__(self, workers: int) -> None:
-        self.slots = threading.Semaphore(max(2, workers * 2))
-        self.writers: list[Any] = []
-
-    def register(self, writer: Any) -> None:
-        self.writers.append(writer)
-
-    def acquire(self) -> None:
-        while not self.slots.acquire(blocking=False):
-            # HDF5 commits remain in this caller thread.  Free the oldest
-            # available ordered chunk, regardless of its source dataset.
-            pending = [writer for writer in self.writers if writer.pending]
-            if not pending:
-                raise RuntimeError("shared HDF5 write budget has no pending work")
-            min(pending, key=lambda writer: writer.pending[0][0])._commit_one()
-
-
 class PrefilteredDatasetWriter:
     """Bounded ordered writer for one 32-bit dataset.
 
@@ -77,7 +57,7 @@ class PrefilteredDatasetWriter:
     chunks, preventing five per-dataset queues from multiplying memory.
     """
 
-    def __init__(self, dataset: h5py.Dataset, level: int, workers: int, *, pool: ThreadPoolExecutor | None = None, slots: threading.Semaphore | None = None, budget: SharedWriteBudget | None = None) -> None:
+    def __init__(self, dataset: h5py.Dataset, level: int, workers: int, *, pool: ThreadPoolExecutor | None = None, slots: threading.Semaphore | None = None) -> None:
         if dataset.ndim != 1 or dataset.chunks is None or dataset.dtype.itemsize != 4:
             raise ValueError("direct Zstd writing requires a chunked 1-D 32-bit dataset")
         self.dataset, self.level, self.chunk_size = dataset, level, dataset.chunks[0]
@@ -86,16 +66,11 @@ class PrefilteredDatasetWriter:
         self.pool = pool or ThreadPoolExecutor(max_workers=workers)
         self._owns_pool = pool is None
         self.slots = slots or threading.Semaphore(max(2, workers * 2))
-        self.budget = budget
         self.pending: list[tuple[int, Future[bytes]]] = []
         self.state = threading.local()
-        if budget is not None:
-            budget.register(self)
 
     def _submit(self, values: np.ndarray) -> None:
-        if self.budget is not None:
-            self.budget.acquire()
-        elif not self.slots.acquire(blocking=False):
+        if not self.slots.acquire(blocking=False):
             # During one array write this writer owns at least one queued chunk.
             # The enclosing writer drains after each dataset array, so this never
             # waits behind a different dataset's ordered commit queue.
