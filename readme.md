@@ -277,3 +277,17 @@ uv run ruff check .
 uv run mypy src/emcfile
 uv run pre-commit run --all-files
 ```
+# Installation
+
+The base package supports raw EMC plus uncompressed, gzip, and LZF HDF5.
+For standard-HDF5 Zstd and the automatic HDF5 fast paths, install:
+
+```bash
+pip install 'emcfile[hdf5-fast]'
+```
+
+Zstd uses the portable `hdf5plugin` filter; direct read/write acceleration is
+automatic and falls back to generic h5py when its optional native helpers are
+unavailable. The HDF5 reader and writer use four aggregate workers by default.
+Set `EMCFILE_H5_WRITE_WORKERS` or `EMCFILE_H5_FULL_SCAN_WORKERS` to override
+that budget (reader `0` disables its direct full-scan path).

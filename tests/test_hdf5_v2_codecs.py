@@ -7,6 +7,9 @@ import pytest
 import emcfile as ef
 import emcfile._emc_patterns as implementation
 import emcfile._h5_full_scan as fast
+import emcfile._h5_direct_write as direct
+import emcfile._h5_filters as filters
+from emcfile._h5_workers import effective_workers
 from emcfile._delta import decode_pattern_local_delta, encode_pattern_local_delta
 
 
@@ -58,12 +61,13 @@ def test_direct_layout_is_standard_and_full_scan_falls_back_cleanly(tmp_path: Pa
     assert ef.open_patterns(path)[:] == expected
 
 
-def test_direct_writer_default_workers_is_four(tmp_path: Path, monkeypatch):
-    workers = []
+def test_direct_writer_uses_one_shared_pool_with_default_budget(tmp_path: Path, monkeypatch):
+    workers, pools = [], []
     original = implementation.PrefilteredDatasetWriter
 
     def writer(*args, **kwargs):
         workers.append(args[2])
+        pools.append(kwargs["pool"])
         return original(*args, **kwargs)
 
     monkeypatch.delenv("EMCFILE_H5_WRITE_WORKERS", raising=False)
@@ -72,6 +76,49 @@ def test_direct_writer_default_workers_is_four(tmp_path: Path, monkeypatch):
         tmp_path / "defaults.h5", position_encoding="delta", compression="zstd", shuffle=True
     )
     assert workers == [4] * 5
+    assert len({id(pool) for pool in pools}) == 1
+
+
+def test_effective_workers_honors_affinity(monkeypatch):
+    monkeypatch.setattr("emcfile._h5_workers.os.sched_getaffinity", lambda _pid: {1, 2})
+    assert effective_workers(8) == 2
+    assert effective_workers(0, allow_zero=True) == 0
+
+
+def test_plain_import_is_lazy():
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import sys, emcfile; assert not any(x in sys.modules for x in ('numba', 'zstandard', 'hdf5plugin'))"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_numba_thread_mask_is_restored():
+    numba = pytest.importorskip("numba")
+    from emcfile._delta import encode_pattern_local_delta_parallel
+
+    before = numba.get_num_threads()
+    encode_pattern_local_delta_parallel(np.arange(100, dtype="u4"), [100], max(2, before))
+    assert numba.get_num_threads() == before
+
+
+def test_direct_writer_does_not_select_big_endian(monkeypatch):
+    monkeypatch.setattr(direct.sys, "byteorder", "big")
+    assert not direct.available()
+
+
+def test_zstd_missing_plugin_has_actionable_error(tmp_path: Path, monkeypatch):
+    def unavailable():
+        raise RuntimeError(filters.FAST_EXTRA_MESSAGE)
+
+    monkeypatch.setattr(implementation, "hdf5plugin", unavailable)
+    with pytest.raises(RuntimeError, match="hdf5-fast"):
+        _patterns().write(tmp_path / "no-plugin.h5", compression="zstd")
 
 
 def test_vds_preserves_delta_and_uses_generic_reading(tmp_path: Path, monkeypatch):
