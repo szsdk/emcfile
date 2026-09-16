@@ -48,8 +48,16 @@ def _encode(values: npt.NDArray[np.uint32], offsets: npt.NDArray[np.uint64], enc
         encoded[starts] = values[starts]
 
 
-def decode_segmented_delta_inplace(encoded: npt.NDArray[np.uint32], offsets: npt.NDArray[np.uint64], decoded: npt.NDArray[np.uint32]) -> None:
-    """Decode in place without requiring the optional Numba runtime."""
+def decode_segmented_delta_inplace(encoded: npt.NDArray[np.uint32], offsets: npt.NDArray[np.uint64], decoded: npt.NDArray[np.uint32], *, accelerated: bool = False) -> None:
+    """Decode in place; only direct full scans select the Numba kernel."""
+    if accelerated:
+        try:
+            from ._delta_numba import decode_inplace
+        except ModuleNotFoundError:
+            pass
+        else:
+            decode_inplace(encoded, offsets, decoded)
+            return
     for start, stop in zip(offsets[:-1], offsets[1:]):
         if start < stop:
             begin, end = int(start), int(stop)

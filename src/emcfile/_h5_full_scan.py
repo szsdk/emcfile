@@ -110,7 +110,7 @@ def full_scan(group: Any, ones_offsets: Any, multi_offsets: Any) -> tuple[npt.ND
             out = _read(dataset, pool, workers)
             if offsets is not None:
                 boundaries = np.linspace(0, offsets.size - 1, workers + 1, dtype=np.int64)
-                futures = [pool.submit(decode_segmented_delta_inplace, out, offsets[start:stop + 1], out) for start, stop in zip(boundaries[:-1], boundaries[1:]) if start < stop]
+                futures = [pool.submit(decode_segmented_delta_inplace, out, offsets[start:stop + 1], out, accelerated=True) for start, stop in zip(boundaries[:-1], boundaries[1:]) if start < stop]
                 for future in futures:
                     future.result()
             outputs.append(out)

@@ -19,6 +19,18 @@ def _encode_parallel(values: np.ndarray, offsets: np.ndarray, encoded: np.ndarra
             encoded[start] = values[start]
 
 
+@njit(nogil=True)
+def _decode(encoded: np.ndarray, offsets: np.ndarray, decoded: np.ndarray) -> None:
+    for pattern in range(offsets.size - 1):
+        start, stop = offsets[pattern], offsets[pattern + 1]
+        if start < stop:
+            value = encoded[start]
+            decoded[start] = value
+            for index in range(start + 1, stop):
+                value += encoded[index]
+                decoded[index] = value
+
+
 def encode_parallel(values: np.ndarray, offsets: np.ndarray, encoded: np.ndarray, workers: int) -> None:
     """Run with a temporary Numba thread mask and always restore it."""
     old = get_num_threads()
@@ -27,3 +39,7 @@ def encode_parallel(values: np.ndarray, offsets: np.ndarray, encoded: np.ndarray
         _encode_parallel(values, offsets, encoded)
     finally:
         set_num_threads(old)
+
+
+def decode_inplace(encoded: np.ndarray, offsets: np.ndarray, decoded: np.ndarray) -> None:
+    _decode(encoded, offsets, decoded)
