@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import logging
 import os
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
@@ -30,7 +29,7 @@ from typing_extensions import deprecated
 
 from ._formatting import pretty_size
 from ._delta import encode_pattern_local_delta_parallel
-from ._h5_direct_write import PrefilteredDatasetWriter, available as direct_zstd_available
+from ._h5_direct_write import PrefilteredDatasetWriter, SharedWriteBudget, available as direct_zstd_available
 from ._h5_filters import hdf5plugin
 from ._h5_workers import env_workers
 from ._hdf5 import PATH_TYPE, H5Path, check_remove_groups, make_path
@@ -666,8 +665,12 @@ def _write_h5_v2(
             datasets[name] = fp.create_dataset(name, (size,), dtype=dtype, **dataset_kwargs)
         fp.attrs.update(num_pix=num_pix, num_data=num_data, version="2", position_encoding=position_encoding)
         pool = ThreadPoolExecutor(max_workers=workers) if direct_zstd else None
-        slots = threading.Semaphore(max(2, workers * 2)) if direct_zstd else None
-        writers = {name: PrefilteredDatasetWriter(dataset, 1 if compression_opts is None else int(compression_opts), workers, pool=pool, slots=slots) for name, dataset in datasets.items()} if direct_zstd else None
+        budget = SharedWriteBudget(workers) if direct_zstd else None
+        if direct_zstd:
+            assert budget is not None
+            writers = {name: PrefilteredDatasetWriter(dataset, 1 if compression_opts is None else int(compression_opts), workers, pool=pool, slots=budget.slots, budget=budget) for name, dataset in datasets.items()}
+        else:
+            writers = None
         offsets = {name: 0 for name in names}
         try:
             for data in datas:
@@ -687,7 +690,6 @@ def _write_h5_v2(
                             offsets[name] += array.size
                         else:
                             writers[name].write(array)
-                            writers[name].drain()
         finally:
             if writers is not None:
                 for writer in writers.values():
