@@ -11,6 +11,9 @@ from typing import Any
 import h5py
 import numpy as np
 
+_shuffle_kernel: Any | None = None
+_shuffle_lock = threading.Lock()
+
 
 def available() -> bool:
     """Whether all optional direct-write acceleration is installed."""
@@ -25,8 +28,24 @@ def _compress(values: np.ndarray, chunk_size: int, level: int, state: threading.
     if compressor is None:
         compressor = zstandard.ZstdCompressor(level=level)
         state.compressor = compressor
-    # The HDF5 byte-shuffle order is bytes 0..3 grouped across the elements.
-    shuffled = values.view("u1").reshape(chunk_size, 4).T.reshape(-1)
+    global _shuffle_kernel
+    if _shuffle_kernel is None:
+        with _shuffle_lock:
+            if _shuffle_kernel is None:
+                from numba import njit
+
+                @njit(nogil=True)
+                def shuffle(source: Any, output: Any, size: int) -> None:
+                    for index in range(size):
+                        value = source[index]
+                        output[index] = value & np.uint32(0xFF)
+                        output[size + index] = (value >> np.uint32(8)) & np.uint32(0xFF)
+                        output[2 * size + index] = (value >> np.uint32(16)) & np.uint32(0xFF)
+                        output[3 * size + index] = (value >> np.uint32(24)) & np.uint32(0xFF)
+
+                _shuffle_kernel = shuffle
+    shuffled = np.empty(chunk_size * 4, dtype="u1")
+    _shuffle_kernel(values, shuffled, chunk_size)
     return compressor.compress(memoryview(shuffled))
 
 
