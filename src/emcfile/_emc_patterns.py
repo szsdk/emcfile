@@ -677,8 +677,8 @@ def _write_h5_v2(
                     assert isinstance(batch, PatternsSOne)
                     arrays = {
                         "ones": np.asarray(batch.ones), "multi": np.asarray(batch.multi),
-                        "place_ones": encode_pattern_local_delta_parallel(batch.place_ones, batch.ones, workers, check_sorted=check_sorted) if position_encoding == "delta" else np.asarray(batch.place_ones),
-                        "place_multi": encode_pattern_local_delta_parallel(batch.place_multi, batch.multi, workers, check_sorted=check_sorted) if position_encoding == "delta" else np.asarray(batch.place_multi),
+                        "place_ones": encode_pattern_local_delta_parallel(batch.place_ones, batch.ones, workers, check_sorted=check_sorted, accelerated=direct_zstd) if position_encoding == "delta" else np.asarray(batch.place_ones),
+                        "place_multi": encode_pattern_local_delta_parallel(batch.place_multi, batch.multi, workers, check_sorted=check_sorted, accelerated=direct_zstd) if position_encoding == "delta" else np.asarray(batch.place_multi),
                         "count_multi": np.asarray(batch.count_multi),
                     }
                     for name, array in arrays.items():

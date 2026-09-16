@@ -64,21 +64,29 @@ def decode_segmented_delta_inplace(encoded: npt.NDArray[np.uint32], offsets: npt
             decoded[begin:end] = np.cumsum(encoded[begin:end], dtype=np.uint32)
 
 
-def encode_pattern_local_delta(values: npt.ArrayLike, counts: npt.ArrayLike, *, check_sorted: bool = False) -> npt.NDArray[np.uint32]:
+def encode_pattern_local_delta(values: npt.ArrayLike, counts: npt.ArrayLike, *, check_sorted: bool = False, accelerated: bool = False) -> npt.NDArray[np.uint32]:
     values, offsets = _values(values), _offsets(counts)
     if int(offsets[-1]) != values.size:
         raise ValueError("pattern counts do not match the number of values")
     if check_sorted:
         _check(values, offsets)
     encoded = np.empty_like(values)
-    _encode(values, offsets, encoded)
+    if accelerated:
+        try:
+            from ._delta_numba import encode_serial
+        except ModuleNotFoundError:
+            _encode(values, offsets, encoded)
+        else:
+            encode_serial(values, offsets, encoded)
+    else:
+        _encode(values, offsets, encoded)
     return encoded
 
 
-def encode_pattern_local_delta_parallel(values: npt.ArrayLike, counts: npt.ArrayLike, workers: int, *, check_sorted: bool = False) -> npt.NDArray[np.uint32]:
+def encode_pattern_local_delta_parallel(values: npt.ArrayLike, counts: npt.ArrayLike, workers: int, *, check_sorted: bool = False, accelerated: bool = False) -> npt.NDArray[np.uint32]:
     """Use optional Numba kernels, falling back to the reference transform."""
     if workers <= 1:
-        return encode_pattern_local_delta(values, counts, check_sorted=check_sorted)
+        return encode_pattern_local_delta(values, counts, check_sorted=check_sorted, accelerated=accelerated)
     values, offsets = _values(values), _offsets(counts)
     if int(offsets[-1]) != values.size:
         raise ValueError("pattern counts do not match the number of values")

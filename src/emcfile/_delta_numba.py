@@ -20,6 +20,19 @@ def _encode_parallel(values: np.ndarray, offsets: np.ndarray, encoded: np.ndarra
 
 
 @njit(nogil=True)
+def _encode_serial(values: np.ndarray, offsets: np.ndarray, encoded: np.ndarray) -> None:
+    if values.size == 0:
+        return
+    encoded[0] = values[0]
+    for index in range(1, values.size):
+        encoded[index] = values[index] - values[index - 1]
+    for pattern in range(offsets.size - 1):
+        start, stop = offsets[pattern], offsets[pattern + 1]
+        if start < stop:
+            encoded[start] = values[start]
+
+
+@njit(nogil=True)
 def _decode(encoded: np.ndarray, offsets: np.ndarray, decoded: np.ndarray) -> None:
     for pattern in range(offsets.size - 1):
         start, stop = offsets[pattern], offsets[pattern + 1]
@@ -43,3 +56,7 @@ def encode_parallel(values: np.ndarray, offsets: np.ndarray, encoded: np.ndarray
 
 def decode_inplace(encoded: np.ndarray, offsets: np.ndarray, decoded: np.ndarray) -> None:
     _decode(encoded, offsets, decoded)
+
+
+def encode_serial(values: np.ndarray, offsets: np.ndarray, encoded: np.ndarray) -> None:
+    _encode_serial(values, offsets, encoded)
