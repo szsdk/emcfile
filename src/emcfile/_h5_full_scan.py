@@ -15,10 +15,23 @@ from ._delta import decode_segmented_delta_inplace
 from ._h5_workers import env_workers
 
 MIN_FULL_SCAN_BYTES = 8 * 1024**2
+_unshuffle_kernel: Any | None = None
 
 
 def _unshuffle_u32(src: Any, dst: Any, n: int) -> None:
-    dst[:] = np.frombuffer(src.reshape(4, n).T.reshape(-1).tobytes(), dtype="<u4")[: dst.size]
+    """Use Numba only once the eligible direct path is actually selected."""
+    global _unshuffle_kernel
+    if _unshuffle_kernel is None:
+        from numba import njit
+
+        @njit(nogil=True)
+        def kernel(source: Any, output: Any, size: int) -> None:
+            for index in range(output.size):
+                output[index] = (np.uint32(source[index]) | (np.uint32(source[size + index]) << 8)
+                                 | (np.uint32(source[2 * size + index]) << 16) | (np.uint32(source[3 * size + index]) << 24))
+
+        _unshuffle_kernel = kernel
+    _unshuffle_kernel(src, dst, n)
 
 
 def _eligible_dataset(dataset: h5py.Dataset) -> bool:
