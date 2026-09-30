@@ -394,20 +394,61 @@ class PatternsSOne:
         raise ValueError(f"Do not support axis={axis}.")
 
     def _get_subdataset0(self, i: npt.NDArray[np.integer[Any]]) -> PatternsSOne:
-        if len(i) == 0:
+        if i.ndim != 1:
+            raise IndexError("row indices must be one-dimensional")
+        if i.size == 0:
             return _zeros((0, self.num_pix))
-        c = contiguous_ranges(i)
-        multi_s = self.multi_idx[c]
-        return PatternsSOne(
-            num_pix=self.num_pix,
-            ones=self.ones[i],
-            place_ones=np.concatenate(
-                [self.place_ones[s:e] for s, e in self.ones_idx[c]]
-            ),
-            multi=self.multi[i],
-            place_multi=np.concatenate([self.place_multi[s:e] for s, e in multi_s]),
-            count_multi=np.concatenate([self.count_multi[s:e] for s, e in multi_s]),
+        if np.any(i >= self.num_data) or (
+            np.issubdtype(i.dtype, np.signedinteger) and np.any(i < -self.num_data)
+        ):
+            raise IndexError("row index out of range")
+        ids = i.astype(np.intp, copy=True)
+        ids[ids < 0] += self.num_data
+        ones = self.ones[ids]
+        multi = self.multi[ids]
+        num_ones = int(np.sum(ones, dtype=np.uint64))
+        num_multi = int(np.sum(multi, dtype=np.uint64))
+        result = PatternsSOne(
+            self.num_pix,
+            ones,
+            multi,
+            np.empty(num_ones, dtype=np.uint32),
+            np.empty(num_multi, dtype=np.uint32),
+            np.empty(num_multi, dtype=np.int32),
         )
+        try:
+            from ._row_gather_numba import gather_rows
+        except ModuleNotFoundError:
+            ranges = contiguous_ranges(ids)
+            ones_ranges = self.ones_idx[ranges]
+            multi_ranges = self.multi_idx[ranges]
+            np.concatenate(
+                [self.place_ones[start:stop] for start, stop in ones_ranges],
+                out=result.place_ones,
+            )
+            np.concatenate(
+                [self.place_multi[start:stop] for start, stop in multi_ranges],
+                out=result.place_multi,
+            )
+            np.concatenate(
+                [self.count_multi[start:stop] for start, stop in multi_ranges],
+                out=result.count_multi,
+            )
+        else:
+            gather_rows(
+                ids,
+                self.ones_idx,
+                self.multi_idx,
+                self.place_ones,
+                self.place_multi,
+                self.count_multi,
+                result.ones_idx,
+                result.multi_idx,
+                result.place_ones,
+                result.place_multi,
+                result.count_multi,
+            )
+        return result
 
     @overload
     def __getitem__(self, index: int | np.integer) -> npt.NDArray[np.int32]: ...
@@ -426,13 +467,17 @@ class PatternsSOne:
             case int() | np.integer():
                 return self._get_pattern(int(index))
             case np.ndarray() if np.issubdtype(index.dtype, bool):
+                if index.ndim != 1 or index.size != self.num_data:
+                    raise IndexError("Boolean row mask must match the number of patterns")
                 return self._get_subdataset0(np.where(index)[0])
             case np.ndarray() if np.issubdtype(index.dtype, np.integer):
                 return self._get_subdataset0(cast(npt.NDArray[np.integer[Any]], index))
             case slice() if index.step is None or index.step == 1:
                 return self._get_contiguous_rows(index)
             case slice():
-                return self._get_subdataset((index,))
+                return self._get_subdataset0(
+                    np.arange(*index.indices(self.num_data), dtype=np.intp)
+                )
             case _:
                 return self._get_subdataset(index)
 

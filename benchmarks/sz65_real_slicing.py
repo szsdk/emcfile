@@ -1,8 +1,8 @@
-"""Paired pre-/post-SZ-65 in-memory selection benchmark on a real EMC file.
+"""Paired legacy/current in-memory selection benchmark on a real EMC file.
 
-The old contiguous-slice implementation remains available as
-``PatternsSOne._get_subdataset((slice,))``. Other selectors use the same code
-in both revisions, so their paired timings are controls, not an optimization.
+The old CSR slice implementation remains available as
+``PatternsSOne._get_subdataset((slice,))``. The former index-array path is
+reproduced below so this script stays useful after the row-gather optimization.
 
 Example:
     PYTHONPATH=src python benchmarks/sz65_real_slicing.py DATA.emc
@@ -14,17 +14,39 @@ import argparse
 import gc
 import json
 import statistics
+import sys
 import time
 import tracemalloc
 
 import numpy as np
 
 from emcfile import PatternsSOne, patterns
+from emcfile._indexing import contiguous_ranges
+
+
+def legacy_indexed(source: PatternsSOne, ids: np.ndarray) -> PatternsSOne:
+    if len(ids) == 0:
+        return patterns(source.num_pix)
+    ranges = contiguous_ranges(ids)
+    ones_ranges = source.ones_idx[ranges]
+    multi_ranges = source.multi_idx[ranges]
+    return PatternsSOne(
+        source.num_pix,
+        source.ones[ids],
+        source.multi[ids],
+        np.concatenate([source.place_ones[s:e] for s, e in ones_ranges]),
+        np.concatenate([source.place_multi[s:e] for s, e in multi_ranges]),
+        np.concatenate([source.count_multi[s:e] for s, e in multi_ranges]),
+    )
 
 
 def legacy_select(source: PatternsSOne, selector):
     if isinstance(selector, slice):
         return source._get_subdataset((selector,))
+    if isinstance(selector, np.ndarray):
+        return legacy_indexed(
+            source, np.flatnonzero(selector) if selector.dtype == bool else selector
+        )
     return source[selector]
 
 
@@ -57,9 +79,12 @@ def main() -> None:
     parser.add_argument("path", help="raw EMC source; loading is excluded from timing")
     parser.add_argument("--repetitions", type=int, default=7)
     parser.add_argument("--cases", nargs="+", help="run only named cases")
+    parser.add_argument("--disable-numba", action="store_true")
     args = parser.parse_args()
     if args.repetitions < 3:
         parser.error("--repetitions must be at least 3")
+    if args.disable_numba:
+        sys.modules["emcfile._row_gather_numba"] = None
 
     load_start = time.perf_counter()
     source = patterns(args.path)

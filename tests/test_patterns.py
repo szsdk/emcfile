@@ -228,10 +228,68 @@ def test_contiguous_row_slice_uses_views_without_csr(small_patterns, rows, monke
     )
 
 
-def test_noncontiguous_and_column_slices_keep_existing_path(small_patterns):
+@pytest.mark.parametrize(
+    "rows",
+    [
+        slice(None, None, 2),
+        slice(27, 3, -3),
+        slice(None, None, -1),
+        np.array([8, 2, 8, -1, 0]),
+        np.array([], dtype=np.int64),
+        np.array([31, 0, 1], dtype=np.uint64),
+        np.arange(32) % 3 == 0,
+    ],
+)
+def test_noncontiguous_rows_do_not_build_csr(small_patterns, rows, monkeypatch):
+    expected = np.atleast_2d(small_patterns.todense())[rows]
+
+    def fail_if_csr_is_built(*args, **kwargs):
+        raise AssertionError("row selection built a CSR array")
+
+    monkeypatch.setattr(small_patterns, "_get_sparse_ones", fail_if_csr_is_built)
+    monkeypatch.setattr(small_patterns, "_get_sparse_multi", fail_if_csr_is_built)
+    selected = small_patterns[rows]
+    assert selected.check()
+    np.testing.assert_array_equal(np.atleast_2d(selected.todense()), expected)
+
+
+def test_noncontiguous_rows_without_numba(small_patterns, monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "emcfile._row_gather_numba", None)
+    rows = np.array([4, 1, -1, 4])
+    selected = small_patterns[rows]
     np.testing.assert_array_equal(
-        small_patterns[::2].todense(), np.atleast_2d(small_patterns.todense())[::2]
+        np.atleast_2d(selected.todense()),
+        np.atleast_2d(small_patterns.todense())[rows],
     )
+
+
+@pytest.mark.parametrize("disable_numba", [False, True])
+def test_noncontiguous_rows_with_no_events(monkeypatch, disable_numba):
+    import sys
+
+    if disable_numba:
+        monkeypatch.setitem(sys.modules, "emcfile._row_gather_numba", None)
+    source = ef.patterns(((4, 8), 0))
+    selected = source[np.array([3, 0, 3])]
+    assert selected.check()
+    assert selected.shape == (3, 8)
+    assert selected.place_ones.size == selected.place_multi.size == 0
+
+
+def test_noncontiguous_index_validation(small_patterns):
+    with pytest.raises(IndexError):
+        small_patterns[np.array([32])]
+    with pytest.raises(IndexError):
+        small_patterns[np.array([-33])]
+    with pytest.raises(IndexError):
+        small_patterns[np.array([True, False])]
+    with pytest.raises(IndexError):
+        small_patterns[np.array([np.iinfo(np.uint64).max])]
+
+
+def test_column_slice_keeps_existing_path(small_patterns):
     np.testing.assert_array_equal(
         small_patterns[:, 1:3].todense(),
         np.atleast_2d(small_patterns.todense())[:, 1:3],

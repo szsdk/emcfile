@@ -106,6 +106,14 @@ combined = np.concatenate([patterns, patterns])
 projection = patterns @ np.ones((patterns.num_pixels, 3))
 ```
 
+For an in-memory `EMCPatternArray`, contiguous row slices are views of the
+event arrays. Strided row slices, 1D integer indices, and Boolean row masks
+gather the selected events without constructing SciPy CSR arrays; these
+selections are copies and preserve index order and duplicates. Numba accelerates
+the gather when installed, with a NumPy fallback otherwise. The first
+Numba-backed selection may include a one-time compilation delay. Column
+selections still use the SciPy path.
+
 To write several arrays or file-backed sources as one dataset, use
 `write_patterns()`:
 
