@@ -74,6 +74,30 @@ def paired_times(old, new, repetitions: int) -> tuple[list[float], list[float]]:
     return times
 
 
+def make_cases(rows: int):
+    middle = rows // 2
+    random = np.random.default_rng(65)
+    ids = random.choice(rows, size=min(256, rows), replace=False)
+    ids_1000 = random.choice(rows, size=min(1000, rows), replace=False)
+    ids_20pct = np.sort(random.choice(rows, size=max(1, rows // 5), replace=False))
+    mask = np.zeros(rows, dtype=bool)
+    mask[ids] = True
+    contiguous_rows = min(1024, rows // 2)
+    return {
+        "contiguous_16": slice(middle, middle + 16),
+        "contiguous_1024": slice(middle, middle + contiguous_rows),
+        "stride_2_256": slice(middle, middle + 512, 2),
+        "stride_2_as_ids": np.arange(middle, middle + 512, 2),
+        "sorted_ids_256": np.sort(ids),
+        "random_ids_256": ids,
+        "mask_256": mask,
+        "sorted_ids_1000": np.sort(ids_1000),
+        "random_ids_1000": ids_1000,
+        "sorted_ids_20pct": ids_20pct,
+        "row_and_columns": (slice(middle, middle + 16), slice(0, 1024)),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", help="raw EMC source; loading is excluded from timing")
@@ -89,28 +113,7 @@ def main() -> None:
     load_start = time.perf_counter()
     source = patterns(args.path)
     load_seconds = time.perf_counter() - load_start
-    rows = len(source)
-    middle = rows // 2
-    random = np.random.default_rng(65)
-    ids = random.choice(rows, size=min(256, rows), replace=False)
-    ids_1000 = random.choice(rows, size=min(1000, rows), replace=False)
-    ids_20pct = np.sort(random.choice(rows, size=max(1, rows // 5), replace=False))
-    mask = np.zeros(rows, dtype=bool)
-    mask[ids] = True
-    contiguous_rows = min(1024, rows // 2)
-    cases = {
-        "contiguous_16": slice(middle, middle + 16),
-        "contiguous_1024": slice(middle, middle + contiguous_rows),
-        "stride_2_256": slice(middle, middle + 512, 2),
-        "stride_2_as_ids": np.arange(middle, middle + 512, 2),
-        "sorted_ids_256": np.sort(ids),
-        "random_ids_256": ids,
-        "mask_256": mask,
-        "sorted_ids_1000": np.sort(ids_1000),
-        "random_ids_1000": ids_1000,
-        "sorted_ids_20pct": ids_20pct,
-        "row_and_columns": (slice(middle, middle + 16), slice(0, 1024)),
-    }
+    cases = make_cases(len(source))
     if args.cases:
         unknown = set(args.cases) - cases.keys()
         if unknown:
