@@ -334,6 +334,22 @@ class PatternsSOne:
             sm.data,
         )
 
+    def _get_contiguous_rows(self, rows: slice) -> PatternsSOne:
+        """Select rows using native EMC offsets without materializing CSR arrays."""
+        start, stop, _ = rows.indices(self.num_data)
+        # A forward slice with start > stop is empty, not a reversed event span.
+        stop = max(start, stop)
+        ones_start, ones_stop = int(self.ones_idx[start]), int(self.ones_idx[stop])
+        multi_start, multi_stop = int(self.multi_idx[start]), int(self.multi_idx[stop])
+        return PatternsSOne(
+            self.num_pix,
+            self.ones[start:stop],
+            self.multi[start:stop],
+            self.place_ones[ones_start:ones_stop],
+            self.place_multi[multi_start:multi_stop],
+            self.count_multi[multi_start:multi_stop],
+        )
+
     def __pow__(self, n: int) -> PatternsSOne:
         if not isinstance(n, int):
             raise TypeError(f"n should be int, not {type(n)}")
@@ -413,6 +429,8 @@ class PatternsSOne:
                 return self._get_subdataset0(np.where(index)[0])
             case np.ndarray() if np.issubdtype(index.dtype, np.integer):
                 return self._get_subdataset0(cast(npt.NDArray[np.integer[Any]], index))
+            case slice() if index.step is None or index.step == 1:
+                return self._get_contiguous_rows(index)
             case slice():
                 return self._get_subdataset((index,))
             case _:

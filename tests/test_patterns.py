@@ -174,6 +174,70 @@ def test_getitem(large_patterns, large_dense):
         assert np.all(large_patterns[indices].todense() == large_dense[indices])
 
 
+@pytest.mark.parametrize(
+    "rows",
+    [
+        slice(None),
+        slice(2, 8),
+        slice(-9, -2),
+        slice(None, 5),
+        slice(25, None),
+        slice(-100, 100),
+        slice(10, 10),
+        slice(12, 3),
+        slice(100, 120),
+        slice(None, None, 1),
+    ],
+)
+def test_contiguous_row_slice_uses_views_without_csr(small_patterns, rows, monkeypatch):
+    expected_csr = small_patterns._get_subdataset((rows,))
+
+    def fail_if_csr_is_built(*args, **kwargs):
+        raise AssertionError("contiguous row slice built a CSR array")
+
+    monkeypatch.setattr(small_patterns, "_get_sparse_ones", fail_if_csr_is_built)
+    monkeypatch.setattr(small_patterns, "_get_sparse_multi", fail_if_csr_is_built)
+
+    selected = small_patterns[rows]
+    assert selected == expected_csr
+    start, stop, _ = rows.indices(len(small_patterns))
+    stop = max(start, stop)
+    assert selected.check()
+    assert selected.shape == (stop - start, small_patterns.num_pix)
+    for name in small_patterns.ATTRS:
+        if name in ("ones", "multi"):
+            expected = getattr(small_patterns, name)[start:stop]
+        else:
+            offsets = (
+                small_patterns.ones_idx
+                if name == "place_ones"
+                else small_patterns.multi_idx
+            )
+            expected = getattr(small_patterns, name)[
+                int(offsets[start]) : int(offsets[stop])
+            ]
+        actual = getattr(selected, name)
+        np.testing.assert_array_equal(actual, expected)
+        if actual.size:
+            assert np.shares_memory(actual, getattr(small_patterns, name))
+    np.testing.assert_array_equal(
+        selected.ones_idx, np.r_[0, np.cumsum(selected.ones, dtype=np.uint64)]
+    )
+    np.testing.assert_array_equal(
+        selected.multi_idx, np.r_[0, np.cumsum(selected.multi, dtype=np.uint64)]
+    )
+
+
+def test_noncontiguous_and_column_slices_keep_existing_path(small_patterns):
+    np.testing.assert_array_equal(
+        small_patterns[::2].todense(), np.atleast_2d(small_patterns.todense())[::2]
+    )
+    np.testing.assert_array_equal(
+        small_patterns[:, 1:3].todense(),
+        np.atleast_2d(small_patterns.todense())[:, 1:3],
+    )
+
+
 def test_concatenate(small_patterns, large_patterns):
     pattern_arrays = [ef.patterns(large_patterns.num_pixels)] + [
         ef.patterns(large_patterns, start=i * 10, end=(i + 1) * 10) for i in range(5)
