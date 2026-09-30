@@ -237,7 +237,7 @@ class PatternsSOneFile:
         index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
     ) -> npt.NDArray[np.int32] | PatternsSOne:
         match index:
-            case (ax0, ax1):
+            case (ax0, ax1) if isinstance(index, tuple):
                 return self[ax0][:, ax1]
             case int() | np.integer():
                 index_ranges = np.array([[index, index + 1]])
@@ -545,6 +545,11 @@ class PatternsSOneH5(PatternsSOneFile):
                 result = full_scan(gp, self.ones_idx, self.multi_idx)
                 if result is not None:
                     return result
+            elif self.position_encoding == "delta":
+                from ._h5_indexed import indexed_read
+                result = indexed_read(gp, index_ranges, self.ones_idx, self.multi_idx)
+                if result is not None:
+                    return result
             place_ones = read_indexed_array_h5(
                 cast(h5py.Dataset, gp["place_ones"]), index_ranges, self.ones_idx
             )
@@ -619,6 +624,11 @@ class PatternsSOneH5ReadBuffer(PatternsSOneH5):
         if self.position_encoding == "delta" and np.array_equal(index_ranges, [[0, self.num_data]]):
             from ._h5_full_scan import full_scan
             result = full_scan(gp, self.ones_idx, self.multi_idx)
+            if result is not None:
+                return result
+        elif self.position_encoding == "delta":
+            from ._h5_indexed import indexed_read
+            result = indexed_read(gp, index_ranges, self.ones_idx, self.multi_idx)
             if result is not None:
                 return result
         place_ones = read_indexed_array_h5(

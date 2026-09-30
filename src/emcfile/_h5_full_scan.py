@@ -47,6 +47,31 @@ def _eligible_dataset(dataset: h5py.Dataset) -> bool:
     return shuffle[0] == 2 and shuffle[2] == (4,) and zstd[0] == 32015 and dataset.id.get_num_chunks() == (dataset.size + n - 1) // n
 
 
+def _decode_chunk(
+    mask: int, payload: bytes, n: int, *, decoder: Any = None, output: Any = None
+) -> npt.NDArray[np.uint32]:
+    """Decode the exact two-filter layout, respecting per-chunk skip bits."""
+    import zstandard
+
+    if mask & ~3:
+        raise ValueError("Unexpected HDF5 v2 chunk filter mask")
+    if decoder is None:
+        decoder = zstandard.ZstdDecompressor()
+    raw = payload if mask & 2 else decoder.decompress(payload, max_output_size=n * 4)
+    if len(raw) != n * 4:
+        raise ValueError("Unexpected HDF5 v2 decoded chunk length")
+    if mask & 1:
+        values = np.frombuffer(raw, "<u4")
+        if output is None:
+            return values
+        output[:] = values[:output.size]
+        return output
+    if output is None:
+        output = np.empty(n, "u4")
+    _unshuffle_u32(np.frombuffer(raw, "u1"), output, n)
+    return output
+
+
 def eligible(group: Any) -> bool:
     """Whether *group* uses the exact portable physical layout we own."""
     names = ("place_ones", "place_multi", "count_multi")
@@ -63,16 +88,8 @@ def _read(dataset: h5py.Dataset, pool: ThreadPoolExecutor, workers: int) -> npt.
         import zstandard
         decoder = zstandard.ZstdDecompressor()
         for start, mask, payload in batch:
-            if mask & ~3:
-                raise ValueError("Unexpected HDF5 v2 chunk filter mask")
-            raw = payload if mask & 2 else decoder.decompress(payload, max_output_size=n * 4)
-            if len(raw) != n * 4:
-                raise ValueError("Unexpected HDF5 v2 decoded chunk length")
             dst = out[start : min(start + n, out.size)]
-            if mask & 1:
-                dst[:] = np.frombuffer(raw, "<u4")[:dst.size]
-            else:
-                _unshuffle_u32(np.frombuffer(raw, "u1"), dst, n)
+            _decode_chunk(mask, payload, n, decoder=decoder, output=dst)
     pending, batch = [], []
     batch_size = max(1, min(64, 4 * 1024**2 // (n * 4)))
     for start in range(0, out.size, n):
