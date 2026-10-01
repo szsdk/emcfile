@@ -109,10 +109,16 @@ projection = patterns @ np.ones((patterns.num_pixels, 3))
 For an in-memory `EMCPatternArray`, contiguous row slices are views of the
 event arrays. Strided row slices, 1D integer indices, and Boolean row masks
 gather the selected events without constructing SciPy CSR arrays; these
-selections are copies and preserve index order and duplicates. Numba accelerates
-the gather when installed, with a NumPy fallback otherwise. The first
-Numba-backed selection may include a one-time compilation delay. Column
-selections still use the SciPy path.
+selections are NumPy copies and preserve index order and duplicates, with no
+JIT compilation. Column selections use SciPy CSR; large event arrays are
+processed in bounded chunks to keep indices within signed int32 limits.
+Each chunk contains at most one billion events per event stream (approximately
+4 GiB of indices); memory also includes the selected output and its assembly.
+Combined selections with at least one slice gather or view the requested rows
+first; other advanced selectors retain the general SciPy path. Pure
+NumPy trades some dense-selection speed for a smaller implementation and avoids
+the optional gather kernel's compilation and memory overhead. Numba remains
+an optional dependency for the accelerated HDF5 encoding and decoding paths.
 
 To write several arrays or file-backed sources as one dataset, use
 `write_patterns()`:

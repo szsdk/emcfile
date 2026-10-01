@@ -281,10 +281,9 @@ def test_noncontiguous_rows_do_not_build_csr(small_patterns, rows, monkeypatch):
     np.testing.assert_array_equal(np.atleast_2d(selected.todense()), expected)
 
 
-def test_noncontiguous_rows_without_numba(small_patterns, monkeypatch):
-    import sys
-
-    monkeypatch.setitem(sys.modules, "emcfile._row_gather_numba", None)
+def test_noncontiguous_rows_preserve_readonly_inputs(small_patterns):
+    for name in small_patterns.ATTRS:
+        getattr(small_patterns, name).flags.writeable = False
     rows = np.array([4, 1, -1, 4])
     selected = small_patterns[rows]
     np.testing.assert_array_equal(
@@ -293,12 +292,7 @@ def test_noncontiguous_rows_without_numba(small_patterns, monkeypatch):
     )
 
 
-@pytest.mark.parametrize("disable_numba", [False, True])
-def test_noncontiguous_rows_with_no_events(monkeypatch, disable_numba):
-    import sys
-
-    if disable_numba:
-        monkeypatch.setitem(sys.modules, "emcfile._row_gather_numba", None)
+def test_noncontiguous_rows_with_no_events():
     source = ef.patterns(((4, 8), 0))
     selected = source[np.array([3, 0, 3])]
     assert selected.check()
@@ -335,16 +329,88 @@ def test_chunked_column_slice_matches_csr(small_patterns, rows, columns):
     assert actual.check()
 
 
-def test_chunked_column_slice_handles_readonly_event_arrays(small_patterns):
+@pytest.mark.parametrize("position_dtype", [np.uint32, np.int32])
+def test_chunked_column_slice_handles_readonly_event_arrays(
+    small_patterns, position_dtype
+):
     source = copy.copy(small_patterns)
-    source.place_ones = source.place_ones.view()
-    source.place_multi = source.place_multi.view()
+    source.place_ones = source.place_ones.view(position_dtype)
+    source.place_multi = source.place_multi.view(position_dtype)
     source.place_ones.flags.writeable = False
     source.place_multi.flags.writeable = False
     actual = source._get_chunked_column_slice(
         slice(None), slice(None, 2), event_budget=8
     )
     assert actual == source._get_subdataset((slice(None), slice(None, 2)))
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        slice(2, 25),
+        slice(None, None, 3),
+        np.array([8, -1, 8, 2]),
+        np.arange(32) % 3 == 0,
+    ],
+)
+@pytest.mark.parametrize(
+    "columns", [slice(None, None, -1), slice(0, 0), slice(None, None, 2)]
+)
+def test_combined_selection_avoids_source_csr(
+    small_patterns, rows, columns, monkeypatch
+):
+    # Some SciPy versions cannot combine fancy rows with strided columns.
+    selected_rows = small_patterns._get_subdataset((rows,))
+    expected = selected_rows._get_subdataset((slice(None), columns))
+
+    def fail(*args, **kwargs):
+        raise AssertionError("combined selection built a full-source CSR")
+
+    monkeypatch.setattr(small_patterns, "_get_sparse_ones", fail)
+    monkeypatch.setattr(small_patterns, "_get_sparse_multi", fail)
+    assert small_patterns[rows, columns] == expected
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [
+        np.array([2, -1, 2, 0]),
+        np.array([True, False, True, False]),
+        np.array([], dtype=np.int64),
+        slice(None, None, -1),
+    ],
+)
+def test_chunked_columns_general_selectors(small_patterns, columns):
+    expected = small_patterns._get_subdataset((slice(None), columns))
+    actual = small_patterns._get_chunked_column_slice(
+        slice(None), columns, event_budget=8
+    )
+    assert actual == expected
+
+
+@pytest.mark.parametrize("columns", [np.array([4]), np.array([-5]), np.array([True])])
+def test_empty_rows_validate_columns(small_patterns, columns):
+    with pytest.raises(IndexError):
+        small_patterns[0:0, columns]
+
+
+def test_chunked_csr_does_not_copy_event_index_views(small_patterns, monkeypatch):
+    import emcfile._emc_patterns as implementation
+
+    original = implementation.csr_array
+
+    def checked_csr(args, **kwargs):
+        result = original(args, **kwargs)
+        assert result.indices.dtype == result.indptr.dtype == np.int32
+        if result.indices.size > 1:
+            assert np.shares_memory(result.indices, args[1])
+            assert np.shares_memory(result.data, args[0])
+        return result
+
+    monkeypatch.setattr(implementation, "csr_array", checked_csr)
+    small_patterns._get_chunked_column_slice(
+        slice(None), slice(None, 2), event_budget=8
+    )
 
 
 def test_concatenate(small_patterns, large_patterns):

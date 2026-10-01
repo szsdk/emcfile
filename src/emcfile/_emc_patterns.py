@@ -335,16 +335,35 @@ class PatternsSOne:
         )
 
     def _get_chunked_column_slice(
-        self, rows: slice, columns: slice, *, event_budget: int = 1_000_000_000
+        self, rows: slice, columns: TRANGE, *, event_budget: int = 1_000_000_000
     ) -> PatternsSOne:
         """Select columns with bounded int32 CSR chunks from contiguous rows."""
         row_start, row_stop, _ = rows.indices(self.num_data)
         row_stop = max(row_start, row_stop)
-        if row_start == row_stop:
-            return self._get_subdataset((rows, columns))
         if not 0 < event_budget <= np.iinfo(np.int32).max:
             raise ValueError("event_budget must fit signed int32")
-        column_count = len(range(*columns.indices(self.num_pix)))
+        if isinstance(columns, slice):
+            column_count = len(range(*columns.indices(self.num_pix)))
+        else:
+            if columns.ndim != 1:
+                raise IndexError("column indices must be one-dimensional")
+            if np.issubdtype(columns.dtype, np.bool_):
+                if columns.size != self.num_pix:
+                    raise IndexError(
+                        "Boolean column mask must match the number of pixels"
+                    )
+                column_count = int(np.count_nonzero(columns))
+            else:
+                if not np.issubdtype(columns.dtype, np.integer):
+                    raise IndexError("column indices must be integers or Boolean")
+                if np.any(columns >= self.num_pix) or (
+                    np.issubdtype(columns.dtype, np.signedinteger)
+                    and np.any(columns < -self.num_pix)
+                ):
+                    raise IndexError("column index out of range")
+                column_count = columns.size
+        if row_start == row_stop or column_count == 0:
+            return _zeros((row_stop - row_start, column_count))
         ones_counts: list[np.ndarray] = []
         multi_counts: list[np.ndarray] = []
         ones_places: list[np.ndarray] = []
@@ -358,7 +377,8 @@ class PatternsSOne:
                 stop = min(stop, int(np.searchsorted(offsets, limit, side="right") - 1))
             if stop <= cursor:
                 # A single row exceeds the budget; preserve the general path.
-                return self._get_subdataset((rows, columns))
+                source = self._get_contiguous_rows(rows)
+                return source._get_subdataset((slice(None), columns))
 
             selected = []
             for place, offsets, data in (
@@ -378,7 +398,13 @@ class PatternsSOne:
                         seed, shape=(event_stop - event_start,), strides=(0,)
                     )
                 else:
-                    values = data[event_start:event_stop]
+                    values = (
+                        np.frombuffer(
+                            memoryview(data)[event_start:event_stop], dtype=data.dtype
+                        )
+                        if data.flags.c_contiguous
+                        else data[event_start:event_stop]
+                    )
                 sparse = csr_array(
                     (values, indices, indptr),
                     shape=(stop - cursor, self.num_pix),
@@ -394,13 +420,16 @@ class PatternsSOne:
             multi_values.append(multi.data)
             cursor = stop
 
+        def join(parts: list[np.ndarray]) -> np.ndarray:
+            return parts[0] if len(parts) == 1 else np.concatenate(parts)
+
         return PatternsSOne(
             column_count,
-            np.concatenate(ones_counts),
-            np.concatenate(multi_counts),
-            np.concatenate(ones_places),
-            np.concatenate(multi_places),
-            np.concatenate(multi_values),
+            join(ones_counts),
+            join(multi_counts),
+            join(ones_places),
+            join(multi_places),
+            join(multi_values),
         )
 
     def _get_contiguous_rows(self, rows: slice) -> PatternsSOne:
@@ -485,37 +514,20 @@ class PatternsSOne:
             np.empty(num_multi, dtype=np.uint32),
             np.empty(num_multi, dtype=np.int32),
         )
-        try:
-            from ._row_gather_numba import gather_rows
-        except ModuleNotFoundError:
-            ranges = contiguous_ranges(ids)
-            ones_ranges = self.ones_idx[ranges]
-            multi_ranges = self.multi_idx[ranges]
+        ranges = contiguous_ranges(ids)
+        ones_ranges = self.ones_idx[ranges]
+        multi_ranges = self.multi_idx[ranges]
+        for source, spans, target in (
+            (self.place_ones, ones_ranges, result.place_ones),
+            (self.place_multi, multi_ranges, result.place_multi),
+            (self.count_multi, multi_ranges, result.count_multi),
+        ):
+            # Legacy HDF5 stores positions as signed int32. Valid EMC positions
+            # are nonnegative, so preserve the public uint32 output convention.
             np.concatenate(
-                [self.place_ones[start:stop] for start, stop in ones_ranges],
-                out=result.place_ones,
-            )
-            np.concatenate(
-                [self.place_multi[start:stop] for start, stop in multi_ranges],
-                out=result.place_multi,
-            )
-            np.concatenate(
-                [self.count_multi[start:stop] for start, stop in multi_ranges],
-                out=result.count_multi,
-            )
-        else:
-            gather_rows(
-                ids,
-                self.ones_idx,
-                self.multi_idx,
-                self.place_ones,
-                self.place_multi,
-                self.count_multi,
-                result.ones_idx,
-                result.multi_idx,
-                result.place_ones,
-                result.place_multi,
-                result.count_multi,
+                [source[start:stop] for start, stop in spans],
+                out=target,
+                casting="unsafe",
             )
         return result
 
@@ -532,36 +544,42 @@ class PatternsSOne:
         self,
         index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
     ) -> Union[npt.NDArray[np.int32], PatternsSOne]:
-        if (
-            isinstance(index, tuple)
-            and len(index) == 2
-            and isinstance(index[0], slice)
-            and isinstance(index[1], slice)
-            and index[0].step in (None, 1)
-            and index[1].step in (None, 1)
-            and self.num_pix <= np.iinfo(np.int32).max
-            and self.place_ones.dtype == np.uint32
-            and self.place_multi.dtype == np.uint32
-            and self.place_ones.flags.c_contiguous
-            and self.place_multi.flags.c_contiguous
-            and (
-                int(self.ones_idx[-1]) > np.iinfo(np.int32).max
-                or int(self.multi_idx[-1]) > np.iinfo(np.int32).max
-            )
-        ):
+        if isinstance(index, tuple) and len(index) == 2:
             rows, columns = index
-            row_start, row_stop, _ = rows.indices(self.num_data)
+            # Two fancy selectors have SciPy's paired-index semantics, rather
+            # than a Cartesian product. Keep that existing general path.
             if (
-                row_start < row_stop
-                and len(range(*columns.indices(self.num_pix))) < self.num_pix
+                isinstance(rows, (slice, np.ndarray))
+                and isinstance(columns, (slice, np.ndarray))
+                and (isinstance(rows, slice) or isinstance(columns, slice))
             ):
-                return self._get_chunked_column_slice(rows, columns)
+                if isinstance(rows, slice) and rows.step in (None, 1):
+                    source = self._get_contiguous_rows(rows)
+                else:
+                    source = cast(PatternsSOne, self[rows])
+                if isinstance(columns, slice) and columns.indices(self.num_pix) == (
+                    0,
+                    self.num_pix,
+                    1,
+                ):
+                    return source
+                if (
+                    source.num_pix <= np.iinfo(np.int32).max
+                    and source.place_ones.dtype in (np.dtype(np.uint32), np.dtype(np.int32))
+                    and source.place_multi.dtype in (np.dtype(np.uint32), np.dtype(np.int32))
+                    and source.place_ones.flags.c_contiguous
+                    and source.place_multi.flags.c_contiguous
+                ):
+                    return source._get_chunked_column_slice(slice(None), columns)
+                return source._get_subdataset((slice(None), columns))
         match index:
             case int() | np.integer():
                 return self._get_pattern(int(index))
             case np.ndarray() if np.issubdtype(index.dtype, bool):
                 if index.ndim != 1 or index.size != self.num_data:
-                    raise IndexError("Boolean row mask must match the number of patterns")
+                    raise IndexError(
+                        "Boolean row mask must match the number of patterns"
+                    )
                 return self._get_subdataset0(np.where(index)[0])
             case np.ndarray() if np.issubdtype(index.dtype, np.integer):
                 return self._get_subdataset0(cast(npt.NDArray[np.integer[Any]], index))

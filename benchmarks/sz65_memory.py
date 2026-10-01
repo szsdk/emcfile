@@ -16,7 +16,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import numpy as np
 from psutil import Process
 
 from emcfile import patterns
@@ -33,19 +32,9 @@ def high_water_rss() -> int:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
 
 
-def child(path: str, case: str, method: str, disable_numba: bool) -> None:
-    if disable_numba:
-        sys.modules["emcfile._row_gather_numba"] = None
+def child(path: str, case: str, method: str) -> None:
     source = patterns(path)
     selector = make_cases(len(source))[case]
-    if (
-        method == "new"
-        and not disable_numba
-        and not (isinstance(selector, slice) and selector.step in (None, 1))
-    ):
-        # Load/compile the optional kernel before measuring selection memory.
-        warm = source[np.array([0], dtype=np.intp)]
-        del warm
     gc.collect()
     baseline_rss = rss()
     baseline_hwm = high_water_rss()
@@ -92,10 +81,9 @@ def main() -> None:
     parser.add_argument(
         "--methods", nargs="+", choices=("old", "new"), default=("old", "new")
     )
-    parser.add_argument("--disable-numba", action="store_true")
     args = parser.parse_args()
     if args.child:
-        child(args.path, *args.child, args.disable_numba)
+        child(args.path, *args.child)
         return
 
     print(
@@ -113,8 +101,6 @@ def main() -> None:
                 case,
                 method,
             ]
-            if args.disable_numba:
-                command.append("--disable-numba")
             completed = subprocess.run(
                 command,
                 check=True,

@@ -14,7 +14,6 @@ import argparse
 import gc
 import json
 import statistics
-import sys
 import time
 import tracemalloc
 
@@ -103,12 +102,9 @@ def main() -> None:
     parser.add_argument("path", help="raw EMC source; loading is excluded from timing")
     parser.add_argument("--repetitions", type=int, default=7)
     parser.add_argument("--cases", nargs="+", help="run only named cases")
-    parser.add_argument("--disable-numba", action="store_true")
     args = parser.parse_args()
     if args.repetitions < 3:
         parser.error("--repetitions must be at least 3")
-    if args.disable_numba:
-        sys.modules["emcfile._row_gather_numba"] = None
 
     load_start = time.perf_counter()
     source = patterns(args.path)

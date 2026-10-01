@@ -53,5 +53,9 @@ Reproduce from the repository root with `PYTHONPATH=src` and a scratch-backed
 
 ```bash
 python benchmarks/sz65_memory.py /path/to/dataset.emc
-python benchmarks/sz65_memory.py /path/to/dataset.emc --disable-numba --methods new --cases stride_2_256 random_ids_256 random_ids_1000
+python benchmarks/sz65_memory.py /path/to/dataset.emc --methods new --cases stride_2_256 random_ids_256 random_ids_1000
 ```
+
+The table describes the historical SZ-65 implementation. SZ-68 removed the
+optional row-gather kernel; the current script's `new` mode uses pure NumPy.
+Use the referenced historical commits to reproduce the Numba rows.
