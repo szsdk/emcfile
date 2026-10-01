@@ -334,6 +334,120 @@ class PatternsSOne:
             sm.data,
         )
 
+    def _get_chunked_column_slice(
+        self, rows: slice, columns: TRANGE, *, event_budget: int = 1_000_000_000
+    ) -> PatternsSOne:
+        """Select columns with bounded int32 CSR chunks from contiguous rows."""
+        row_start, row_stop, _ = rows.indices(self.num_data)
+        row_stop = max(row_start, row_stop)
+        if not 0 < event_budget <= np.iinfo(np.int32).max:
+            raise ValueError("event_budget must fit signed int32")
+        if isinstance(columns, slice):
+            column_count = len(range(*columns.indices(self.num_pix)))
+        else:
+            if columns.ndim != 1:
+                raise IndexError("column indices must be one-dimensional")
+            if np.issubdtype(columns.dtype, np.bool_):
+                if columns.size != self.num_pix:
+                    raise IndexError(
+                        "Boolean column mask must match the number of pixels"
+                    )
+                column_count = int(np.count_nonzero(columns))
+            else:
+                if not np.issubdtype(columns.dtype, np.integer):
+                    raise IndexError("column indices must be integers or Boolean")
+                if np.any(columns >= self.num_pix) or (
+                    np.issubdtype(columns.dtype, np.signedinteger)
+                    and np.any(columns < -self.num_pix)
+                ):
+                    raise IndexError("column index out of range")
+                column_count = columns.size
+        if row_start == row_stop or column_count == 0:
+            return _zeros((row_stop - row_start, column_count))
+        ones_counts: list[np.ndarray] = []
+        multi_counts: list[np.ndarray] = []
+        ones_places: list[np.ndarray] = []
+        multi_places: list[np.ndarray] = []
+        multi_values: list[np.ndarray] = []
+        cursor = row_start
+        while cursor < row_stop:
+            stop = min(row_stop, cursor + np.iinfo(np.int32).max)
+            for offsets in (self.ones_idx, self.multi_idx):
+                limit = int(offsets[cursor]) + event_budget
+                stop = min(stop, int(np.searchsorted(offsets, limit, side="right") - 1))
+            if stop <= cursor:
+                # A single row exceeds the budget; preserve the general path.
+                source = self._get_contiguous_rows(rows)
+                return source._get_subdataset((slice(None), columns))
+
+            selected = []
+            for place, offsets, data in (
+                (self.place_ones, self.ones_idx, None),
+                (self.place_multi, self.multi_idx, self.count_multi),
+            ):
+                event_start, event_stop = int(offsets[cursor]), int(offsets[stop])
+                # SciPy copies a normal slice whose base is much larger than
+                # the slice, even with copy=False. Give it a chunk-sized base.
+                indices = np.frombuffer(
+                    memoryview(place)[event_start:event_stop], dtype=np.int32
+                )
+                indptr = (offsets[cursor : stop + 1] - event_start).astype(np.int32)
+                if data is None:
+                    seed = np.ones(1, dtype=np.int32)
+                    values = np.lib.stride_tricks.as_strided(
+                        seed, shape=(event_stop - event_start,), strides=(0,)
+                    )
+                else:
+                    values = (
+                        np.frombuffer(
+                            memoryview(data)[event_start:event_stop], dtype=data.dtype
+                        )
+                        if data.flags.c_contiguous
+                        else data[event_start:event_stop]
+                    )
+                sparse = csr_array(
+                    (values, indices, indptr),
+                    shape=(stop - cursor, self.num_pix),
+                    copy=False,
+                )
+                selected.append(sparse[:, columns])
+
+            ones, multi = selected
+            ones_counts.append(np.diff(ones.indptr).astype(np.uint32))
+            multi_counts.append(np.diff(multi.indptr).astype(np.uint32))
+            ones_places.append(ones.indices.astype(np.uint32))
+            multi_places.append(multi.indices.astype(np.uint32))
+            multi_values.append(multi.data)
+            cursor = stop
+
+        def join(parts: list[np.ndarray]) -> np.ndarray:
+            return parts[0] if len(parts) == 1 else np.concatenate(parts)
+
+        return PatternsSOne(
+            column_count,
+            join(ones_counts),
+            join(multi_counts),
+            join(ones_places),
+            join(multi_places),
+            join(multi_values),
+        )
+
+    def _get_contiguous_rows(self, rows: slice) -> PatternsSOne:
+        """Select rows using native EMC offsets without materializing CSR arrays."""
+        start, stop, _ = rows.indices(self.num_data)
+        # A forward slice with start > stop is empty, not a reversed event span.
+        stop = max(start, stop)
+        ones_start, ones_stop = int(self.ones_idx[start]), int(self.ones_idx[stop])
+        multi_start, multi_stop = int(self.multi_idx[start]), int(self.multi_idx[stop])
+        return PatternsSOne(
+            self.num_pix,
+            self.ones[start:stop],
+            self.multi[start:stop],
+            self.place_ones[ones_start:ones_stop],
+            self.place_multi[multi_start:multi_stop],
+            self.count_multi[multi_start:multi_stop],
+        )
+
     def __pow__(self, n: int) -> PatternsSOne:
         if not isinstance(n, int):
             raise TypeError(f"n should be int, not {type(n)}")
@@ -378,20 +492,44 @@ class PatternsSOne:
         raise ValueError(f"Do not support axis={axis}.")
 
     def _get_subdataset0(self, i: npt.NDArray[np.integer[Any]]) -> PatternsSOne:
-        if len(i) == 0:
+        if i.ndim != 1:
+            raise IndexError("row indices must be one-dimensional")
+        if i.size == 0:
             return _zeros((0, self.num_pix))
-        c = contiguous_ranges(i)
-        multi_s = self.multi_idx[c]
-        return PatternsSOne(
-            num_pix=self.num_pix,
-            ones=self.ones[i],
-            place_ones=np.concatenate(
-                [self.place_ones[s:e] for s, e in self.ones_idx[c]]
-            ),
-            multi=self.multi[i],
-            place_multi=np.concatenate([self.place_multi[s:e] for s, e in multi_s]),
-            count_multi=np.concatenate([self.count_multi[s:e] for s, e in multi_s]),
+        if np.any(i >= self.num_data) or (
+            np.issubdtype(i.dtype, np.signedinteger) and np.any(i < -self.num_data)
+        ):
+            raise IndexError("row index out of range")
+        ids = i.astype(np.intp, copy=True)
+        ids[ids < 0] += self.num_data
+        ones = self.ones[ids]
+        multi = self.multi[ids]
+        num_ones = int(np.sum(ones, dtype=np.uint64))
+        num_multi = int(np.sum(multi, dtype=np.uint64))
+        result = PatternsSOne(
+            self.num_pix,
+            ones,
+            multi,
+            np.empty(num_ones, dtype=np.uint32),
+            np.empty(num_multi, dtype=np.uint32),
+            np.empty(num_multi, dtype=np.int32),
         )
+        ranges = contiguous_ranges(ids)
+        ones_ranges = self.ones_idx[ranges]
+        multi_ranges = self.multi_idx[ranges]
+        for source, spans, target in (
+            (self.place_ones, ones_ranges, result.place_ones),
+            (self.place_multi, multi_ranges, result.place_multi),
+            (self.count_multi, multi_ranges, result.count_multi),
+        ):
+            # Legacy HDF5 stores positions as signed int32. Valid EMC positions
+            # are nonnegative, so preserve the public uint32 output convention.
+            np.concatenate(
+                [source[start:stop] for start, stop in spans],
+                out=target,
+                casting="unsafe",
+            )
+        return result
 
     @overload
     def __getitem__(self, index: int | np.integer) -> npt.NDArray[np.int32]: ...
@@ -406,15 +544,51 @@ class PatternsSOne:
         self,
         index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
     ) -> Union[npt.NDArray[np.int32], PatternsSOne]:
+        if isinstance(index, tuple) and len(index) == 2:
+            rows, columns = index
+            # Two fancy selectors have SciPy's paired-index semantics, rather
+            # than a Cartesian product. Keep that existing general path.
+            if (
+                isinstance(rows, (slice, np.ndarray))
+                and isinstance(columns, (slice, np.ndarray))
+                and (isinstance(rows, slice) or isinstance(columns, slice))
+            ):
+                if isinstance(rows, slice) and rows.step in (None, 1):
+                    source = self._get_contiguous_rows(rows)
+                else:
+                    source = cast(PatternsSOne, self[rows])
+                if isinstance(columns, slice) and columns.indices(self.num_pix) == (
+                    0,
+                    self.num_pix,
+                    1,
+                ):
+                    return source
+                if (
+                    source.num_pix <= np.iinfo(np.int32).max
+                    and source.place_ones.dtype in (np.dtype(np.uint32), np.dtype(np.int32))
+                    and source.place_multi.dtype in (np.dtype(np.uint32), np.dtype(np.int32))
+                    and source.place_ones.flags.c_contiguous
+                    and source.place_multi.flags.c_contiguous
+                ):
+                    return source._get_chunked_column_slice(slice(None), columns)
+                return source._get_subdataset((slice(None), columns))
         match index:
             case int() | np.integer():
                 return self._get_pattern(int(index))
             case np.ndarray() if np.issubdtype(index.dtype, bool):
+                if index.ndim != 1 or index.size != self.num_data:
+                    raise IndexError(
+                        "Boolean row mask must match the number of patterns"
+                    )
                 return self._get_subdataset0(np.where(index)[0])
             case np.ndarray() if np.issubdtype(index.dtype, np.integer):
                 return self._get_subdataset0(cast(npt.NDArray[np.integer[Any]], index))
+            case slice() if index.step is None or index.step == 1:
+                return self._get_contiguous_rows(index)
             case slice():
-                return self._get_subdataset((index,))
+                return self._get_subdataset0(
+                    np.arange(*index.indices(self.num_data), dtype=np.intp)
+                )
             case _:
                 return self._get_subdataset(index)
 
@@ -449,11 +623,36 @@ class PatternsSOne:
         _one = np.lib.stride_tricks.as_strided(
             _one, shape=(self.place_ones.shape[0],), strides=(0,)
         )
-        return csr_array((_one, self.place_ones, self.ones_idx), shape=self.shape)
+        indices, indptr = self._csr_index_buffers(self.place_ones, self.ones_idx)
+        return csr_array((_one, indices, indptr), shape=self.shape, copy=False)
+
+    def _csr_index_buffers(
+        self, place: npt.NDArray[np.uint32], offsets: npt.NDArray[np.uint64]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Use signed 32-bit CSR indices when valid EMC positions fit.
+
+        Valid positions are smaller than ``num_pix``, so the shape bounds the
+        unsigned-to-signed reinterpretation without scanning all events.
+        """
+        limit = np.iinfo(np.int32).max
+        if (
+            self.num_data <= limit
+            and self.num_pix <= limit
+            and int(offsets[-1]) <= limit
+        ):
+            if place.dtype == np.uint32:
+                indices = place.view(np.int32)
+            elif place.dtype == np.int32:
+                indices = place
+            else:
+                return place, offsets
+            return indices, offsets.astype(np.int32)
+        return place, offsets
 
     def _get_sparse_multi(self) -> csr_array:
+        indices, indptr = self._csr_index_buffers(self.place_multi, self.multi_idx)
         return csr_array(
-            (self.count_multi, self.place_multi, self.multi_idx), shape=self.shape
+            (self.count_multi, indices, indptr), shape=self.shape, copy=False
         )
 
     def tocsr(self) -> csr_array:
