@@ -46,6 +46,34 @@ def test_tocsr(large_patterns, large_dense):
     np.testing.assert_equal(large_patterns.tocsr().todense(), large_dense)
 
 
+def test_csr_construction_shares_compatible_event_buffers(small_patterns):
+    ones = small_patterns._get_sparse_ones()
+    multi = small_patterns._get_sparse_multi()
+    assert ones.indices.dtype == multi.indices.dtype == np.int32
+    assert ones.indptr.dtype == multi.indptr.dtype == np.int32
+    assert np.shares_memory(ones.indices, small_patterns.place_ones)
+    assert np.shares_memory(multi.indices, small_patterns.place_multi)
+    assert np.shares_memory(multi.data, small_patterns.count_multi)
+    assert ones.data.strides == (0,)
+    np.testing.assert_array_equal(ones.indptr, small_patterns.ones_idx)
+    np.testing.assert_array_equal(multi.indptr, small_patterns.multi_idx)
+
+
+def test_csr_construction_keeps_wide_pixel_indices():
+    large_pixel = np.uint32(2**31)
+    source = ef.PatternsSOne(
+        2**31 + 1,
+        np.array([0], dtype=np.uint32),
+        np.array([1], dtype=np.uint32),
+        np.empty(0, dtype=np.uint32),
+        np.array([large_pixel], dtype=np.uint32),
+        np.array([2], dtype=np.int32),
+    )
+    csr = source._get_sparse_multi()
+    assert int(csr.indices[0]) == int(large_pixel)
+    assert int(csr.indptr[-1]) == 1
+
+
 @pytest.fixture()
 def small_dense():
     return generate_dense_patterns(32, 4)

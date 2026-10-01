@@ -512,11 +512,36 @@ class PatternsSOne:
         _one = np.lib.stride_tricks.as_strided(
             _one, shape=(self.place_ones.shape[0],), strides=(0,)
         )
-        return csr_array((_one, self.place_ones, self.ones_idx), shape=self.shape)
+        indices, indptr = self._csr_index_buffers(self.place_ones, self.ones_idx)
+        return csr_array((_one, indices, indptr), shape=self.shape, copy=False)
+
+    def _csr_index_buffers(
+        self, place: npt.NDArray[np.uint32], offsets: npt.NDArray[np.uint64]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Use signed 32-bit CSR indices when valid EMC positions fit.
+
+        Valid positions are smaller than ``num_pix``, so the shape bounds the
+        unsigned-to-signed reinterpretation without scanning all events.
+        """
+        limit = np.iinfo(np.int32).max
+        if (
+            self.num_data <= limit
+            and self.num_pix <= limit
+            and int(offsets[-1]) <= limit
+        ):
+            if place.dtype == np.uint32:
+                indices = place.view(np.int32)
+            elif place.dtype == np.int32:
+                indices = place
+            else:
+                return place, offsets
+            return indices, offsets.astype(np.int32)
+        return place, offsets
 
     def _get_sparse_multi(self) -> csr_array:
+        indices, indptr = self._csr_index_buffers(self.place_multi, self.multi_idx)
         return csr_array(
-            (self.count_multi, self.place_multi, self.multi_idx), shape=self.shape
+            (self.count_multi, indices, indptr), shape=self.shape, copy=False
         )
 
     def tocsr(self) -> csr_array:
