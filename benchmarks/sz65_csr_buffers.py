@@ -82,6 +82,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path")
     parser.add_argument("--repetitions", type=int, default=5)
+    parser.add_argument(
+        "--kinds", nargs="+", choices=("multi", "ones"), default=("multi", "ones")
+    )
+    parser.add_argument(
+        "--representations",
+        nargs="+",
+        choices=("u32/u64", "i32/i32", "i32/i64"),
+        default=("u32/u64", "i32/i32", "i32/i64"),
+    )
     args = parser.parse_args()
     source = patterns(args.path)
     print(
@@ -95,8 +104,8 @@ def main() -> None:
         "median_ms,python_alloc_peak_mib",
         flush=True,
     )
-    for kind in ("multi", "ones"):
-        for representation in ("u32/u64", "i32/i32", "i32/i64"):
+    for kind in args.kinds:
+        for representation in args.representations:
             measure(source, kind, representation, args.repetitions)
 
 

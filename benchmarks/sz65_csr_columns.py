@@ -55,6 +55,11 @@ def main() -> None:
     parser.add_argument("path")
     parser.add_argument("--columns", type=int, default=1024)
     parser.add_argument("--repetitions", type=int, default=5)
+    parser.add_argument(
+        "--single-pass",
+        action="store_true",
+        help="time one old/new pass and check equality for full datasets",
+    )
     args = parser.parse_args()
     source = patterns(args.path)
     stop = min(args.columns, source.num_pix)
@@ -64,6 +69,24 @@ def main() -> None:
 
     def new():
         return source[:, :stop]
+
+    if args.single_pass:
+        gc.collect()
+        before = time.perf_counter_ns()
+        old_result = old()
+        old_ms = (time.perf_counter_ns() - before) / 1e6
+        gc.collect()
+        before = time.perf_counter_ns()
+        new_result = new()
+        new_ms = (time.perf_counter_ns() - before) / 1e6
+        assert old_result == new_result
+        print(
+            f"shape={source.shape},columns={stop},selected_mib="
+            f"{new_result.nbytes / (1 << 20):.2f},old_ms={old_ms:.3f},"
+            f"new_ms={new_ms:.3f},exact_equal=True",
+            flush=True,
+        )
+        return
 
     assert old() == new()
     print(

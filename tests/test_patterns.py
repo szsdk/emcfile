@@ -324,6 +324,29 @@ def test_column_slice_keeps_existing_path(small_patterns):
     )
 
 
+@pytest.mark.parametrize(
+    "rows", [slice(None), slice(2, 25), slice(-20, -2), slice(5, 5)]
+)
+@pytest.mark.parametrize("columns", [slice(None, 2), slice(1, 3), slice(2, None)])
+def test_chunked_column_slice_matches_csr(small_patterns, rows, columns):
+    expected = small_patterns._get_subdataset((rows, columns))
+    actual = small_patterns._get_chunked_column_slice(rows, columns, event_budget=8)
+    assert actual == expected
+    assert actual.check()
+
+
+def test_chunked_column_slice_handles_readonly_event_arrays(small_patterns):
+    source = copy.copy(small_patterns)
+    source.place_ones = source.place_ones.view()
+    source.place_multi = source.place_multi.view()
+    source.place_ones.flags.writeable = False
+    source.place_multi.flags.writeable = False
+    actual = source._get_chunked_column_slice(
+        slice(None), slice(None, 2), event_budget=8
+    )
+    assert actual == source._get_subdataset((slice(None), slice(None, 2)))
+
+
 def test_concatenate(small_patterns, large_patterns):
     pattern_arrays = [ef.patterns(large_patterns.num_pixels)] + [
         ef.patterns(large_patterns, start=i * 10, end=(i + 1) * 10) for i in range(5)
