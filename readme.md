@@ -305,12 +305,14 @@ uv run mypy src/emcfile
 uv run pre-commit run --all-files
 ```
 
-CI runs Ruff and the test suite on Python 3.10 through 3.13, with both core
+CI runs Ruff and the test suite on Python 3.10 through 3.14, with both core
 dependencies and the `hdf5-fast` extra. Tests requiring optional HDF5 codecs
 skip in the core environment. As a library, this repository does not commit
 `uv.lock`; CI resolves dependencies from `pyproject.toml` on each clean checkout.
 The lockfile generated locally by uv remains ignored. CI uploads JUnit and
 coverage reports for each test job.
+Dependabot checks the pinned GitHub Actions weekly and groups updates into
+one pull request.
 To run the complete suite locally:
 
 ```bash
@@ -327,6 +329,11 @@ act push -j test --matrix python-version:3.13 --matrix dependencies:core \
   -P ubuntu-latest=catthehacker/ubuntu:act-latest \
   --artifact-server-path /tmp/emcfile-ci-artifacts
 ```
+
+`act` 0.2.89 cannot handle the upload-artifact v7 API: tests can pass locally
+while the report-upload step fails with an unknown `mime_type` field.
+Validate artifact uploads on GitHub Actions until `act` supports this API.
+
 # Installation
 
 The base package supports raw EMC plus uncompressed, gzip, and LZF HDF5.
