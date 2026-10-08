@@ -71,6 +71,7 @@ def test_direct_writer_uses_one_shared_pool_with_default_budget(tmp_path: Path, 
         return original(*args, **kwargs)
 
     monkeypatch.delenv("EMCFILE_H5_WRITE_WORKERS", raising=False)
+    monkeypatch.setattr("emcfile._h5_workers.os.sched_getaffinity", lambda _pid: set(range(8)))
     monkeypatch.setattr(implementation, "PrefilteredDatasetWriter", writer)
     _patterns().write(
         tmp_path / "defaults.h5", position_encoding="delta", compression="zstd", shuffle=True
