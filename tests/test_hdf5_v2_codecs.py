@@ -13,12 +13,6 @@ from emcfile._h5_workers import effective_workers
 from emcfile._delta import decode_pattern_local_delta, encode_pattern_local_delta
 
 
-@pytest.fixture
-def hdf5_fast():
-    pytest.importorskip("hdf5plugin")
-    pytest.importorskip("zstandard")
-
-
 def _patterns(repetitions: int = 1) -> ef.PatternsSOne:
     ones = np.tile(np.array([0, 3, 1, 2], "u4"), repetitions)
     multi = np.tile(np.array([2, 0, 2, 1], "u4"), repetitions)

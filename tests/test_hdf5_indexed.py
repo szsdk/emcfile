@@ -15,6 +15,7 @@ def enable_indexed(monkeypatch):
     monkeypatch.setenv("EMCFILE_H5_INDEXED_WORKERS", "4")
 
 
+@pytest.mark.usefixtures("hdf5_fast")
 def test_indexed_is_opt_in(tmp_path, monkeypatch):
     expected, path = _patterns(), tmp_path / "opt-in.h5"
     expected.write(path, position_encoding="delta", compression="zstd", shuffle=True)
@@ -32,6 +33,7 @@ def test_indexed_is_opt_in(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("workers", [1, 2, 4])
 @pytest.mark.parametrize("persistent", [False, True])
+@pytest.mark.usefixtures("hdf5_fast")
 def test_indexed_public_api(tmp_path: Path, monkeypatch, workers, persistent):
     monkeypatch.setenv("EMCFILE_H5_DIRECT_CHUNK_BYTES", "20")
     monkeypatch.setenv("EMCFILE_H5_INDEXED_WORKERS", str(workers))
@@ -69,6 +71,8 @@ def test_indexed_public_api(tmp_path: Path, monkeypatch, workers, persistent):
 
 @pytest.mark.parametrize("codec", ["zstd", "gzip", "lzf", None])
 def test_fallbacks(tmp_path, monkeypatch, codec):
+    if codec == "zstd":
+        pytest.importorskip("hdf5plugin")
     expected = _patterns(3)
     path = tmp_path / "fallback.h5"
     expected.write(path, position_encoding="delta", compression=codec, shuffle=True)
@@ -97,6 +101,7 @@ def test_plan_unique_chunks_and_destination_order():
 
 
 @pytest.mark.parametrize("mask", [0, 1, 2, 3])
+@pytest.mark.usefixtures("hdf5_fast")
 def test_chunk_filter_masks(mask):
     import zstandard
 
@@ -111,12 +116,14 @@ def test_chunk_filter_masks(mask):
 
 
 def test_chunk_errors():
+    pytest.importorskip("zstandard")
     with pytest.raises(ValueError, match="filter mask"):
         _decode_chunk(4, b"", 4)
     with pytest.raises(ValueError, match="length"):
         _decode_chunk(3, b"bad", 4)
 
 
+@pytest.mark.usefixtures("hdf5_fast")
 def test_missing_optional_dependency_and_invalid_budget(tmp_path, monkeypatch):
     expected, path = _patterns(), tmp_path / "optional.h5"
     expected.write(path, position_encoding="delta", compression="zstd", shuffle=True)
@@ -127,6 +134,7 @@ def test_missing_optional_dependency_and_invalid_budget(tmp_path, monkeypatch):
         ef.open_patterns(path)[np.array([2, 0])]
 
 
+@pytest.mark.usefixtures("hdf5_fast")
 def test_worker_failure_propagates(tmp_path, monkeypatch):
     expected, path = _patterns(), tmp_path / "error.h5"
     expected.write(path, position_encoding="delta", compression="zstd", shuffle=True)
@@ -139,6 +147,7 @@ def test_worker_failure_propagates(tmp_path, monkeypatch):
         ef.open_patterns(path)[np.array([2, 0])]
 
 
+@pytest.mark.usefixtures("hdf5_fast")
 def test_out_of_bounds_ranges(tmp_path):
     expected, path = _patterns(), tmp_path / "bounds.h5"
     expected.write(path, position_encoding="delta", compression="zstd", shuffle=True)
@@ -151,6 +160,7 @@ def test_out_of_bounds_ranges(tmp_path):
             )
 
 
+@pytest.mark.usefixtures("hdf5_fast")
 def test_vds_and_absolute_layout_fallback(tmp_path):
     expected = _patterns()
     first, second, virtual = (tmp_path / name for name in ("a.h5", "b.h5", "vds.h5"))
