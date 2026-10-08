@@ -272,10 +272,33 @@ Run or edit cells in the browser; dependent cells update automatically. Press
 
 ```bash
 uv sync --group dev
-uv run pytest
-uv run ruff check .
+uv run --no-sync pytest tests
+uv run --no-sync ruff check .
 uv run mypy src/emcfile
 uv run pre-commit run --all-files
+```
+
+CI runs Ruff and the test suite on Python 3.10 through 3.13, with both core
+dependencies and the `hdf5-fast` extra. Tests requiring optional HDF5 codecs
+skip in the core environment. As a library, this repository does not commit
+`uv.lock`; CI resolves dependencies from `pyproject.toml` on each clean checkout.
+The lockfile generated locally by uv remains ignored. CI uploads JUnit and
+coverage reports for each test job.
+To run the complete suite locally:
+
+```bash
+uv sync --group dev --extra hdf5-fast
+uv run --no-sync pytest tests --cov=emcfile --cov-report=term-missing
+```
+
+With Docker and [`act`](https://nektosact.com/) installed, run individual CI
+jobs locally (the test command selects one matrix entry):
+
+```bash
+act push -j lint -P ubuntu-latest=catthehacker/ubuntu:act-latest
+act push -j test --matrix python-version:3.13 --matrix dependencies:core \
+  -P ubuntu-latest=catthehacker/ubuntu:act-latest \
+  --artifact-server-path /tmp/emcfile-ci-artifacts
 ```
 # Installation
 

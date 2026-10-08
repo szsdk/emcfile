@@ -1,41 +1,92 @@
-name: Run Unit Test via Pytest
+name: CI
 
-on: [push]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_PYTHON_PREFERENCE: only-managed
 
 jobs:
-  core:
+  lint:
+    name: Ruff
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: "3.10"
-      - run: python -m pip install uv
-      - run: uv sync --group dev
-      - run: uv run pytest tests/test_hdf5_v2_codecs.py::test_plain_import_is_lazy
-  build:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.23"
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - name: Install dependencies
+        run: uv sync --group dev
+      - name: Lint
+        run: uv run --no-sync ruff check .
+
+  test:
+    name: Python ${{ matrix.python-version }} / ${{ matrix.dependencies }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+        dependencies: [core, hdf5-fast]
 
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.23"
           python-version: ${{ matrix.python-version }}
-      - name: Install dependencies
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+          cache-suffix: ${{ matrix.dependencies }}
+      - name: Install core dependencies
+        if: matrix.dependencies == 'core'
+        run: uv sync --group dev
+      - name: Install optional HDF5 dependencies
+        if: matrix.dependencies == 'hdf5-fast'
+        run: uv sync --group dev --extra hdf5-fast
+      - name: Verify dependency profile
+        env:
+          DEPENDENCY_PROFILE: ${{ matrix.dependencies }}
         run: |
-          python -m pip install uv
-          uv sync --group dev --extra hdf5-fast
-      - name: Lint with Ruff
-        run: |
-          uv run ruff check --target-version=py310 .
-        continue-on-error: true
+          uv run --no-sync python - <<'PY'
+          import importlib.util
+          import os
+
+          expected = os.environ["DEPENDENCY_PROFILE"] == "hdf5-fast"
+          for module in ("hdf5plugin", "numba", "zstandard"):
+              assert (importlib.util.find_spec(module) is not None) == expected, module
+          PY
       - name: Test with pytest
-        run: |
-          uv run pytest --cov=src/emcfile -xs .
-      - name: Generate Coverage Report
-        run: |
-          uv run coverage report -m
+        run: >-
+          uv run --no-sync pytest tests
+          --cov=emcfile --cov-report=term-missing --cov-report=xml
+          --junitxml=junit.xml
+      - name: Upload test reports
+        if: ${{ !cancelled() && hashFiles('junit.xml') != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-reports-${{ matrix.python-version }}-${{ matrix.dependencies }}
+          path: |
+            junit.xml
+            coverage.xml
+          retention-days: 14
+          if-no-files-found: error

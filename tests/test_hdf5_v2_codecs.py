@@ -13,6 +13,12 @@ from emcfile._h5_workers import effective_workers
 from emcfile._delta import decode_pattern_local_delta, encode_pattern_local_delta
 
 
+@pytest.fixture
+def hdf5_fast():
+    pytest.importorskip("hdf5plugin")
+    pytest.importorskip("zstandard")
+
+
 def _patterns(repetitions: int = 1) -> ef.PatternsSOne:
     ones = np.tile(np.array([0, 3, 1, 2], "u4"), repetitions)
     multi = np.tile(np.array([2, 0, 2, 1], "u4"), repetitions)
@@ -40,6 +46,8 @@ def test_writer_sortedness_check_is_opt_in(tmp_path: Path):
 @pytest.mark.parametrize("compression,options,shuffle", [(None, None, False), ("lzf", None, True), ("gzip", 1, True), ("zstd", 1, True)])
 @pytest.mark.parametrize("encoding", ["absolute", "delta"])
 def test_v2_codec_roundtrip(tmp_path: Path, compression, options, shuffle, encoding):
+    if compression == "zstd":
+        pytest.importorskip("hdf5plugin")
     expected, path = _patterns(), tmp_path / f"{encoding}-{compression}.h5"
     expected.write(path, position_encoding=encoding, compression=compression, compression_opts=options, shuffle=shuffle)
     assert ef.open_patterns(path)[:] == expected
@@ -48,7 +56,7 @@ def test_v2_codec_roundtrip(tmp_path: Path, compression, options, shuffle, encod
         np.testing.assert_array_equal(file["count_multi"][:], expected.count_multi)
 
 
-def test_direct_layout_is_standard_and_full_scan_falls_back_cleanly(tmp_path: Path, monkeypatch):
+def test_direct_layout_is_standard_and_full_scan_falls_back_cleanly(tmp_path: Path, monkeypatch, hdf5_fast):
     monkeypatch.setattr(fast, "MIN_FULL_SCAN_BYTES", 0)
     expected, path = _patterns(), tmp_path / "direct.h5"
     expected.write(path, position_encoding="delta", compression="zstd", compression_opts=4, shuffle=True)
@@ -61,7 +69,7 @@ def test_direct_layout_is_standard_and_full_scan_falls_back_cleanly(tmp_path: Pa
     assert ef.open_patterns(path)[:] == expected
 
 
-def test_direct_writer_uses_one_shared_pool_with_default_budget(tmp_path: Path, monkeypatch):
+def test_direct_writer_uses_one_shared_pool_with_default_budget(tmp_path: Path, monkeypatch, hdf5_fast):
     workers, pools = [], []
     original = implementation.PrefilteredDatasetWriter
 
@@ -122,7 +130,7 @@ def test_zstd_missing_plugin_has_actionable_error(tmp_path: Path, monkeypatch):
         _patterns().write(tmp_path / "no-plugin.h5", compression="zstd")
 
 
-def test_vds_preserves_delta_and_uses_generic_reading(tmp_path: Path, monkeypatch):
+def test_vds_preserves_delta_and_uses_generic_reading(tmp_path: Path, monkeypatch, hdf5_fast):
     monkeypatch.setattr(fast, "MIN_FULL_SCAN_BYTES", 0)
     expected = _patterns()
     first, second, output = tmp_path / "first.h5", tmp_path / "second.h5", tmp_path / "all.h5"

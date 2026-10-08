@@ -2,6 +2,7 @@ skills-lock.json
 .agents/
 uv.lock
 pytest.xml
+junit.xml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
