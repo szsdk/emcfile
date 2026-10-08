@@ -5,7 +5,7 @@ import os
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional, Union, cast
+from typing import Any, Union, cast
 
 import h5py
 import numpy as np
@@ -35,7 +35,7 @@ __all__ = [
 _log = logging.getLogger(__name__)
 
 
-def parse_h5path(fname: "str | Path") -> tuple[Path, str]:
+def parse_h5path(fname: str | Path) -> tuple[Path, str]:
     if not check_h5path(fname):
         raise ValueError(f"{fname} is not a valid h5path")
 
@@ -52,7 +52,7 @@ def h5group(
     fname: str,
     *args: Any,
     add: bool = True,
-    create: Optional[bool] = None,
+    create: bool | None = None,
     **kargs: Any,
 ) -> Iterator[tuple[h5py.File, h5py.Group]]:
     """
@@ -84,15 +84,15 @@ def h5group(
 
 
 class H5Path:
-    def __init__(self, fn: "str | Path", gn: str):
+    def __init__(self, fn: str | Path, gn: str):
         """
         H5Path
 
         Parameters
         ----------
-        fn : Union[str, Path]
+        fn : str | Path
             The filename of the hdf5 file.
-        gn : Union[str, Path]
+        gn : str | Path
             The group/datset name.
         """
         self.fn = Path(fn)
@@ -116,10 +116,10 @@ class H5Path:
     def object_path(self, value: str) -> None:
         self.gn = str(value)
 
-    def __truediv__(self, a: "str | Path") -> H5Path:
+    def __truediv__(self, a: str | Path) -> H5Path:
         return H5Path(self.fn, str(Path(self.gn) / a))
 
-    def __iter__(self) -> Iterator["Path | str"]:
+    def __iter__(self) -> Iterator[Path | str]:
         yield self.fn
         yield self.gn
 
@@ -147,10 +147,10 @@ class H5Path:
         self,
         mode: str = "r",
         group_mode: str = "r",
-        track_order: Optional[bool] = None,
+        track_order: bool | None = None,
         *args: Any,
         **kargs: Any,
-    ) -> Iterator[tuple[h5py.File, Union[h5py.Dataset, h5py.Group]]]:
+    ) -> Iterator[tuple[h5py.File, h5py.Dataset | h5py.Group]]:
         """
         group_mode : [r|a]
         """
@@ -193,7 +193,7 @@ class H5Path:
         yield lambda v, _: h5path(v)
 
 
-PATH_TYPE = Union[str, H5Path, os.PathLike[str]]
+PATH_TYPE = str | H5Path | os.PathLike[str]
 
 
 def read_array(
@@ -226,8 +226,8 @@ def write_array(
     /,
     *,
     overwrite: bool = False,
-    compression: Optional[str] = None,
-    compression_opts: Union[None, str, int] = None,
+    compression: str | None = None,
+    compression_opts: None | str | int = None,
 ) -> None:
     f = make_path(fname)
     if f.exists() and not overwrite:
@@ -273,7 +273,7 @@ def check_h5path(s: PATH_TYPE) -> bool:
     return (Path(fn_gn[0]).suffix.lower() == ".h5") or h5py.is_hdf5(fn_gn[0])
 
 
-def h5path(src: PATH_TYPE, group: Optional[str] = None) -> H5Path:
+def h5path(src: PATH_TYPE, group: str | None = None) -> H5Path:
     """
     Converts a string or path-like object into an `H5Path` object.
 
@@ -329,7 +329,7 @@ def h5path(src: PATH_TYPE, group: Optional[str] = None) -> H5Path:
     raise TypeError()
 
 
-def make_path(s: PATH_TYPE) -> Union[Path, H5Path]:
+def make_path(s: PATH_TYPE) -> Path | H5Path:
     """
     Creates a `Path` or `H5Path` object from a string or path-like object.
 
@@ -372,7 +372,7 @@ def make_path(s: PATH_TYPE) -> Union[Path, H5Path]:
 
 
 def check_remove_groups(
-    fp: Union[h5py.Group, h5py.File], groups: Iterable[str], overwrite: bool
+    fp: h5py.Group | h5py.File, groups: Iterable[str], overwrite: bool
 ) -> None:
     attrs = fp.attrs.keys()
     for g in groups:
@@ -386,7 +386,7 @@ def check_remove_groups(
 
 
 def _check_exists(
-    group_name: str, fp: Union[h5py.Group, h5py.File], overwrite: bool, verbose: bool
+    group_name: str, fp: h5py.Group | h5py.File, overwrite: bool, verbose: bool
 ) -> bool:
     if group_name not in fp:
         return False
@@ -401,13 +401,13 @@ _T = Union[Mapping[str, "_T"], npt.NDArray[Any], str, int, float, bool, np.dtype
 
 
 def _write_single(
-    group: Union[h5py.File, h5py.Group, h5py.Dataset],
+    group: h5py.File | h5py.Group | h5py.Dataset,
     k: str,
     v: _T,
     overwrite: bool,
     verbose: bool,
-    compression: Optional[str],
-    compression_opts: Union[None, str, int],
+    compression: str | None,
+    compression_opts: None | str | int,
 ) -> None:
     match v:
         case np.ndarray():
@@ -433,13 +433,13 @@ def _write_single(
 
 
 def _write_group(
-    fp: Union[h5py.File, h5py.Group],
+    fp: h5py.File | h5py.Group,
     group_name: str,
     obj: _T,
     overwrite: bool,
     verbose: bool,
-    compression: Optional[str],
-    compression_opts: Union[None, str, int],
+    compression: str | None,
+    compression_opts: None | str | int,
 ) -> None:
     if not isinstance(obj, dict):
         raise TypeError(f"Cannot write type {type(obj)}")
@@ -462,12 +462,12 @@ def _write_group(
 
 
 def write_obj_h5(
-    fn: Union[str, H5Path],
+    fn: str | H5Path,
     obj: _T,
     overwrite: bool = False,
     verbose: bool = False,
-    compression: Optional[str] = None,
-    compression_opts: Union[None, str, int] = None,
+    compression: str | None = None,
+    compression_opts: None | str | int = None,
 ) -> None:
     """Saves a Python object to an HDF5 file.
 
@@ -523,7 +523,7 @@ def write_obj_h5(
 
 
 def _read_group(
-    g: Union[h5py.File, h5py.Group, h5py.Dataset, h5py.Datatype],
+    g: h5py.File | h5py.Group | h5py.Dataset | h5py.Datatype,
 ) -> dict[str, _T]:
     ans = dict()
     for k, v in g.attrs.items():
@@ -541,7 +541,7 @@ def _read_group(
     return ans
 
 
-def read_obj_h5(fn: Union[str, H5Path]) -> dict[str, Any]:
+def read_obj_h5(fn: str | H5Path) -> dict[str, Any]:
     """
     Reads a Python object from an HDF5 file.
 
@@ -591,28 +591,28 @@ def is_hdf5_path(path: PATH_TYPE) -> bool:
     return check_h5path(path)
 
 
-def as_hdf5_path(path: PATH_TYPE, object_path: Optional[str] = None) -> H5Path:
+def as_hdf5_path(path: PATH_TYPE, object_path: str | None = None) -> H5Path:
     """Convert a path-like value to :class:`H5Path`."""
     return h5path(path, object_path)
 
 
-def as_path(path: PATH_TYPE) -> Union[Path, H5Path]:
+def as_path(path: PATH_TYPE) -> Path | H5Path:
     """Convert a path-like value to either :class:`Path` or :class:`H5Path`."""
     return make_path(path)
 
 
 def write_hdf5_object(
-    path: Union[str, H5Path],
+    path: str | H5Path,
     obj: _T,
     overwrite: bool = False,
     verbose: bool = False,
-    compression: Optional[str] = None,
-    compression_opts: Union[None, str, int] = None,
+    compression: str | None = None,
+    compression_opts: None | str | int = None,
 ) -> None:
     """Write a nested Python object to HDF5."""
     write_obj_h5(path, obj, overwrite, verbose, compression, compression_opts)
 
 
-def read_hdf5_object(path: Union[str, H5Path]) -> dict[str, Any]:
+def read_hdf5_object(path: str | H5Path) -> dict[str, Any]:
     """Read a nested Python object from HDF5."""
     return read_obj_h5(path)

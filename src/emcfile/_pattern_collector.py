@@ -1,9 +1,10 @@
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
-from typing_extensions import TypeAlias, deprecated
+from typing_extensions import deprecated
+from typing import TypeAlias
 
 from ._emc_patterns import PatternsSOne, write_patterns
 from ._hdf5 import PATH_TYPE
@@ -54,7 +55,7 @@ class PatternsSOneCollector:
     100
     """
 
-    def __init__(self, max_buffer_size: int = 128, *, batch_size: Optional[int] = None):
+    def __init__(self, max_buffer_size: int = 128, *, batch_size: int | None = None):
         if batch_size is not None:
             if max_buffer_size != 128:
                 raise TypeError(
@@ -64,7 +65,7 @@ class PatternsSOneCollector:
         self.max_buffer_size = max_buffer_size
         self._patterns: list[PatternsSOne] = []
         self._buffer: list[NP_IMG] = []
-        self._num_pix: Optional[int] = None
+        self._num_pix: int | None = None
 
     @property
     def batch_size(self) -> int:
@@ -76,7 +77,7 @@ class PatternsSOneCollector:
         self.max_buffer_size = value
 
     @property
-    def num_pix(self) -> Optional[int]:
+    def num_pix(self) -> int | None:
         """
         Number of pixels in the patterns.
 
@@ -92,7 +93,7 @@ class PatternsSOneCollector:
         return self._num_pix
 
     @property
-    def num_pixels(self) -> Optional[int]:
+    def num_pixels(self) -> int | None:
         """Number of pixels in each collected pattern."""
         return self.num_pix
 
@@ -133,7 +134,7 @@ class PatternsSOneCollector:
         self._patterns.append(patterns(np.array(self._buffer)))
         self._buffer = []
 
-    def extend(self, imgs: Union[Sequence[NP_IMG], PatternsSOne]) -> None:
+    def extend(self, imgs: Sequence[NP_IMG] | PatternsSOne) -> None:
         """
         Extends the collector with a sequence of patterns.
 
@@ -253,12 +254,12 @@ class PatternsSOneCollector:
         h5version: str = "2",
         overwrite: bool = False,
         buffer_size: int = 1073741824,  # 2 ** 30 bytes = 1 GB
-        compression: Union[None, int, str] = None,
+        compression: None | int | str = None,
         compression_opts: Any = None,
         shuffle: bool = False,
         position_encoding: str = "absolute",
         check_sorted: bool = False,
-        hdf5_version: Optional[str] = None,
+        hdf5_version: str | None = None,
     ) -> None:
         """
         Writes the collected patterns to a file.

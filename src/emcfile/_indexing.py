@@ -1,4 +1,4 @@
-from typing import Any, List, Tuple
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -59,7 +59,7 @@ def concat_continous(a: npt.NDArray[Any]) -> npt.NDArray[Any]:
     return contiguous_ranges(a)
 
 
-def split_range(start: int, stop: int, num_chunks: int) -> List[Tuple[int, int]]:
+def split_range(start: int, stop: int, num_chunks: int) -> list[tuple[int, int]]:
     """Divide a numerical range into nearly equal half-open ranges.
 
     Examples
@@ -84,5 +84,5 @@ def split_range(start: int, stop: int, num_chunks: int) -> List[Tuple[int, int]]
 
 
 @deprecated("Use split_range() instead.")
-def divide_range(s: int, e: int, n: int) -> List[Tuple[int, int]]:
+def divide_range(s: int, e: int, n: int) -> list[tuple[int, int]]:
     return split_range(s, e, n)

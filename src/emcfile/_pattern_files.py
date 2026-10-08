@@ -7,7 +7,7 @@ import os
 from collections.abc import Sequence
 from io import BufferedReader, BytesIO
 from pathlib import Path
-from typing import Any, Optional, Union, cast, overload
+from typing import Any, cast, overload
 
 import h5py
 import numpy as np
@@ -48,7 +48,7 @@ INDEX_ARRAY = npt.NDArray[np.integer[Any]]
 
 
 def read_indexed_array(
-    file_obj: Union[BufferedReader, BytesIO],
+    file_obj: BufferedReader | BytesIO,
     index_ranges: INDEX_ARRAY,
     offsets: INDEX_ARRAY,
     current_offset: int,
@@ -80,7 +80,7 @@ def read_indexed_array(
 
 
 def read_patterns(
-    file_obj: Union[BufferedReader, BytesIO],
+    file_obj: BufferedReader | BytesIO,
     index_ranges: INDEX_ARRAY,
     ones_idx: INDEX_ARRAY,
     multi_idx: INDEX_ARRAY,
@@ -277,11 +277,11 @@ class PatternsSOneFile:
 
     def sum(
         self,
-        axis: Optional[int] = None,
+        axis: int | None = None,
         keepdims: bool = False,
-        dtype: Optional[npt.DTypeLike] = None,
-        chunk_size: Optional[int] = None,
-    ) -> Union[int, float, npt.NDArray[Any]]:
+        dtype: npt.DTypeLike | None = None,
+        chunk_size: int | None = None,
+    ) -> int | float | npt.NDArray[Any]:
         if chunk_size is None:
             chunk_size = max(8, int(self.nbytes / 100_000_000))  # about 100MB
         sums = [
@@ -294,7 +294,7 @@ class PatternsSOneFile:
         if axis == 0:
             ans = np.sum(cast(list[npt.NDArray[Any]], sums), axis=0)
             return cast(npt.NDArray[Any], ans.reshape(1, -1) if keepdims else ans)
-        return cast(Union[float, int], np.sum(cast(list[Union[int, float]], sums)))
+        return cast(float | int, np.sum(cast(list[int | float], sums)))
 
 
 class PatternsSOneEMC(PatternsSOneFile):
@@ -431,7 +431,7 @@ class _PatternsSOneBytes(PatternsSOneFile):
 
 
 class PatternsSOneEMCReadBuffer(PatternsSOneEMC):
-    def __init__(self, fn: "str | Path"):
+    def __init__(self, fn: str | Path):
         super().__init__(fn)
         self._file_handle = self._fn.open("rb")
 
@@ -586,7 +586,7 @@ class PatternsSOneH5(PatternsSOneFile):
 
 
 class PatternsSOneH5ReadBuffer(PatternsSOneH5):
-    def __init__(self, fn: "str | Path | H5Path"):
+    def __init__(self, fn: str | Path | H5Path):
         super().__init__(fn)
         self._file_handle = h5py.File(self._fn.fn, "r")
 
@@ -636,7 +636,7 @@ class PatternsSOneH5ReadBuffer(PatternsSOneH5):
 
 
 class PatternsSOneH5V1(PatternsSOneFile):
-    def __init__(self, fn: "str | Path | H5Path"):
+    def __init__(self, fn: str | Path | H5Path):
         _log.warning(
             "This format has performance issue. `PatternsSOneH5` is recommended"
         )
@@ -738,7 +738,7 @@ class PatternsSOneList(PatternsSOneFile):
 
     def __init__(
         self,
-        pattern_list: Sequence[Union[PATH_TYPE, PatternsSOneBase]],
+        pattern_list: Sequence[PATH_TYPE | PatternsSOneBase],
     ):
         self.pattern_list: list[PatternsSOneBase] = []
         indptr = [0]
@@ -836,16 +836,16 @@ class PatternsSOneList(PatternsSOneFile):
 
     def write(
         self,
-        path: Union[PATH_TYPE, io.BytesIO],
+        path: PATH_TYPE | io.BytesIO,
         *,
         h5version: str = "2",
         overwrite: bool = False,
-        compression: Union[None, int, str] = None,
+        compression: None | int | str = None,
         compression_opts: Any = None,
         shuffle: bool = False,
         position_encoding: str = "absolute",
         check_sorted: bool = False,
-        hdf5_version: Optional[str] = None,
+        hdf5_version: str | None = None,
     ) -> None:
         return write_patterns(
             self.pattern_list,
@@ -861,7 +861,7 @@ class PatternsSOneList(PatternsSOneFile):
         )
 
 
-def file_patterns(fn: Union[Sequence[PATH_TYPE], PATH_TYPE]) -> PatternsSOneFile:
+def file_patterns(fn: Sequence[PATH_TYPE] | PATH_TYPE) -> PatternsSOneFile:
     if (isinstance(fn, str) and glob.has_magic(fn)) or (
         isinstance(fn, Path) and glob.has_magic(str(fn))
     ):
@@ -884,7 +884,7 @@ def file_patterns(fn: Union[Sequence[PATH_TYPE], PATH_TYPE]) -> PatternsSOneFile
         raise ValueError(f"Unsupported HDF5 EMC format version {version!r}")
 
 
-def open_patterns(path: Union[Sequence[PATH_TYPE], PATH_TYPE]) -> PatternsSOneFile:
+def open_patterns(path: Sequence[PATH_TYPE] | PATH_TYPE) -> PatternsSOneFile:
     """Open one or more file-backed EMC pattern sources."""
     return file_patterns(path)
 

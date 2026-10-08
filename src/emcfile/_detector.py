@@ -7,7 +7,7 @@ from copy import deepcopy
 from enum import IntEnum
 from functools import reduce
 from pathlib import Path
-from typing import Any, Literal, Optional, Type, TypeVar, Union, cast
+from typing import Any, Literal, TypeVar, cast
 
 import h5py
 import numpy as np
@@ -48,7 +48,7 @@ class PixelType(IntEnum):
     BAD = 0b00000010
 
 
-_BITMAP = Union[Sequence[int], int]
+_BITMAP = Sequence[int] | int
 
 
 def _bitmap_to_int(bitmap: _BITMAP) -> np.uint8:
@@ -110,7 +110,7 @@ class Detector:
         self.factor: npt.NDArray[np.float64] = factor.copy()
         self.detd = detd
         self.ewald_rad = ewald_rad
-        self._norm_flag: Optional[bool] = None
+        self._norm_flag: bool | None = None
 
     @property
     def pixel_size(self) -> float:
@@ -284,8 +284,8 @@ class Detector:
 
     def __array__(
         self,
-        dtype: Optional[npt.DTypeLike] = None,
-        copy: Optional[bool] = None,
+        dtype: npt.DTypeLike | None = None,
+        copy: bool | None = None,
     ) -> npt.NDArray[Any]:
         ans = np.empty(self.num_pix, dtype=Detector.dtype)
         ans["coor"] = self.coor
@@ -300,7 +300,7 @@ class Detector:
     def __array_function__(
         self,
         func: Callable[..., Any],
-        types: Iterable[Type[object]],
+        types: Iterable[type[object]],
         args: Iterable[object],
         kwargs: Mapping[str, object],
     ) -> object:
@@ -573,18 +573,18 @@ def simple_detector(shape: tuple[int, int], detd: float) -> Detector:
 def detector(
     src: Detector | PATH_TYPE | None = None,
     *,
-    coor: Union[npt.NDArray[T1], tuple[int, int], None] = None,
-    mask: Optional[npt.NDArray[T2]] = None,
-    factor: Optional[npt.NDArray[T1]] = None,
-    detd: Union[float, int, None] = None,
-    ewald_rad: Union[float, int, None] = None,
+    coor: npt.NDArray[T1] | tuple[int, int] | None = None,
+    mask: npt.NDArray[T2] | None = None,
+    factor: npt.NDArray[T1] | None = None,
+    detd: float | int | None = None,
+    ewald_rad: float | int | None = None,
     norm_flag: bool = True,
     check_consistency: bool = True,
-    coordinates: Union[npt.NDArray[T1], tuple[int, int], None] = None,
-    correction_factors: Optional[npt.NDArray[T1]] = None,
-    detector_distance: Union[float, int, None] = None,
-    ewald_radius: Union[float, int, None] = None,
-    normalize: Optional[bool] = None,
+    coordinates: npt.NDArray[T1] | tuple[int, int] | None = None,
+    correction_factors: npt.NDArray[T1] | None = None,
+    detector_distance: float | int | None = None,
+    ewald_radius: float | int | None = None,
+    normalize: bool | None = None,
 ) -> Detector:
     """
     Factory function for creating and loading `Detector` objects.

@@ -9,14 +9,9 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import (
     Any,
-    Dict,
     NamedTuple,
-    Optional,
     Protocol,
-    Tuple,
-    Type,
     TypeVar,
-    Union,
     cast,
     overload,
     runtime_checkable,
@@ -57,7 +52,7 @@ class SPARSE_PATTERN(NamedTuple):
 SparsePattern = SPARSE_PATTERN
 
 
-HANDLED_FUNCTIONS: Dict[Callable[..., Any], Callable[..., Any]] = {}
+HANDLED_FUNCTIONS: dict[Callable[..., Any], Callable[..., Any]] = {}
 
 
 TRANGE = slice | npt.NDArray[np.bool_ | np.int32 | np.int64 | np.uint32 | np.uint64]
@@ -255,7 +250,7 @@ class PatternsSOne:
         return len(self.ones)
 
     @property
-    def shape(self) -> Tuple[int, int]:
+    def shape(self) -> tuple[int, int]:
         return self.num_data, self.num_pix
 
     def mean_photon_count(self) -> float:
@@ -350,18 +345,10 @@ class PatternsSOne:
 
     def sum(
         self,
-        axis: Optional[int] = None,
+        axis: int | None = None,
         keepdims: bool = False,
-        dtype: Optional[npt.DTypeLike] = None,
-    ) -> Union[
-        npt.NDArray[Any],
-        np.int32,
-        np.int64,
-        np.float32,
-        np.float64,
-        int,
-        float,
-    ]:
+        dtype: npt.DTypeLike | None = None,
+    ) -> npt.NDArray[Any] | np.int32 | np.int64 | np.float32 | np.float64 | int | float:
         if axis is None:
             return cast(
                 int, len(self.place_ones) + np.sum(self.count_multi, dtype=dtype)
@@ -405,7 +392,7 @@ class PatternsSOne:
     def __getitem__(
         self,
         index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
-    ) -> Union[npt.NDArray[np.int32], PatternsSOne]:
+    ) -> npt.NDArray[np.int32] | PatternsSOne:
         match index:
             case int() | np.integer():
                 return self._get_pattern(int(index))
@@ -420,16 +407,16 @@ class PatternsSOne:
 
     def write(
         self,
-        path: Union[PATH_TYPE, io.BytesIO],
+        path: PATH_TYPE | io.BytesIO,
         *,
         h5version: str = "2",
         overwrite: bool = False,
-        compression: Union[None, int, str] = None,
+        compression: None | int | str = None,
         compression_opts: Any = None,
         shuffle: bool = False,
         position_encoding: str = "absolute",
         check_sorted: bool = False,
-        hdf5_version: Optional[str] = None,
+        hdf5_version: str | None = None,
     ) -> None:
         return write_patterns(
             [self],
@@ -470,8 +457,8 @@ class PatternsSOne:
 
     def __array__(
         self,
-        dtype: Optional[npt.DTypeLike] = None,
-        copy: Optional[bool] = None,
+        dtype: npt.DTypeLike | None = None,
+        copy: bool | None = None,
     ) -> npt.NDArray[Any]:
         ans = self.todense()
         if dtype is not None:
@@ -489,7 +476,7 @@ class PatternsSOne:
     def __array_function__(
         self,
         func: Callable[..., Any],
-        types: Iterable[Type[object]],
+        types: Iterable[type[object]],
         args: Iterable[object],
         kwargs: Mapping[str, object],
     ) -> object:
@@ -554,7 +541,7 @@ def implements(np_function: Callable[..., Any]) -> Callable[[FT], FT]:
 
 def _iter_buffered_arrays(
     pattern_sets: Sequence[PatternsSOneBase], buffer_size: int, attribute: str
-) -> Iterable[Union[npt.NDArray[np.int32], npt.NDArray[np.uint32]]]:
+) -> Iterable[npt.NDArray[np.int32] | npt.NDArray[np.uint32]]:
     buffer = []
     nbytes = 0
     for pattern_set in pattern_sets:
@@ -579,7 +566,7 @@ def _iter_buffered_arrays(
 @deprecated("Use _iter_buffered_arrays() internally.")
 def iter_array_buffer(
     datas: Sequence[PatternsSOneBase], buffer_size: int, g: str
-) -> Iterable[Union[npt.NDArray[np.int32], npt.NDArray[np.uint32]]]:
+) -> Iterable[npt.NDArray[np.int32] | npt.NDArray[np.uint32]]:
     return _iter_buffered_arrays(datas, buffer_size, g)
 
 
@@ -610,7 +597,7 @@ def _write_bytes(datas: Sequence[PatternsSOneBase], path: io.BytesIO) -> None:
 
 
 def _h5_filter_kwargs(
-    compression: Union[None, int, str], compression_opts: Any, shuffle: bool
+    compression: None | int | str, compression_opts: Any, shuffle: bool
 ) -> dict[str, Any]:
     if compression == "zstd":
         plugin = hdf5plugin()
@@ -631,7 +618,7 @@ def _write_h5_v2(
     path: H5Path,
     overwrite: bool,
     buffer_size: int,
-    compression: Union[None, int, str] = None,
+    compression: None | int | str = None,
     compression_opts: Any = None,
     shuffle: bool = False,
     position_encoding: str = "absolute",
@@ -698,17 +685,17 @@ def _write_h5_v2(
 
 def write_patterns(
     datas: Sequence[PatternsSOneBase],
-    path: Union[PATH_TYPE, io.BytesIO],
+    path: PATH_TYPE | io.BytesIO,
     *,
     h5version: str = "2",
     overwrite: bool = False,
     buffer_size: int = 1073741824,  # 2 ** 30 bytes = 1 GB
-    compression: Union[None, int, str] = None,
+    compression: None | int | str = None,
     compression_opts: Any = None,
     shuffle: bool = False,
     position_encoding: str = "absolute",
     check_sorted: bool = False,
-    hdf5_version: Optional[str] = None,
+    hdf5_version: str | None = None,
 ) -> None:
     if hdf5_version is not None:
         if h5version != "2":
@@ -741,7 +728,7 @@ def _write_h5_v1(
     path: H5Path,
     overwrite: bool,
     start: int = 0,
-    end: Optional[int] = None,
+    end: int | None = None,
 ) -> None:
     dt = h5py.special_dtype(vlen=np.int32)
     with path.open_group("a", "a") as (_, fp):
@@ -774,7 +761,7 @@ def _write_h5_v1(
 
 @implements(np.concatenate)
 def _concatenate_emc_pattern_arrays(
-    patterns_l: "Sequence[PatternsSOne]", axis: int = 0, casting: str = "safe"
+    patterns_l: Sequence[PatternsSOne], axis: int = 0, casting: str = "safe"
 ) -> PatternsSOne:
     "stack pattern sets together"
     if axis == 0:
@@ -823,12 +810,12 @@ def _concatenate_emc_pattern_arrays(
 
 @deprecated("Use numpy.concatenate() instead.")
 def concatenate_PatternsSOne(
-    patterns_l: "Sequence[PatternsSOne]", axis: int = 0, casting: str = "safe"
+    patterns_l: Sequence[PatternsSOne], axis: int = 0, casting: str = "safe"
 ) -> PatternsSOne:
     return _concatenate_emc_pattern_arrays(patterns_l, axis, casting)
 
 
-def _full(shape: Tuple[int, int], val: int) -> PatternsSOne:
+def _full(shape: tuple[int, int], val: int) -> PatternsSOne:
     num_data, num_pix = shape
     return PatternsSOne(
         num_pix,
@@ -840,7 +827,7 @@ def _full(shape: Tuple[int, int], val: int) -> PatternsSOne:
     )
 
 
-def _ones(shape: Tuple[int, int]) -> PatternsSOne:
+def _ones(shape: tuple[int, int]) -> PatternsSOne:
     num_data, num_pix = shape
     return PatternsSOne(
         num_pix,
@@ -852,7 +839,7 @@ def _ones(shape: Tuple[int, int]) -> PatternsSOne:
     )
 
 
-def _zeros(shape: Tuple[int, int]) -> PatternsSOne:
+def _zeros(shape: tuple[int, int]) -> PatternsSOne:
     num_data, num_pix = shape
     return PatternsSOne(
         num_pix,

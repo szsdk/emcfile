@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Optional, TypeVar, cast
+from typing import TypeVar, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -21,7 +21,7 @@ __all__ = ["patterns"]
 T1 = TypeVar("T1", bound=npt.NBitBase)
 
 
-def _from_dense_array(arr: npt.NDArray["np.integer[T1]"]) -> PatternsSOne:
+def _from_dense_array(arr: npt.NDArray[np.integer[T1]]) -> PatternsSOne:
     idx = arr == 1
     ones = idx.sum(axis=1)
     place_ones = idx.nonzero()[1]
@@ -61,7 +61,7 @@ def _from_coo_array(coo: coo_matrix | coo_array) -> PatternsSOne:
 
 @deprecated("Use patterns() with a dense array instead.")
 def dense_to_PatternsSOne(
-    arr: npt.NDArray["np.integer[T1]"],
+    arr: npt.NDArray[np.integer[T1]],
 ) -> PatternsSOne:
     return _from_dense_array(arr)
 
@@ -93,8 +93,8 @@ def patterns(
     | Sequence[SPARSE_PATTERN],
     /,
     *,
-    start: Optional[int] = None,
-    end: Optional[int] = None,
+    start: int | None = None,
+    end: int | None = None,
 ) -> PatternsSOne:
     """
     The `patterns` function is the primary interface for creating `PatternsSOne`
