@@ -13,6 +13,7 @@ import h5py
 import numpy as np
 import numpy.typing as npt
 
+from ._delta import decode_pattern_local_delta
 from ._emc_patterns import (
     SPARSE_PATTERN,
     TRANGE,
@@ -21,9 +22,8 @@ from ._emc_patterns import (
     _count_offsets,
     write_patterns,
 )
-from ._delta import decode_pattern_local_delta
-from ._h5_filters import ensure_group_filters
 from ._formatting import pretty_size
+from ._h5_filters import ensure_group_filters
 from ._hdf5 import PATH_TYPE, H5Path, h5path, make_path
 from ._html_display import html_card
 from ._indexing import contiguous_ranges
@@ -484,7 +484,9 @@ def read_indexed_array_h5(
     )
 
 
-def _selected_counts(counts: npt.NDArray[np.uint32], index_ranges: INDEX_ARRAY) -> npt.NDArray[np.uint32]:
+def _selected_counts(
+    counts: npt.NDArray[np.uint32], index_ranges: INDEX_ARRAY
+) -> npt.NDArray[np.uint32]:
     selected = [counts[start:stop] for start, stop in index_ranges]
     return np.concatenate(selected) if selected else np.array([], dtype=np.uint32)
 
@@ -521,7 +523,9 @@ class PatternsSOneH5(PatternsSOneFile):
         if self.h5version != "2":
             raise ValueError(f"Unsupported HDF5 EMC format version {self.h5version!r}")
         if self.position_encoding not in {"absolute", "delta"}:
-            raise ValueError(f"Unsupported HDF5 position encoding {self.position_encoding!r}")
+            raise ValueError(
+                f"Unsupported HDF5 position encoding {self.position_encoding!r}"
+            )
         self.ndim = 2
         self._init_idx = False
 
@@ -539,17 +543,21 @@ class PatternsSOneH5(PatternsSOneFile):
         self.init_idx()
         with self._fn.open_group() as (_, gp):
             assert isinstance(gp, (h5py.Group, h5py.File))
-            ensure_group_filters(gp)
-            if self.position_encoding == "delta" and np.array_equal(index_ranges, [[0, self.num_data]]):
+            if self.position_encoding == "delta" and np.array_equal(
+                index_ranges, [[0, self.num_data]]
+            ):
                 from ._h5_full_scan import full_scan
+
                 result = full_scan(gp, self.ones_idx, self.multi_idx)
                 if result is not None:
                     return result
             elif self.position_encoding == "delta":
                 from ._h5_indexed import indexed_read
+
                 result = indexed_read(gp, index_ranges, self.ones_idx, self.multi_idx)
                 if result is not None:
                     return result
+            ensure_group_filters(gp)
             place_ones = read_indexed_array_h5(
                 cast(h5py.Dataset, gp["place_ones"]), index_ranges, self.ones_idx
             )
@@ -560,7 +568,15 @@ class PatternsSOneH5(PatternsSOneFile):
                 cast(h5py.Dataset, gp["count_multi"]), index_ranges, self.multi_idx
             )
             if self.position_encoding == "delta":
-                return (decode_pattern_local_delta(place_ones, _selected_counts(self.ones, index_ranges)), decode_pattern_local_delta(place_multi, _selected_counts(self.multi, index_ranges)), count_multi)
+                return (
+                    decode_pattern_local_delta(
+                        place_ones, _selected_counts(self.ones, index_ranges)
+                    ),
+                    decode_pattern_local_delta(
+                        place_multi, _selected_counts(self.multi, index_ranges)
+                    ),
+                    count_multi,
+                )
             return place_ones.view("u4"), place_multi.view("u4"), count_multi
 
     def open(self) -> PatternsSOneH5ReadBuffer:
@@ -572,7 +588,11 @@ class PatternsSOneH5(PatternsSOneFile):
             assert isinstance(gp, (h5py.Group, h5py.File))
             ensure_group_filters(gp)
             values = cast(h5py.Dataset, gp["place_ones"])[...]
-            return decode_pattern_local_delta(values, self.ones) if self.position_encoding == "delta" else values
+            return (
+                decode_pattern_local_delta(values, self.ones)
+                if self.position_encoding == "delta"
+                else values
+            )
 
     @property
     def place_multi(self) -> npt.NDArray[np.uint32]:
@@ -580,7 +600,11 @@ class PatternsSOneH5(PatternsSOneFile):
             assert isinstance(gp, (h5py.Group, h5py.File))
             ensure_group_filters(gp)
             values = cast(h5py.Dataset, gp["place_multi"])[...]
-            return decode_pattern_local_delta(values, self.multi) if self.position_encoding == "delta" else values
+            return (
+                decode_pattern_local_delta(values, self.multi)
+                if self.position_encoding == "delta"
+                else values
+            )
 
     @property
     def count_multi(self) -> npt.NDArray[np.int32]:
@@ -620,17 +644,21 @@ class PatternsSOneH5ReadBuffer(PatternsSOneH5):
         assert self._file_handle is not None
         gp = self._file_handle[self._fn.gn]
         assert isinstance(gp, (h5py.Group, h5py.File))
-        ensure_group_filters(gp)
-        if self.position_encoding == "delta" and np.array_equal(index_ranges, [[0, self.num_data]]):
+        if self.position_encoding == "delta" and np.array_equal(
+            index_ranges, [[0, self.num_data]]
+        ):
             from ._h5_full_scan import full_scan
+
             result = full_scan(gp, self.ones_idx, self.multi_idx)
             if result is not None:
                 return result
         elif self.position_encoding == "delta":
             from ._h5_indexed import indexed_read
+
             result = indexed_read(gp, index_ranges, self.ones_idx, self.multi_idx)
             if result is not None:
                 return result
+        ensure_group_filters(gp)
         place_ones = read_indexed_array_h5(
             cast(h5py.Dataset, gp["place_ones"]), index_ranges, self.ones_idx
         )
@@ -641,7 +669,15 @@ class PatternsSOneH5ReadBuffer(PatternsSOneH5):
             cast(h5py.Dataset, gp["count_multi"]), index_ranges, self.multi_idx
         )
         if self.position_encoding == "delta":
-            return (decode_pattern_local_delta(place_ones, _selected_counts(self.ones, index_ranges)), decode_pattern_local_delta(place_multi, _selected_counts(self.multi, index_ranges)), count_multi)
+            return (
+                decode_pattern_local_delta(
+                    place_ones, _selected_counts(self.ones, index_ranges)
+                ),
+                decode_pattern_local_delta(
+                    place_multi, _selected_counts(self.multi, index_ranges)
+                ),
+                count_multi,
+            )
         return place_ones.view("u4"), place_multi.view("u4"), count_multi
 
 

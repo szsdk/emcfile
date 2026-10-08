@@ -233,27 +233,45 @@ validate that invariant and raise `ValueError` before writing.
 
 `count_multi` remains absolute. These are ordinary HDF5 shuffle+Zstd files and
 can be read with h5py after importing `hdf5plugin`. emcfile provides automatic
-full-scan and opt-in indexed direct-chunk implementations for the compatible
-delta+shuffle+Zstd layout; VDS files and other filter pipelines
+full-scan and single-frame direct-chunk implementations, plus opt-in multi-frame
+indexed acceleration, for the compatible delta+shuffle+Zstd layout.
+VDS files and other filter pipelines
 use h5py's generic reader. Set `EMCFILE_H5_FULL_SCAN_WORKERS=0` to disable the
 full-scan optimization.
 
-Indexed reads use `direct_threads`: the calling thread reads each touched
-physical chunk once, while workers decompress, unshuffle, and scatter selected
+Single-frame indexed reads (`source[i]`, `source[i:i+1]`, and `source.sparse_pattern(i)`)
+automatically use a serial direct-chunk path for this layout when `zstandard`
+is installed. Zstd still decompresses each touched chunk, but only the selected
+frame's byte-plane spans are unshuffled and its positions reconstructed.
+There is no thread-pool or Numba startup cost, no additional chunk cache, and no
+change to the file layout, chunk size, compression ratio, or writer.
+Other layouts and missing optional dependencies fall back to h5py.
+
+Multi-frame indexed reads use `direct_threads`: the calling thread reads each
+touched physical chunk once, while workers decompress, unshuffle, and scatter selected
 spans. Order and duplicates are retained, followed by parallel pattern-local
 delta reconstruction. At most twice the worker count of chunk jobs are pending.
-Set `EMCFILE_H5_INDEXED_WORKERS=0` to use the generic indexed reader, or a
-positive integer to enable it with a CPU-affinity-clamped budget (default `0`,
-disabled; `4` is a useful starting point). This applies to both
+Set `EMCFILE_H5_INDEXED_WORKERS=0` explicitly to use the generic reader even for
+single frames, or a positive integer to enable multi-frame acceleration with a
+CPU-affinity-clamped budget (`4` is a useful starting point). When unset, only
+single-frame acceleration is enabled. Single frames stay serial regardless
+of the worker budget. This applies to both
 `open_patterns(path)[ids]` and persistent `with source.open()`
 readers. No process pool or separate HDF5 handles are required.
 
-The full-scan/writer paths use four workers by default; indexed acceleration is
-opt-in because small/localized reads can favor h5py's cache and first-use Numba
-compilation adds latency. Power users can set
+The full-scan/writer paths use four workers by default; multi-frame indexed
+acceleration is opt-in because small/localized reads can favor h5py's cache and
+first-use Numba compilation adds latency. Power users can set
 `EMCFILE_H5_WRITE_WORKERS`, `EMCFILE_H5_FULL_SCAN_WORKERS`, or
 `EMCFILE_H5_INDEXED_WORKERS` before starting
 Python; set either reader budget to `0` to disable that reader's direct path.
+
+For a reproducible warm-cache comparison on your own file, run
+`uv run --extra hdf5-fast python benchmarks/hdf5_single_frame.py patterns.h5`,
+then repeat with `EMCFILE_H5_INDEXED_WORKERS=0`. The benchmark reports random,
+sequential, and repeated scalar reads, single-frame slices, indexed batches,
+and full reads for both persistent and reopen-per-access readers. Opening and
+count initialization are reported separately; output checksums are not timed.
 
 General arrays and nested Python dictionaries can be stored with the HDF5
 helpers:
@@ -346,7 +364,8 @@ pip install 'emcfile[hdf5-fast]'
 Zstd uses the portable `hdf5plugin` filter; direct read/write acceleration is
 automatic and falls back to generic h5py when its optional native helpers are
 unavailable. The full-scan reader and writer use four aggregate workers by default;
-indexed acceleration is disabled until explicitly enabled.
+single-frame indexed reads are accelerated automatically without workers,
+while multi-frame indexed acceleration is disabled until explicitly enabled.
 Set `EMCFILE_H5_WRITE_WORKERS`, `EMCFILE_H5_FULL_SCAN_WORKERS`, or
 `EMCFILE_H5_INDEXED_WORKERS` to override
 that budget (reader `0` disables the corresponding direct path). Four workers is a

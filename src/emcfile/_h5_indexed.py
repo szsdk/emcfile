@@ -12,7 +12,9 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import local
 from typing import Any
 
+import h5py
 import numpy as np
+import numpy.typing as npt
 
 from ._delta import decode_segmented_delta_inplace
 from ._h5_full_scan import _decode_chunk, _unshuffle_u32, eligible
@@ -44,15 +46,22 @@ def _plan(ranges: Any, offsets: Any, chunk_len: int) -> tuple[Any, Any, Any]:
 def indexed_read(group: Any, ranges: Any, ones_offsets: Any, multi_offsets: Any) -> Any:
     """Return decoded payloads, or ``None`` when the generic reader is needed.
 
-    Environment budget zero disables this path. Layout checks are shared with
-    the full-scan reader; missing optional dependencies never require a fork.
+    Single frames decode only selected byte-plane spans without workers/JIT.
+    Other selections remain opt-in. An explicit budget zero disables both.
     """
-    workers = env_workers("EMCFILE_H5_INDEXED_WORKERS", 0, allow_zero=True)
-    if not workers or not eligible(group):
-        return None
-    if any(importlib.util.find_spec(name) is None for name in ("numba", "zstandard")):
-        return None
     ranges = np.asarray(ranges)
+    single = ranges.shape == (1, 2) and ranges[0, 1] == ranges[0, 0] + 1
+    workers = env_workers(
+        "EMCFILE_H5_INDEXED_WORKERS", 1 if single else 0, allow_zero=True
+    )
+    if not workers:
+        return None
+    datasets = [group[name] for name in ("place_ones", "place_multi", "count_multi")]
+    if not eligible(group, datasets=datasets):
+        return None
+    dependencies = ("zstandard",) if single else ("numba", "zstandard")
+    if any(importlib.util.find_spec(name) is None for name in dependencies):
+        return None
     if ranges.ndim != 2 or ranges.shape[1] != 2:
         raise ValueError("Pattern ranges must have shape (N, 2)")
     count = ones_offsets.size - 1
@@ -62,7 +71,6 @@ def indexed_read(group: Any, ranges: Any, ones_offsets: Any, multi_offsets: Any)
         or np.any(ranges[:, 0] > ranges[:, 1])
     ):
         raise IndexError("Pattern range is out of bounds")
-    datasets = [group[name] for name in ("place_ones", "place_multi", "count_multi")]
     for dataset, offsets in zip(datasets, (ones_offsets, multi_offsets, multi_offsets)):
         if (
             offsets.ndim != 1
@@ -72,6 +80,8 @@ def indexed_read(group: Any, ranges: Any, ones_offsets: Any, multi_offsets: Any)
             or np.any(offsets[1:] < offsets[:-1])
         ):
             raise ValueError("Pattern counts do not match HDF5 v2 payload size")
+    if single:
+        return _single_frame(datasets, int(ranges[0, 0]), ones_offsets, multi_offsets)
     _unshuffle_u32(np.zeros(4, "u1"), np.empty(1, "u4"), 1)
     # Compile the delta kernel before worker dispatch as well.
     decode_segmented_delta_inplace(
@@ -131,3 +141,39 @@ def indexed_read(group: Any, ranges: Any, ones_offsets: Any, multi_offsets: Any)
                     future.result()
             outputs.append(output)
     return tuple(outputs)
+
+
+def _single_frame(
+    datasets: list[h5py.Dataset],
+    frame: int,
+    ones_offsets: npt.NDArray[np.uint64],
+    multi_offsets: npt.NDArray[np.uint64],
+) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
+    import zstandard
+
+    decoder = zstandard.ZstdDecompressor()
+    outputs = []
+    for index, (dataset, offsets) in enumerate(
+        zip(datasets, (ones_offsets, multi_offsets, multi_offsets))
+    ):
+        begin, end = int(offsets[frame]), int(offsets[frame + 1])
+        output = np.empty(end - begin, dtype=dataset.dtype)
+        n = dataset.chunks[0]
+        destination = 0
+        while begin < end:
+            chunk, start = divmod(begin, n)
+            length = min(end - begin, n - start)
+            mask, payload = dataset.id.read_direct_chunk((chunk * n,))
+            output[destination : destination + length] = _decode_chunk(
+                mask,
+                payload,
+                n,
+                decoder=decoder,
+                selection=slice(start, start + length),
+            ).view(dataset.dtype)
+            begin += length
+            destination += length
+        if index < 2:
+            np.cumsum(output, dtype=np.uint32, out=output)
+        outputs.append(output)
+    return outputs[0], outputs[1], outputs[2]
