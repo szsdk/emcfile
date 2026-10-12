@@ -36,6 +36,16 @@ _log = logging.getLogger(__name__)
 
 
 class SPARSE_PATTERN(NamedTuple):
+    """Sparse event arrays for one pattern.
+
+    ``SparsePattern`` is the descriptive public alias for this named tuple.
+    ``num_pix`` is the total number of detector pixels. ``place_ones`` stores
+    indices with count one; ``place_multi`` and ``count_multi`` store paired
+    indices and counts greater than one. All positions are absolute pixel
+    indices, including when the source file uses delta encoding.
+
+    The tuple is immutable, but its NumPy arrays can be writable views.
+    """
     num_pix: int
     place_ones: npt.NDArray[np.uint32]
     place_multi: npt.NDArray[np.uint32]
@@ -212,6 +222,12 @@ class PatternsSOne:
         return self.multi_idx
 
     def check(self) -> bool:
+        """Check that per-pattern counts match the event-array lengths.
+
+        Returns ``True`` on success and raises ``ValueError`` on a length
+        mismatch. Does not validate dtypes, pixel bounds, photon values,
+        sorted positions, or duplicate positions.
+        """
         if self.num_data != len(self.multi):
             raise ValueError(
                 f"The `multi`{len(self.multi)} has different length with `ones`({self.num_data})"
@@ -238,6 +254,19 @@ class PatternsSOne:
         return self.num_data
 
     def sparse_pattern(self, idx: int) -> SPARSE_PATTERN:
+        """Return the sparse events for one pattern without densifying it.
+
+        Parameters
+        ----------
+        idx : int
+            Zero-based pattern index; use ``0 <= idx < num_patterns``.
+
+        Returns
+        -------
+        SparsePattern
+            Pixel count and views into this array's event buffers. Modifying
+            those views modifies the original data.
+        """
         return SPARSE_PATTERN(
             self.num_pix,
             self.place_ones[self.ones_idx[idx] : self.ones_idx[idx + 1]],
@@ -254,6 +283,11 @@ class PatternsSOne:
         return self.num_data, self.num_pix
 
     def mean_photon_count(self) -> float:
+        """Return total photons divided by the number of patterns.
+
+        Returns ``0.0`` for an empty dataset. This is a per-pattern mean,
+        not a per-pixel mean.
+        """
         if self.num_data == 0:
             return 0.0
         return cast(int, self.sum()) / self.num_data
@@ -531,6 +565,18 @@ class PatternsSOne:
         self,
         index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
     ) -> npt.NDArray[np.int32] | PatternsSOne:
+        """Select patterns and optionally pixels.
+
+        An integer returns a dense 1D ``int32`` NumPy array. A row slice or
+        1D integer/Boolean NumPy array returns an ``EMCPatternArray``.
+        Contiguous row slices share event buffers; strided slices and row
+        index arrays copy events. Integer row indices preserve order and
+        duplicates. Boolean masks must match the number of patterns.
+
+        A two-item tuple selects rows and columns. Selections containing a
+        slice select rows first; two advanced selectors follow SciPy's
+        paired-index semantics rather than forming a Cartesian product.
+        """
         if isinstance(index, tuple) and len(index) == 2:
             rows, columns = index
             # Two fancy selectors have SciPy's paired-index semantics, rather
@@ -592,6 +638,16 @@ class PatternsSOne:
         check_sorted: bool = False,
         hdf5_version: str | None = None,
     ) -> None:
+        """Write this array to an EMC binary or HDF5 pattern file.
+
+        Parameters match ``write_patterns`` except that the source is this
+        array and the write buffer size is not configurable here. HDF5 v2
+        is the default, with absolute positions and no compression.
+
+        See Also
+        --------
+        write_patterns : Output formats, compression, and encoding options.
+        """
         return write_patterns(
             [self],
             path,
@@ -643,11 +699,19 @@ class PatternsSOne:
         )
 
     def tocsr(self) -> csr_array:
+        """Convert to a SciPy CSR array with shape ``self.shape``.
+
+        Combines the one-photon and multi-photon streams without allocating
+        a dense pattern array.
+        """
         return self._get_sparse_ones() + self._get_sparse_multi()
 
     def todense(self) -> npt.NDArray[np.int32]:
-        """
-        To dense ndarray
+        """Allocate a dense ``int32`` NumPy array of photon counts.
+
+        The result is squeezed: a singleton pattern or pixel dimension is
+        removed, and a one-pattern, one-pixel dataset becomes a 0D array.
+        Memory before squeezing is ``num_patterns * num_pixels * 4`` bytes.
         """
         ans = np.zeros(self.shape, dtype=np.int32)
         ans += self._get_sparse_ones()
@@ -691,6 +755,11 @@ class PatternsSOne:
         return HANDLED_FUNCTIONS[func](*args, **kwargs)
 
     def has_sorted_indices(self) -> bool:
+        """Return whether positions are strictly increasing within each stream.
+
+        One-photon and multi-photon positions are checked separately for
+        each pattern; duplicate positions within a stream are not sorted.
+        """
         a = np.subtract(self.place_multi[1:], self.place_multi[:-1], dtype=int)
         a[self.multi_idx[1:-1] - 1] = 1
         if np.any(a <= 0):
@@ -704,6 +773,11 @@ class PatternsSOne:
         return self.has_sorted_indices()
 
     def sort_indices(self) -> None:
+        """Sort pixel positions within each pattern in place.
+
+        Reorders multi-photon counts together with their positions. Does
+        not merge duplicates. Shared event-buffer views observe the changes.
+        """
         if self.has_sorted_indices():
             return
         for i in range(self.num_data):
@@ -896,6 +970,68 @@ def write_patterns(
     check_sorted: bool = False,
     hdf5_version: str | None = None,
 ) -> None:
+    """Write pattern sources in order to one EMC binary or HDF5 dataset.
+
+    Parameters
+    ----------
+    datas : sequence of pattern sources
+        In-memory arrays or file-backed sources with equal pixel counts.
+    path : str, pathlib.Path, H5Path, or io.BytesIO
+        ``.emc`` or ``.bin`` for binary output; ``.h5`` or
+        ``"file.h5::/group"`` for HDF5. A byte stream receives EMC binary.
+    h5version : {"1", "2"}, default "2"
+        HDF5 layout version. Version 1 accepts only one source.
+    overwrite : bool, default False
+        Allow replacing existing output pattern data. For a byte stream,
+        data is written at its current position regardless of this flag.
+    buffer_size : int, default 1073741824
+        Approximate source batch size in bytes for HDF5 v2 writes. This
+        is a batching target, not a cap on total memory usage.
+    compression : str or int, optional
+        HDF5 compressor, such as ``"gzip"``, ``"lzf"``, or ``"zstd"``.
+        Zstd requires ``hdf5plugin`` from the ``hdf5-fast`` extra.
+    compression_opts : optional
+        Compressor-specific options. For Zstd, the compression level
+        defaults to 1 when omitted.
+    shuffle : bool, default False
+        Enable the HDF5 byte-shuffle filter.
+    position_encoding : {"absolute", "delta"}, default "absolute"
+        HDF5 v2 pixel-position encoding. Delta encoding restarts within
+        each pattern and requires sorted positions. Counts are unchanged.
+    check_sorted : bool, default False
+        Validate position ordering before writing delta-encoded data.
+    hdf5_version : {"1", "2"}, optional
+        Descriptive alias for ``h5version``. Do not supply both names.
+
+    Raises
+    ------
+    FileExistsError
+        If output pattern data exists and overwriting is disabled.
+    ValueError
+        If the output format, HDF5 version, encoding, or source pixel
+        counts are incompatible, or requested ordering validation fails.
+    NotImplementedError
+        If writing multiple sources using HDF5 version 1.
+
+    Notes
+    -----
+    Compression, shuffle, position encoding, ordering validation, and
+    buffer size apply to HDF5 v2 output. Binary and HDF5 v1 output do not
+    use these options. Compatible delta/shuffle/Zstd writes can use the
+    optional accelerated writer automatically.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import emcfile as ef
+    >>> from io import BytesIO
+    >>> data = ef.patterns(np.array([[0, 1, 2]], dtype=np.int32))
+    >>> stream = BytesIO()
+    >>> ef.write_patterns([data, data], stream)
+    >>> _ = stream.seek(0)
+    >>> ef.patterns(stream).shape
+    (2, 3)
+    """
     if hdf5_version is not None:
         if h5version != "2":
             raise TypeError("Use either 'hdf5_version' or 'h5version', not both")

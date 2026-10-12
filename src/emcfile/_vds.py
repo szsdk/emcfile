@@ -19,7 +19,41 @@ def _dataset_path(group: str, name: str) -> str:
 
 
 def create_vds(output_file: PATH_TYPE, source_files: Sequence[PATH_TYPE], *, overwrite: bool = False, relative_paths: bool = True) -> H5Path:
-    """Concatenate compatible v2 files without copying their payload bytes."""
+    """Concatenate HDF5 v2 sources using virtual datasets.
+
+    Parameters
+    ----------
+    output_file : path-like
+        Destination HDF5 file or ``"file.h5::/group"`` path. Must not
+        refer to a source file.
+    source_files : sequence of paths
+        Nonempty sequence of HDF5 v2 pattern groups in concatenation
+        order. All must have equal pixel counts and position encodings.
+    overwrite : bool, default False
+        Permit an existing output file. A root destination replaces the
+        entire file; a group destination replaces only that group.
+    relative_paths : bool, default True
+        Store source filenames relative to the output file's directory.
+        If False, store absolute source filenames.
+
+    Returns
+    -------
+    H5Path
+        Resolved destination path, suitable for ``open_patterns``.
+
+    Raises
+    ------
+    ValueError
+        If sources are empty, incompatible, or include the output file.
+    FileExistsError
+        If the destination file exists and overwriting is disabled.
+
+    Notes
+    -----
+    Event data is referenced rather than copied. Source files must remain
+    available; relative paths require preserving their locations relative
+    to the output file. VDS reads use the generic HDF5 reader.
+    """
     if not source_files:
         raise ValueError("source_files must not be empty")
     output, sources = h5path(output_file).resolve(), [h5path(path).resolve() for path in source_files]

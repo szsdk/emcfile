@@ -16,43 +16,28 @@ NP_IMG: TypeAlias = npt.NDArray[np.int_]
 
 
 class PatternsSOneCollector:
-    """
-    Collects `np.ndarray` patterns and efficiently converts them into a
-    `PatternsSOne` object.
+    """Accumulate dense patterns into sparse in-memory batches.
 
-    `EMCPatternCollector` is the preferred descriptive public name. The
-    historical class name remains an exact alias for compatibility.
-
-    This class is designed to incrementally build a `PatternsSOne` pattern set
-    from a series of NumPy arrays. It uses a buffer to accumulate patterns
-    and converts them to the more memory-efficient `PatternsSOne` format in
-    batches, which is useful when dealing with a large number of patterns that
-    may not fit into memory all at once.
+    ``EMCPatternCollector`` is the descriptive public alias. Each appended
+    image is flattened; all patterns must have the same number of pixels.
+    Converted batches remain in memory until the collector is discarded.
 
     Parameters
     ----------
-    max_buffer_size
-        The maximum number of `np.ndarray` patterns to store in the buffer
-        before converting them to a `PatternsSOne` object. Defaults to 128.
-
-    Attributes
-    ----------
-    max_buffer_size : int
-        The maximum size of the internal buffer.
+    max_buffer_size : int, default 128
+        Historical name for the number of dense patterns per batch.
+    batch_size : int, optional
+        Descriptive alias for ``max_buffer_size``. Supply only one name.
 
     Examples
     --------
     >>> import numpy as np
-    >>> from emcfile import PatternsSOneCollector
-
-    >>> collector = PatternsSOneCollector(max_buffer_size=64)
-    >>> for _ in range(100):
-    ...     pattern = np.random.randint(0, 5, size=(10, 10))
-    ...     collector.append(pattern)
-
-    >>> patterns = collector.patterns()
-    >>> patterns.num_data
-    100
+    >>> import emcfile as ef
+    >>> collector = ef.EMCPatternCollector(batch_size=2)
+    >>> collector.append(np.array([0, 1, 2], dtype=np.int32))
+    >>> collector.extend(np.array([[1, 0, 0], [0, 0, 3]], dtype=np.int32))
+    >>> collector.to_patterns().shape
+    (3, 3)
     """
 
     def __init__(self, max_buffer_size: int = 128, *, batch_size: int | None = None):
@@ -175,21 +160,12 @@ class PatternsSOneCollector:
             self.append(img)
 
     def to_patterns(self) -> PatternsSOneList:
-        """
-        Finalizes the collection process and returns the collected patterns.
+        """Flush pending images and return a collection of sparse batches.
 
-        This method clears the internal buffer and concatenates all stored
-        `PatternsSOne` objects into a single `PatternsSOneList`.
-
-        Returns
-        -------
-        PatternsSOneList
-            A `PatternsSOneList` object containing all the collected patterns.
-
-        Raises
-        ------
-        ValueError
-            If no patterns have been added to the collector.
+        Returns an ``EMCPatternCollection`` referencing the stored batches;
+        no contiguous event-array concatenation is performed. The collector
+        retains its batches and can accept additional patterns afterward.
+        Raises ``ValueError`` if no patterns have been collected.
         """
         self._flush_buffer()
         if len(self._patterns) == 0:
@@ -201,18 +177,10 @@ class PatternsSOneCollector:
         return self.to_patterns()
 
     def pattern_batches(self) -> list[PatternsSOne]:
-        """
-        Returns a list of `PatternsSOne` objects.
+        """Flush pending images and return the internal list of sparse batches.
 
-        Instead of concatenating all patterns into a single object, this method
-        returns a list of the `PatternsSOne` objects that have been created
-        from the buffered NumPy arrays. This can be useful for processing large
-        datasets in chunks.
-
-        Returns
-        -------
-        list[PatternsSOne]
-            A list of `PatternsSOne` objects.
+        The list and its pattern arrays are shared with the collector.
+        Mutating them changes the collector's stored data.
         """
         self._flush_buffer()
         return self._patterns
@@ -261,24 +229,14 @@ class PatternsSOneCollector:
         check_sorted: bool = False,
         hdf5_version: str | None = None,
     ) -> None:
-        """
-        Writes the collected patterns to a file.
+        """Flush pending images and write all collected batches to a file.
 
-        This method first finalizes the collection process and then writes the
-        patterns to the specified file.
+        Accepts the output, compression, encoding, and buffer options of
+        ``write_patterns``. Stored batches are retained after writing.
 
-        Parameters
-        ----------
-        path
-            The path to the output file.
-        h5version
-            The HDF5 file format version to use. Defaults to "2".
-        overwrite
-            If `True`, the output file will be overwritten if it already
-            exists. Defaults to `False`.
-        buffer_size
-            The buffer size in bytes for writing the patterns to the file.
-            Defaults to 1 GB.
+        See Also
+        --------
+        write_patterns : Full parameter descriptions and format restrictions.
         """
         self._flush_buffer()
         write_patterns(

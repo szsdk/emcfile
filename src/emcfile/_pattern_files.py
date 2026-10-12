@@ -112,6 +112,17 @@ def read_patterns(
 
 
 class PatternsSOneFile:
+    """Base interface for file-backed sparse photon patterns.
+
+    ``FileBackedEMCPatterns`` is the descriptive public alias. Use
+    ``open_patterns`` to select a concrete reader by file format.
+    Metadata is available without loading all events. Per-pattern counts
+    and cumulative offsets are initialized when needed.
+
+    Integer indexing returns a dense pattern; slicing or NumPy row index
+    arrays materializes only the selected sparse events. Reading an event
+    property such as ``place_ones`` loads its entire event stream.
+    """
     ndim: int = 2
     num_data: int
     num_pix: int
@@ -273,6 +284,11 @@ class PatternsSOneFile:
                 )
 
     def sparse_pattern(self, index: int) -> SPARSE_PATTERN:
+        """Read one pattern as sparse event arrays with absolute positions.
+
+        ``index`` is a zero-based index in ``[0, num_patterns)``. Returns a
+        ``SparsePattern`` without allocating a dense array of pixel counts.
+        """
         return self[index : index + 1].sparse_pattern(0)
 
     def sum(
@@ -355,6 +371,12 @@ class PatternsSOneEMC(PatternsSOneFile):
             return read_patterns(fin, index_ranges, self.ones_idx, self.multi_idx)
 
     def open(self) -> PatternsSOneEMCReadBuffer:
+        """Open a persistent reader with its own file handle.
+
+        Use ``with source.open() as reader:`` to reuse the handle across
+        accesses and close it on exit. Without a context manager, call
+        ``reader.close()`` explicitly when finished.
+        """
         return PatternsSOneEMCReadBuffer(self._fn)
 
     @property
@@ -580,6 +602,12 @@ class PatternsSOneH5(PatternsSOneFile):
             return place_ones.view("u4"), place_multi.view("u4"), count_multi
 
     def open(self) -> PatternsSOneH5ReadBuffer:
+        """Open a persistent reader with its own file handle.
+
+        Use ``with source.open() as reader:`` to reuse the handle across
+        accesses and close it on exit. Without a context manager, call
+        ``reader.close()`` explicitly when finished.
+        """
         return PatternsSOneH5ReadBuffer(self._fn)
 
     @property
@@ -931,7 +959,46 @@ def file_patterns(fn: Sequence[PATH_TYPE] | PATH_TYPE) -> PatternsSOneFile:
 
 
 def open_patterns(path: Sequence[PATH_TYPE] | PATH_TYPE) -> PatternsSOneFile:
-    """Open one or more file-backed EMC pattern sources."""
+    """Open one or more pattern files without loading all event arrays.
+
+    Parameters
+    ----------
+    path : path-like or sequence of paths
+        EMC binary or HDF5 file, including ``"file.h5::/group"`` paths.
+        A list or tuple creates an ``EMCPatternCollection`` in input order.
+        A glob expression creates a collection in sorted filename order.
+        Collection members must have the same number of pixels.
+
+    Returns
+    -------
+    FileBackedEMCPatterns
+        Format-specific reader or a collection of readers. Integer row
+        indexing returns a dense NumPy array; slices and NumPy row index
+        arrays return in-memory ``EMCPatternArray`` objects.
+
+    Notes
+    -----
+    Counts and offsets are initialized when needed. Ordinary readers
+    reopen files during access. EMC binary and HDF5 v2 readers provide
+    ``open()`` for persistent access using a context manager.
+    HDF5 v1 readers load all events on first access.
+
+    Examples
+    --------
+    Keep a file open for repeated reads::
+
+        import emcfile as ef
+
+        source = ef.open_patterns("patterns.h5")
+        with source.open() as reader:
+            frame = reader.sparse_pattern(0)
+            batch = reader[:10]
+
+    See Also
+    --------
+    patterns : Load or convert pattern data into memory.
+    EMCPatternCollection : Treat several sources as one sequence.
+    """
     return file_patterns(path)
 
 

@@ -96,68 +96,57 @@ def patterns(
     start: int | None = None,
     end: int | None = None,
 ) -> PatternsSOne:
-    """
-    The `patterns` function is the primary interface for creating `PatternsSOne`
-    objects. It can read pattern sets from files, convert from arrays, or
-    initialize an empty object.
-
-    This function is highly flexible and accepts various input types to
-    streamline the process of creating pattern sets for analysis.
+    """Create an in-memory sparse photon-count array.
 
     Parameters
     ----------
     src
-        The source of the pattern set. It can be one of the following:
-        - `str` or `pathlib.Path` or `H5Path`: The path to a file containing
-          the pattern data.
-        - `io.BytesIO`: A stream of bytes containing the pattern data.
-        - `numpy.ndarray`: A dense numpy array representing the patterns.
-        - `scipy.sparse.spmatrix`: A sparse matrix representing the patterns.
-        - `int`: The number of pixels, used to create an empty `PatternsSOne`
-          object.
-        - `tuple[tuple[int, int], int]`: A shape and a value to create a
-          uniform pattern.
-        - `PatternsSOne`: An existing `PatternsSOne` object.
-        - `Sequence[SPARSE_PATTERN]`: A sequence of `SPARSE_PATTERN` objects.
-    start
-        The starting index of the patterns to read from the source.
-        If `None`, reading starts from the beginning. Defaults to `None`.
-    end
-        The ending index of the patterns to read from the source.
-        If `None`, reading continues to the end. Defaults to `None`.
+        Pattern file path, EMC binary ``BytesIO`` stream, 2D integer NumPy
+        array, SciPy sparse matrix or array, or existing ``EMCPatternArray``.
+        An integer creates an empty dataset with that many pixels.
+        ``((num_patterns, num_pixels), value)`` creates a constant dataset.
+        A nonempty list of ``SparsePattern`` records is also accepted.
+    start, end : int, optional
+        Inclusive start and exclusive end of the row range. Applied to file,
+        byte-stream, dense-array, and existing pattern-array inputs. Other
+        input forms currently ignore these arguments.
 
     Returns
     -------
-    PatternsSOne
-        A `PatternsSOne` object containing the pattern data.
+    EMCPatternArray
+        Sparse data in memory, with shape ``(num_patterns, num_pixels)``.
+        Slicing an existing pattern array can share its event buffers.
 
     Raises
     ------
     ValueError
-        If the input `numpy.ndarray` has an unsupported data type.
+        If a dense array does not have an integer dtype.
     TypeError
-        If the source type is not recognized.
+        If the input type is unsupported.
 
-    See Also
-    --------
-    PatternsSOne : The underlying class for storing and managing patterns.
-    file_patterns : A function for reading patterns from a file.
+    Notes
+    -----
+    Photon counts should be nonnegative integers. Dense conversion stores
+    values equal to one and greater than one; negative values are omitted.
+    File inputs load the selected events into memory. Use ``open_patterns``
+    for file-backed access to large datasets.
 
     Examples
     --------
     >>> import numpy as np
-    >>> from emcfile import patterns
+    >>> import emcfile as ef
+    >>> data = ef.patterns(np.array([[0, 1, 3], [1, 0, 0]], dtype=np.int32))
+    >>> data.shape
+    (2, 3)
+    >>> data[0].tolist()
+    [0, 1, 3]
+    >>> ef.patterns(1024).shape
+    (0, 1024)
 
-    Create patterns from a numpy array:
-    >>> arr = np.random.randint(0, 5, size=(10, 100))
-    >>> p = patterns(arr)
-    >>> p.num_data
-    10
-
-    Create an empty pattern set with a specific number of pixels:
-    >>> empty_p = patterns(1024)
-    >>> empty_p.num_pix
-    1024
+    See Also
+    --------
+    open_patterns : Access pattern files without loading all events.
+    EMCPatternArray : In-memory sparse representation.
     """
     match src:
         case io.BytesIO():
