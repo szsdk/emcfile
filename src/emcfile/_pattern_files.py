@@ -539,7 +539,6 @@ class PatternsSOneH5(PatternsSOneFile):
         self.init_idx()
         with self._fn.open_group() as (_, gp):
             assert isinstance(gp, (h5py.Group, h5py.File))
-            ensure_group_filters(gp)
             if self.position_encoding == "delta" and np.array_equal(index_ranges, [[0, self.num_data]]):
                 from ._h5_full_scan import full_scan
                 result = full_scan(gp, self.ones_idx, self.multi_idx)
@@ -550,6 +549,7 @@ class PatternsSOneH5(PatternsSOneFile):
                 result = indexed_read(gp, index_ranges, self.ones_idx, self.multi_idx)
                 if result is not None:
                     return result
+            ensure_group_filters(gp)
             place_ones = read_indexed_array_h5(
                 cast(h5py.Dataset, gp["place_ones"]), index_ranges, self.ones_idx
             )
@@ -620,7 +620,6 @@ class PatternsSOneH5ReadBuffer(PatternsSOneH5):
         assert self._file_handle is not None
         gp = self._file_handle[self._fn.gn]
         assert isinstance(gp, (h5py.Group, h5py.File))
-        ensure_group_filters(gp)
         if self.position_encoding == "delta" and np.array_equal(index_ranges, [[0, self.num_data]]):
             from ._h5_full_scan import full_scan
             result = full_scan(gp, self.ones_idx, self.multi_idx)
@@ -631,6 +630,7 @@ class PatternsSOneH5ReadBuffer(PatternsSOneH5):
             result = indexed_read(gp, index_ranges, self.ones_idx, self.multi_idx)
             if result is not None:
                 return result
+        ensure_group_filters(gp)
         place_ones = read_indexed_array_h5(
             cast(h5py.Dataset, gp["place_ones"]), index_ranges, self.ones_idx
         )

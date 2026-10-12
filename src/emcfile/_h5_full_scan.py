@@ -48,7 +48,13 @@ def _eligible_dataset(dataset: h5py.Dataset) -> bool:
 
 
 def _decode_chunk(
-    mask: int, payload: bytes, n: int, *, decoder: Any = None, output: Any = None
+    mask: int,
+    payload: bytes,
+    n: int,
+    *,
+    decoder: Any = None,
+    output: Any = None,
+    selection: slice | None = None,
 ) -> npt.NDArray[np.uint32]:
     """Decode the exact two-filter layout, respecting per-chunk skip bits."""
     import zstandard
@@ -60,6 +66,17 @@ def _decode_chunk(
     raw = payload if mask & 2 else decoder.decompress(payload, max_output_size=n * 4)
     if len(raw) != n * 4:
         raise ValueError("Unexpected HDF5 v2 decoded chunk length")
+    if selection is not None:
+        if mask & 1:
+            return np.frombuffer(raw, "<u4")[selection].copy()
+        # Only transpose the requested byte-plane span, not the entire chunk.
+        return (
+            np.frombuffer(raw, "u1")
+            .reshape(4, n)[:, selection]
+            .T.copy()
+            .view("<u4")
+            .reshape(-1)
+        )
     if mask & 1:
         values = np.frombuffer(raw, "<u4")
         if output is None:
@@ -72,12 +89,13 @@ def _decode_chunk(
     return output
 
 
-def eligible(group: Any) -> bool:
+def eligible(group: Any, *, datasets: list[h5py.Dataset] | None = None) -> bool:
     """Whether *group* uses the exact portable physical layout we own."""
     names = ("place_ones", "place_multi", "count_multi")
     if str(group.attrs.get("version", "")) != "2" or str(group.attrs.get("position_encoding", "absolute")) != "delta" or any(name not in group for name in names):
         return False
-    datasets = [group[name] for name in names]
+    if datasets is None:
+        datasets = [group[name] for name in names]
     return [dataset.dtype.str for dataset in datasets] == ["<u4", "<u4", "<i4"] and all(_eligible_dataset(dataset) for dataset in datasets)
 
 

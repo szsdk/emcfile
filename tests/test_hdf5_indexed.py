@@ -16,7 +16,7 @@ def enable_indexed(monkeypatch):
 
 
 @pytest.mark.usefixtures("hdf5_fast")
-def test_indexed_is_opt_in(tmp_path, monkeypatch):
+def test_multi_frame_indexed_is_opt_in(tmp_path, monkeypatch):
     expected, path = _patterns(), tmp_path / "opt-in.h5"
     expected.write(path, position_encoding="delta", compression="zstd", shuffle=True)
     source = ef.open_patterns(path)
@@ -25,7 +25,7 @@ def test_indexed_is_opt_in(tmp_path, monkeypatch):
     with h5py.File(path) as group:
         assert (
             indexed.indexed_read(
-                group, np.array([[0, 1]]), source.ones_idx, source.multi_idx
+                group, np.array([[0, 2]]), source.ones_idx, source.multi_idx
             )
             is None
         )
@@ -81,6 +81,8 @@ def test_fallbacks(tmp_path, monkeypatch, codec):
     assert ef.open_patterns(path)[ids] == expected[ids]
     monkeypatch.setenv("EMCFILE_H5_INDEXED_WORKERS", "2")
     assert ef.open_patterns(path)[ids] == expected[ids]
+    monkeypatch.delenv("EMCFILE_H5_INDEXED_WORKERS", raising=False)
+    np.testing.assert_array_equal(ef.open_patterns(path)[2], expected[2])
 
 
 def test_plan_unique_chunks_and_destination_order():
@@ -113,6 +115,11 @@ def test_chunk_filter_masks(mask):
     )
     payload = raw if mask & 2 else zstandard.ZstdCompressor().compress(raw)
     np.testing.assert_array_equal(_decode_chunk(mask, payload, 4), values)
+    for selection in (slice(1, 3), slice(0, 1), slice(3, 4), slice(0, 0)):
+        actual = _decode_chunk(mask, payload, 4, selection=selection)
+        np.testing.assert_array_equal(actual, values[selection])
+        assert actual.dtype == np.dtype("u4")
+        assert actual.flags.writeable
 
 
 def test_chunk_errors():
@@ -176,3 +183,119 @@ def test_vds_and_absolute_layout_fallback(tmp_path):
     absolute = tmp_path / "absolute.h5"
     expected.write(absolute, compression="zstd", shuffle=True)
     assert ef.open_patterns(absolute)[ids] == expected[ids]
+    np.testing.assert_array_equal(ef.open_patterns(virtual)[1], expected[1])
+    np.testing.assert_array_equal(ef.open_patterns(absolute)[1], expected[1])
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+@pytest.mark.parametrize("chunk_bytes", [4, 20, 16 << 20])
+@pytest.mark.usefixtures("hdf5_fast")
+def test_single_frame_default_without_workers_or_numba(
+    tmp_path, monkeypatch, persistent, chunk_bytes
+):
+    monkeypatch.setenv("EMCFILE_H5_DIRECT_CHUNK_BYTES", str(chunk_bytes))
+    expected, path = _patterns(3), tmp_path / "single.h5"
+    expected.write(path, position_encoding="delta", compression="zstd", shuffle=True)
+    monkeypatch.delenv("EMCFILE_H5_INDEXED_WORKERS", raising=False)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("single frames must not use workers, JIT, or the generic reader")
+
+    original_find_spec = indexed.importlib.util.find_spec
+    monkeypatch.setattr(
+        indexed.importlib.util,
+        "find_spec",
+        lambda name: None if name == "numba" else original_find_spec(name),
+    )
+    monkeypatch.setattr(indexed, "ThreadPoolExecutor", unexpected)
+    monkeypatch.setattr(indexed, "_unshuffle_u32", unexpected)
+    monkeypatch.setattr(indexed, "decode_segmented_delta_inplace", unexpected)
+    monkeypatch.setattr("emcfile._pattern_files.read_indexed_array_h5", unexpected)
+    source = ef.open_patterns(path)
+    if persistent:
+        source = source.open()
+    try:
+        for frame in range(expected.num_data):
+            np.testing.assert_array_equal(source[frame], expected[frame])
+            np.testing.assert_array_equal(source[np.int64(frame)], expected[frame])
+            assert source[frame : frame + 1] == expected[frame : frame + 1]
+            assert source[np.array([frame])] == expected[frame : frame + 1]
+            actual_sparse = source.sparse_pattern(frame)
+            expected_sparse = expected.sparse_pattern(frame)
+            for name in ("place_ones", "place_multi", "count_multi"):
+                np.testing.assert_array_equal(
+                    getattr(actual_sparse, name), getattr(expected_sparse, name)
+                )
+    finally:
+        if persistent:
+            source.close()
+
+
+@pytest.mark.parametrize("disabled", ["budget", "dependency"])
+@pytest.mark.usefixtures("hdf5_fast")
+def test_single_frame_generic_fallback(tmp_path, monkeypatch, disabled):
+    expected, path = _patterns(), tmp_path / "fallback-single.h5"
+    expected.write(path, position_encoding="delta", compression="zstd", shuffle=True)
+    monkeypatch.delenv("EMCFILE_H5_INDEXED_WORKERS", raising=False)
+    if disabled == "budget":
+        monkeypatch.setenv("EMCFILE_H5_INDEXED_WORKERS", "0")
+    else:
+        monkeypatch.setattr(indexed.importlib.util, "find_spec", lambda name: None)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("the direct reader must be disabled")
+
+    monkeypatch.setattr(indexed, "_single_frame", unexpected)
+    np.testing.assert_array_equal(ef.open_patterns(path)[2], expected[2])
+
+
+@pytest.mark.usefixtures("hdf5_fast")
+def test_single_frame_decode_error_propagates(tmp_path, monkeypatch):
+    expected, path = _patterns(), tmp_path / "single-error.h5"
+    expected.write(path, position_encoding="delta", compression="zstd", shuffle=True)
+    monkeypatch.delenv("EMCFILE_H5_INDEXED_WORKERS", raising=False)
+
+    def fail(*args, **kwargs):
+        raise ValueError("bad chunk")
+
+    monkeypatch.setattr(indexed, "_decode_chunk", fail)
+    with pytest.raises(ValueError, match="bad chunk"):
+        ef.open_patterns(path)[2]
+
+
+@pytest.mark.usefixtures("hdf5_fast")
+def test_single_frame_does_not_change_bulk_dispatch(tmp_path, monkeypatch):
+    import emcfile._h5_full_scan as full
+
+    expected, path = _patterns(), tmp_path / "dispatch.h5"
+    expected.write(path, position_encoding="delta", compression="zstd", shuffle=True)
+    monkeypatch.delenv("EMCFILE_H5_INDEXED_WORKERS", raising=False)
+    monkeypatch.setattr(full, "MIN_FULL_SCAN_BYTES", 0)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("bulk selections must not use the single-frame path")
+
+    monkeypatch.setattr(indexed, "_single_frame", unexpected)
+    source = ef.open_patterns(path)
+    assert source[:] == expected
+    assert source[np.array([3, 1, 1])] == expected[np.array([3, 1, 1])]
+
+
+@pytest.mark.parametrize("ones,multi", [([0, 2, 0], [0, 0, 0]), ([0, 0, 0], [0, 2, 0])])
+@pytest.mark.usefixtures("hdf5_fast")
+def test_single_frame_empty_payloads(tmp_path, monkeypatch, ones, multi):
+    expected = ef.PatternsSOne(
+        32,
+        np.array(ones, "u4"),
+        np.array(multi, "u4"),
+        np.arange(sum(ones), dtype="u4"),
+        np.arange(sum(multi), dtype="u4"),
+        np.full(sum(multi), 2, "i4"),
+    )
+    path = tmp_path / "empty.h5"
+    expected.write(path, position_encoding="delta", compression="zstd", shuffle=True)
+    monkeypatch.delenv("EMCFILE_H5_INDEXED_WORKERS", raising=False)
+    with ef.open_patterns(path).open() as source:
+        for frame in range(3):
+            assert source[frame : frame + 1] == expected[frame : frame + 1]
+            np.testing.assert_array_equal(source[frame], expected[frame])
