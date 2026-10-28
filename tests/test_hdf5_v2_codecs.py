@@ -73,7 +73,7 @@ def test_direct_writer_uses_one_shared_pool_with_default_budget(tmp_path: Path, 
         return original(*args, **kwargs)
 
     monkeypatch.delenv("EMCFILE_H5_WRITE_WORKERS", raising=False)
-    monkeypatch.setattr("emcfile._h5_workers.os.sched_getaffinity", lambda _pid: set(range(8)))
+    monkeypatch.setattr("emcfile._h5_workers.os.sched_getaffinity", lambda _pid: set(range(8)), raising=False)
     monkeypatch.setattr(implementation, "PrefilteredDatasetWriter", writer)
     _patterns().write(
         tmp_path / "defaults.h5", position_encoding="delta", compression="zstd", shuffle=True
@@ -83,9 +83,23 @@ def test_direct_writer_uses_one_shared_pool_with_default_budget(tmp_path: Path, 
 
 
 def test_effective_workers_honors_affinity(monkeypatch):
-    monkeypatch.setattr("emcfile._h5_workers.os.sched_getaffinity", lambda _pid: {1, 2})
+    monkeypatch.setattr("emcfile._h5_workers.os.sched_getaffinity", lambda _pid: {1, 2}, raising=False)
     assert effective_workers(8) == 2
     assert effective_workers(0, allow_zero=True) == 0
+
+
+@pytest.mark.parametrize("affinity_missing", [True, False])
+@pytest.mark.parametrize("cpu_count,expected", [(2, 2), (None, 1)])
+def test_effective_workers_without_affinity(monkeypatch, affinity_missing, cpu_count, expected):
+    if affinity_missing:
+        monkeypatch.delattr("emcfile._h5_workers.os.sched_getaffinity", raising=False)
+    else:
+        def unavailable(_pid):
+            raise OSError("CPU affinity unavailable")
+
+        monkeypatch.setattr("emcfile._h5_workers.os.sched_getaffinity", unavailable, raising=False)
+    monkeypatch.setattr("emcfile._h5_workers.os.cpu_count", lambda: cpu_count)
+    assert effective_workers(8) == expected
 
 
 def test_plain_import_is_lazy():
