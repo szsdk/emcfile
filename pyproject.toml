@@ -17,6 +17,11 @@ hdf5-fast = [
     "numba>=0.60.0",
     "zstandard>=0.23.0",
 ]
+parquet = [
+    "pyarrow>=15.0.0",
+    "numba>=0.60.0",
+    "zstandard>=0.23.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -50,7 +55,7 @@ required_plugins = ["pytest-html", "pytest-cov"]
 exclude = ["^emcfile/tests/.*$", "^tutorial/.*$"]
 
 [[tool.mypy.overrides]]
-module = ["h5py", "scipy.*"]
+module = ["h5py", "scipy.*", "pyarrow", "pyarrow.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]

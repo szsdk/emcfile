@@ -34,9 +34,11 @@ __all__ = [
     "FileBackedEMCPatterns",
     "HDF5PatternFile",
     "LegacyHDF5PatternFile",
+    "ParquetPatternFile",
     "PatternsSOneEMC",
     "PatternsSOneH5",
     "PatternsSOneList",
+    "PatternsSOneParquet",
     "file_patterns",
     "open_patterns",
 ]
@@ -123,6 +125,7 @@ class PatternsSOneFile:
     arrays materializes only the selected sparse events. Reading an event
     property such as ``place_ones`` loads its entire event stream.
     """
+
     ndim: int = 2
     num_data: int
     num_pix: int
@@ -935,6 +938,159 @@ class PatternsSOneList(PatternsSOneFile):
         )
 
 
+class PatternsSOneParquet(PatternsSOneFile):
+    """Represents a collection of patterns stored in an Apache Parquet file.
+
+    ``ParquetPatternFile`` is the descriptive public alias. Supports lazy
+    loading of metadata and per-pattern counts, direct single-frame reads,
+    and parallel row-group decoding for full-scan and indexed reads.
+    """
+
+    def __init__(self, fn: str | Path):
+        from ._parquet import read_parquet_metadata
+
+        self._fn = Path(fn).resolve()
+        meta = read_parquet_metadata(self._fn)
+        self.num_data = int(meta["num_data"])
+        self.num_pix = int(meta["num_pix"])
+        self.pqversion = str(meta["version"])
+        self.position_encoding = str(meta["position_encoding"])
+        self.rg_pats = int(meta["rg_pats"])
+        self.shuffle = bool(meta["shuffle"])
+        self.payload_codec = str(meta["payload_codec"])
+        self.ndim = 2
+        self._init_idx = False
+
+    def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
+        from ._parquet import read_parquet_ones_multi
+
+        return read_parquet_ones_multi(self._fn, self.num_data)
+
+    def _read_patterns(
+        self, index_ranges: INDEX_ARRAY
+    ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
+        from ._parquet import read_parquet_patterns
+
+        self.init_idx()
+        return read_parquet_patterns(
+            self._fn,
+            index_ranges,
+            self.ones_idx,
+            self.multi_idx,
+            num_data=self.num_data,
+            rg_pats=self.rg_pats,
+            position_encoding=self.position_encoding,
+            shuffle=self.shuffle,
+            payload_codec=self.payload_codec,
+        )
+
+    def open(self) -> PatternsSOneParquetReadBuffer:
+        """Open a persistent reader with its own Parquet file handle."""
+        return PatternsSOneParquetReadBuffer(self._fn)
+
+    @property
+    def place_ones(self) -> npt.NDArray[np.uint32]:
+        from ._parquet import read_parquet_column
+
+        self.init_idx()
+        return read_parquet_column(
+            self._fn,
+            "place_ones",
+            self.ones_idx,
+            num_data=self.num_data,
+            rg_pats=self.rg_pats,
+            is_delta=(self.position_encoding == "delta"),
+            shuffle=self.shuffle,
+            payload_codec=self.payload_codec,
+            dtype="u4",
+        )
+
+    @property
+    def place_multi(self) -> npt.NDArray[np.uint32]:
+        from ._parquet import read_parquet_column
+
+        self.init_idx()
+        return read_parquet_column(
+            self._fn,
+            "place_multi",
+            self.multi_idx,
+            num_data=self.num_data,
+            rg_pats=self.rg_pats,
+            is_delta=(self.position_encoding == "delta"),
+            shuffle=self.shuffle,
+            payload_codec=self.payload_codec,
+            dtype="u4",
+        )
+
+    @property
+    def count_multi(self) -> npt.NDArray[np.int32]:
+        from ._parquet import read_parquet_column
+
+        self.init_idx()
+        return read_parquet_column(
+            self._fn,
+            "count_multi",
+            self.multi_idx,
+            num_data=self.num_data,
+            rg_pats=self.rg_pats,
+            is_delta=False,
+            shuffle=self.shuffle,
+            payload_codec=self.payload_codec,
+            dtype="i4",
+        )
+
+
+class PatternsSOneParquetReadBuffer(PatternsSOneParquet):
+    def __init__(self, fn: str | Path):
+        from ._parquet import _require_pyarrow
+
+        super().__init__(fn)
+        _, pq = _require_pyarrow()
+        self._file_handle: Any = pq.ParquetFile(
+            self._fn, memory_map=True, pre_buffer=False
+        )
+        self._cache: dict[str, Any] = {}
+
+    def __enter__(self) -> PatternsSOneParquetReadBuffer:
+        return self
+
+    def close(self) -> None:
+        if self._file_handle is not None:
+            self._file_handle.close()
+            self._file_handle = None
+        self._cache.clear()
+
+    def __exit__(self, exc_type: Any, exc_value: Any, exc_traceback: Any) -> None:
+        self.close()
+
+    def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
+        from ._parquet import read_parquet_ones_multi
+
+        assert self._file_handle is not None
+        return read_parquet_ones_multi(self._fn, self.num_data, pf=self._file_handle)
+
+    def _read_patterns(
+        self, index_ranges: INDEX_ARRAY
+    ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
+        from ._parquet import read_parquet_patterns
+
+        self.init_idx()
+        assert self._file_handle is not None
+        return read_parquet_patterns(
+            self._fn,
+            index_ranges,
+            self.ones_idx,
+            self.multi_idx,
+            num_data=self.num_data,
+            rg_pats=self.rg_pats,
+            position_encoding=self.position_encoding,
+            shuffle=self.shuffle,
+            payload_codec=self.payload_codec,
+            pf=self._file_handle,
+            cache=self._cache,
+        )
+
+
 def file_patterns(fn: Sequence[PATH_TYPE] | PATH_TYPE) -> PatternsSOneFile:
     if (isinstance(fn, str) and glob.has_magic(fn)) or (
         isinstance(fn, Path) and glob.has_magic(str(fn))
@@ -948,6 +1104,10 @@ def file_patterns(fn: Sequence[PATH_TYPE] | PATH_TYPE) -> PatternsSOneFile:
         if h5py.is_hdf5(p):
             p = h5path(p, "/")
     if not isinstance(p, H5Path):
+        from ._parquet import is_parquet_file
+
+        if is_parquet_file(p):
+            return PatternsSOneParquet(p)
         return PatternsSOneEMC(p)
     with p.open_group() as (_, gp):
         version = str(gp.attrs.get("version", "1"))
@@ -964,7 +1124,7 @@ def open_patterns(path: Sequence[PATH_TYPE] | PATH_TYPE) -> PatternsSOneFile:
     Parameters
     ----------
     path : path-like or sequence of paths
-        EMC binary or HDF5 file, including ``"file.h5::/group"`` paths.
+        EMC binary, HDF5, or Parquet file, including ``"file.h5::/group"`` paths.
         A list or tuple creates an ``EMCPatternCollection`` in input order.
         A glob expression creates a collection in sorted filename order.
         Collection members must have the same number of pixels.
@@ -979,8 +1139,8 @@ def open_patterns(path: Sequence[PATH_TYPE] | PATH_TYPE) -> PatternsSOneFile:
     Notes
     -----
     Counts and offsets are initialized when needed. Ordinary readers
-    reopen files during access. EMC binary and HDF5 v2 readers provide
-    ``open()`` for persistent access using a context manager.
+    reopen files during access. EMC binary, HDF5 v2, and Parquet readers
+    provide ``open()`` for persistent access using a context manager.
     HDF5 v1 readers load all events on first access.
 
     Examples
@@ -1008,4 +1168,5 @@ FileBackedEMCPatterns = PatternsSOneFile
 EMCBinaryPatternFile = PatternsSOneEMC
 HDF5PatternFile = PatternsSOneH5
 LegacyHDF5PatternFile = PatternsSOneH5V1
+ParquetPatternFile = PatternsSOneParquet
 EMCPatternCollection = PatternsSOneList
