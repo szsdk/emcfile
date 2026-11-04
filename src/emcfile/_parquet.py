@@ -1,9 +1,13 @@
-"""Parquet 1-row-per-pattern reader and parallel shuffle+Zstd writer/reader fast paths."""
+"""Parquet 1-row-per-pattern reader and parallel multi-page shuffle+Zstd fast paths."""
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import importlib.util
+import mmap
 import os
+import queue
 import sys
 import threading
 from collections.abc import Iterator, Sequence
@@ -35,9 +39,44 @@ _kernels_lock = threading.Lock()
 _encode_page_kernel: Any = None
 _encode_raw_kernel: Any = None
 _decode_spans_kernel: Any = None
+_zstd_c_kernels: tuple[Any, Any, Any, Any, Any] | None = None
+_libzstd_funcs: tuple[Any, Any, Any, Any, Any, Any, Any] | None = None
+_libzstd_checked: bool = False
 
 _template_lock = threading.Lock()
 _zstd_footer_template: tuple[bytes, bytes] | None = None
+
+_file_info_lock = threading.Lock()
+_file_info_lru: dict[
+    tuple[str, int, int, bytes, bytes],
+    tuple[dict[str, Any], npt.NDArray[np.int64] | None],
+] = {}
+
+_pool_lock = threading.Lock()
+_shared_pool: ThreadPoolExecutor | None = None
+_shared_pool_workers: int = 0
+_shared_pool_cls: Any = None
+
+
+def _get_worker_pool(workers: int) -> ThreadPoolExecutor:
+    global _shared_pool, _shared_pool_workers, _shared_pool_cls
+    if (
+        ThreadPoolExecutor is not _shared_pool_cls
+        or _shared_pool is None
+        or _shared_pool_workers != workers
+    ):
+        with _pool_lock:
+            if (
+                ThreadPoolExecutor is not _shared_pool_cls
+                or _shared_pool is None
+                or _shared_pool_workers != workers
+            ):
+                if _shared_pool is not None:
+                    _shared_pool.shutdown(wait=False)
+                _shared_pool = ThreadPoolExecutor(max_workers=workers)
+                _shared_pool_workers = workers
+                _shared_pool_cls = ThreadPoolExecutor
+    return _shared_pool
 
 
 def _require_pyarrow() -> tuple[Any, Any]:
@@ -55,6 +94,84 @@ def available() -> bool:
         importlib.util.find_spec(name) is not None
         for name in ("pyarrow", "numba", "zstandard")
     )
+
+
+def _get_libzstd() -> tuple[Any, Any, Any, Any, Any, Any, Any] | None:
+    global _libzstd_funcs, _libzstd_checked
+    if not _libzstd_checked:
+        with _kernels_lock:
+            if not _libzstd_checked:
+                try:
+                    import zstandard as _zstd_mod  # noqa: F401
+                except ImportError:
+                    pass
+                candidates = [
+                    ctypes.util.find_library("zstd"),
+                    "libzstd.so.1",
+                    "libzstd.so",
+                    "libzstd.1.dylib",
+                    "libzstd.dylib",
+                ]
+                for cand in candidates:
+                    if not cand:
+                        continue
+                    try:
+                        lib = ctypes.CDLL(cand)
+                        create_cctx = lib.ZSTD_createCCtx
+                        create_cctx.argtypes = []
+                        create_cctx.restype = ctypes.c_void_p
+
+                        free_cctx = lib.ZSTD_freeCCtx
+                        free_cctx.argtypes = [ctypes.c_void_p]
+                        free_cctx.restype = ctypes.c_size_t
+
+                        compress_cctx = lib.ZSTD_compressCCtx
+                        compress_cctx.argtypes = [
+                            ctypes.c_void_p,
+                            ctypes.c_void_p,
+                            ctypes.c_size_t,
+                            ctypes.c_void_p,
+                            ctypes.c_size_t,
+                            ctypes.c_int,
+                        ]
+                        compress_cctx.restype = ctypes.c_size_t
+
+                        compress_bound = lib.ZSTD_compressBound
+                        compress_bound.argtypes = [ctypes.c_size_t]
+                        compress_bound.restype = ctypes.c_size_t
+
+                        create_dctx = lib.ZSTD_createDCtx
+                        create_dctx.argtypes = []
+                        create_dctx.restype = ctypes.c_void_p
+
+                        free_dctx = lib.ZSTD_freeDCtx
+                        free_dctx.argtypes = [ctypes.c_void_p]
+                        free_dctx.restype = ctypes.c_size_t
+
+                        decompress_dctx = lib.ZSTD_decompressDCtx
+                        decompress_dctx.argtypes = [
+                            ctypes.c_void_p,
+                            ctypes.c_void_p,
+                            ctypes.c_size_t,
+                            ctypes.c_void_p,
+                            ctypes.c_size_t,
+                        ]
+                        decompress_dctx.restype = ctypes.c_size_t
+
+                        _libzstd_funcs = (
+                            create_cctx,
+                            free_cctx,
+                            compress_cctx,
+                            compress_bound,
+                            create_dctx,
+                            free_dctx,
+                            decompress_dctx,
+                        )
+                        break
+                    except (OSError, AttributeError):
+                        continue
+                _libzstd_checked = True
+    return _libzstd_funcs
 
 
 def _ensure_encode_kernels() -> tuple[Any, Any]:
@@ -242,6 +359,622 @@ def _ensure_encode_kernels() -> tuple[Any, Any]:
                 _encode_page_kernel = page_kernel
                 _encode_raw_kernel = raw_kernel
     return _encode_page_kernel, _encode_raw_kernel
+
+
+def _ensure_zstd_c_kernels() -> tuple[Any, Any, Any, Any, Any] | None:
+    global _zstd_c_kernels
+    if _zstd_c_kernels is None:
+        zstd_funcs = _get_libzstd()
+        if zstd_funcs is None:
+            return None
+        page_kernel, _ = _ensure_encode_kernels()
+        with _kernels_lock:
+            if _zstd_c_kernels is None:
+                from numba import njit
+
+                (
+                    _,
+                    _,
+                    ZSTD_compressCCtx,
+                    ZSTD_compressBound,
+                    _,
+                    _,
+                    ZSTD_decompressDCtx,
+                ) = zstd_funcs
+
+                @njit(nogil=True)
+                def _write_varint(buf: np.ndarray, pos: int, n: int) -> int:
+                    u = np.uint64(n)
+                    while u >= np.uint64(0x80):
+                        buf[pos] = np.uint8((u & np.uint64(0x7F)) | np.uint64(0x80))
+                        pos += 1
+                        u >>= np.uint64(7)
+                    buf[pos] = np.uint8(u)
+                    return pos + 1
+
+                @njit(nogil=True)
+                def _write_zigzag(buf: np.ndarray, pos: int, n: int) -> int:
+                    s = np.int64(n)
+                    z = (s << np.int64(1)) ^ (s >> np.int64(63))
+                    return _write_varint(buf, pos, z)
+
+                @njit(nogil=True)
+                def _write_page_header(
+                    buf: np.ndarray,
+                    pos: int,
+                    uncomp_len: int,
+                    comp_len: int,
+                    num_values: int,
+                ) -> int:
+                    buf[pos] = 0x15
+                    buf[pos + 1] = 0x00
+                    buf[pos + 2] = 0x15
+                    pos = _write_zigzag(buf, pos + 3, uncomp_len)
+                    buf[pos] = 0x15
+                    pos = _write_zigzag(buf, pos + 1, comp_len)
+                    buf[pos] = 0x2C
+                    buf[pos + 1] = 0x15
+                    pos = _write_zigzag(buf, pos + 2, num_values)
+                    buf[pos] = 0x15
+                    buf[pos + 1] = 0x00
+                    buf[pos + 2] = 0x15
+                    buf[pos + 3] = 0x06
+                    buf[pos + 4] = 0x15
+                    buf[pos + 5] = 0x06
+                    buf[pos + 6] = 0x1C
+                    buf[pos + 7] = 0x00
+                    buf[pos + 8] = 0x00
+                    buf[pos + 9] = 0x00
+                    return pos + 10
+
+                @njit(nogil=True)
+                def _encode_col_pages(
+                    cctx: int,
+                    zstd_level: int,
+                    src_i32: np.ndarray,
+                    pat_offsets: np.ndarray,
+                    ps: int,
+                    pe: int,
+                    page_pats: int,
+                    scratch_u8: np.ndarray,
+                    comp_scratch_u8: np.ndarray,
+                    out_u8: np.ndarray,
+                    out_pos: int,
+                    is_delta: bool,
+                    is_shuffled: bool,
+                    check_sorted: bool,
+                ) -> tuple[int, int, int, int]:
+                    tu_col = np.int64(0)
+                    tc_col = np.int64(0)
+                    cur = ps
+                    while cur < pe:
+                        nxt = cur + page_pats
+                        if nxt > pe:
+                            nxt = pe
+                        nr = nxt - cur
+                        ne = pat_offsets[nxt] - pat_offsets[cur]
+                        u_len = (ne + nr) * 4
+                        rc = page_kernel(
+                            src_i32,
+                            pat_offsets,
+                            cur,
+                            nxt,
+                            scratch_u8[:u_len],
+                            is_delta,
+                            is_shuffled,
+                            check_sorted,
+                        )
+                        if rc != 0:
+                            return rc, out_pos, tu_col, tc_col
+                        bound = ZSTD_compressBound(u_len)
+                        c_len = ZSTD_compressCCtx(
+                            cctx,
+                            comp_scratch_u8.ctypes.data,
+                            bound,
+                            scratch_u8.ctypes.data,
+                            u_len,
+                            zstd_level,
+                        )
+                        hdr_end = _write_page_header(out_u8, out_pos, u_len, c_len, nr)
+                        hdr_len = hdr_end - out_pos
+                        out_u8[hdr_end : hdr_end + c_len] = comp_scratch_u8[:c_len]
+                        out_pos = hdr_end + c_len
+                        tu_col += hdr_len + u_len
+                        tc_col += hdr_len + c_len
+                        cur = nxt
+                    return 0, out_pos, tu_col, tc_col
+
+                @njit(nogil=True)
+                def encode_rg_all_cols(
+                    cctx: int,
+                    zstd_level: int,
+                    ones_u32: np.ndarray,
+                    multi_u32: np.ndarray,
+                    po_i32: np.ndarray,
+                    pm_i32: np.ndarray,
+                    cm_i32: np.ndarray,
+                    ones_idx: np.ndarray,
+                    multi_idx: np.ndarray,
+                    ps: int,
+                    pe: int,
+                    page_pats: int,
+                    scratch_u8: np.ndarray,
+                    comp_scratch_u8: np.ndarray,
+                    out_u8: np.ndarray,
+                    meta_out: np.ndarray,
+                    is_delta: bool,
+                    is_shuffled: bool,
+                    check_sorted: bool,
+                ) -> tuple[int, int]:
+                    nr = pe - ps
+                    u_cnt = nr * 4
+                    pos = np.int64(0)
+                    bound = ZSTD_compressBound(u_cnt)
+                    c_len = ZSTD_compressCCtx(
+                        cctx,
+                        comp_scratch_u8.ctypes.data,
+                        bound,
+                        ones_u32[ps:pe].ctypes.data,
+                        u_cnt,
+                        zstd_level,
+                    )
+                    hdr_end = _write_page_header(out_u8, pos, u_cnt, c_len, nr)
+                    hdr_len = hdr_end - pos
+                    out_u8[hdr_end : hdr_end + c_len] = comp_scratch_u8[:c_len]
+                    pos = hdr_end + c_len
+                    meta_out[0, 0] = hdr_len + u_cnt
+                    meta_out[0, 1] = hdr_len + c_len
+
+                    c_len = ZSTD_compressCCtx(
+                        cctx,
+                        comp_scratch_u8.ctypes.data,
+                        bound,
+                        multi_u32[ps:pe].ctypes.data,
+                        u_cnt,
+                        zstd_level,
+                    )
+                    hdr_end = _write_page_header(out_u8, pos, u_cnt, c_len, nr)
+                    hdr_len = hdr_end - pos
+                    out_u8[hdr_end : hdr_end + c_len] = comp_scratch_u8[:c_len]
+                    pos = hdr_end + c_len
+                    meta_out[1, 0] = hdr_len + u_cnt
+                    meta_out[1, 1] = hdr_len + c_len
+
+                    rc, pos, tu, tc = _encode_col_pages(
+                        cctx,
+                        zstd_level,
+                        po_i32,
+                        ones_idx,
+                        ps,
+                        pe,
+                        page_pats,
+                        scratch_u8,
+                        comp_scratch_u8,
+                        out_u8,
+                        pos,
+                        is_delta,
+                        is_shuffled,
+                        check_sorted,
+                    )
+                    if rc != 0:
+                        return rc, pos
+                    meta_out[2, 0] = tu
+                    meta_out[2, 1] = tc
+
+                    rc, pos, tu, tc = _encode_col_pages(
+                        cctx,
+                        zstd_level,
+                        pm_i32,
+                        multi_idx,
+                        ps,
+                        pe,
+                        page_pats,
+                        scratch_u8,
+                        comp_scratch_u8,
+                        out_u8,
+                        pos,
+                        is_delta,
+                        is_shuffled,
+                        check_sorted,
+                    )
+                    if rc != 0:
+                        return rc, pos
+                    meta_out[3, 0] = tu
+                    meta_out[3, 1] = tc
+
+                    rc, pos, tu, tc = _encode_col_pages(
+                        cctx,
+                        zstd_level,
+                        cm_i32,
+                        multi_idx,
+                        ps,
+                        pe,
+                        page_pats,
+                        scratch_u8,
+                        comp_scratch_u8,
+                        out_u8,
+                        pos,
+                        False,
+                        is_shuffled,
+                        False,
+                    )
+                    meta_out[4, 0] = tu
+                    meta_out[4, 1] = tc
+                    return 0, pos
+
+                @njit(nogil=True)
+                def _dec_varint_nb(mm_u8: np.ndarray, pos: int) -> tuple[int, int]:
+                    shift = 0
+                    n = np.int64(0)
+                    while True:
+                        b = np.int64(mm_u8[pos])
+                        pos += 1
+                        n |= (b & 0x7F) << shift
+                        if (b & 0x80) == 0:
+                            break
+                        shift += 7
+                    return n, pos
+
+                @njit(nogil=True)
+                def _dec_zigzag_nb(mm_u8: np.ndarray, pos: int) -> tuple[int, int]:
+                    n, pos = _dec_varint_nb(mm_u8, pos)
+                    return (n >> 1) ^ -(n & 1), pos
+
+                @njit(nogil=True)
+                def parse_our_footer_nb(
+                    footer_u8: np.ndarray,
+                    schema_end_pos: int,
+                    out_col_info: np.ndarray,
+                ) -> tuple[int, int, int]:
+                    pos = schema_end_pos
+                    n_len = len(footer_u8)
+                    if pos >= n_len or footer_u8[pos] != 0x16:
+                        return -1, 0, 0
+                    _, pos = _dec_zigzag_nb(footer_u8, pos + 1)
+                    if pos + 1 >= n_len or footer_u8[pos] != 0x19:
+                        return -1, 0, 0
+                    hdr_b = footer_u8[pos + 1]
+                    if hdr_b == 0xFC:
+                        n_rgs, pos = _dec_varint_nb(footer_u8, pos + 2)
+                    else:
+                        n_rgs = np.int64(hdr_b >> 4)
+                        pos += 2
+                    if n_rgs < 0:
+                        return -1, 0, 0
+                    if n_rgs > len(out_col_info):
+                        return -2, n_rgs, 0
+
+                    col_name_lens = np.array([4, 5, 10, 11, 11], dtype=np.int64)
+                    for rg in range(n_rgs):
+                        if (
+                            pos + 1 >= n_len
+                            or footer_u8[pos] != 0x19
+                            or footer_u8[pos + 1] != 0x5C
+                        ):
+                            return -1, 0, 0
+                        pos += 2
+                        for c in range(5):
+                            if (
+                                pos + 4 >= n_len
+                                or footer_u8[pos] != 0x26
+                                or footer_u8[pos + 3] != 0x15
+                            ):
+                                return -1, 0, 0
+                            _, pos = _dec_zigzag_nb(footer_u8, pos + 4)
+                            pos += 6 + 1 + col_name_lens[c]
+                            if pos >= n_len or footer_u8[pos] != 0x15:
+                                return -1, 0, 0
+                            codec, pos = _dec_zigzag_nb(footer_u8, pos + 1)
+                            if codec != 6:
+                                return -1, 0, 0
+                            if pos >= n_len or footer_u8[pos] != 0x16:
+                                return -1, 0, 0
+                            _, pos = _dec_zigzag_nb(footer_u8, pos + 1)
+                            if pos >= n_len or footer_u8[pos] != 0x16:
+                                return -1, 0, 0
+                            _, pos = _dec_zigzag_nb(footer_u8, pos + 1)
+                            if pos >= n_len or footer_u8[pos] != 0x16:
+                                return -1, 0, 0
+                            tc, pos = _dec_zigzag_nb(footer_u8, pos + 1)
+                            if pos >= n_len or footer_u8[pos] != 0x26:
+                                return -1, 0, 0
+                            poff, pos = _dec_zigzag_nb(footer_u8, pos + 1)
+                            out_col_info[rg, c, 0] = poff
+                            out_col_info[rg, c, 1] = tc
+                            pos += 11
+                        for _ in range(4):
+                            if pos >= n_len:
+                                return -1, 0, 0
+                            _, pos = _dec_zigzag_nb(footer_u8, pos + 1)
+                        if pos >= n_len or footer_u8[pos] != 0x00:
+                            return -1, 0, 0
+                        pos += 1
+                    return 0, n_rgs, pos
+
+                @njit(nogil=True)
+                def read_ones_multi_nb(
+                    dctx: int,
+                    mm_u8: np.ndarray,
+                    col_info: np.ndarray,
+                    n_rgs: int,
+                    rg_pats: int,
+                    num_data: int,
+                    out_ones: np.ndarray,
+                    out_multi: np.ndarray,
+                ) -> int:
+                    for rg in range(n_rgs):
+                        ps = rg * rg_pats
+                        pe = (
+                            num_data
+                            if (rg + 1) * rg_pats > num_data
+                            else (rg + 1) * rg_pats
+                        )
+                        u_expect = (pe - ps) * 4
+
+                        off0 = col_info[rg, 0, 0]
+                        tc0 = col_info[rg, 0, 1]
+                        u0, p1 = _dec_zigzag_nb(mm_u8, off0 + 3)
+                        c0, _ = _dec_zigzag_nb(mm_u8, p1 + 1)
+                        hdr0 = tc0 - c0
+                        res0 = ZSTD_decompressDCtx(
+                            dctx,
+                            out_ones[ps:pe].ctypes.data,
+                            u_expect,
+                            mm_u8.ctypes.data + off0 + hdr0,
+                            c0,
+                        )
+                        if res0 != u_expect or u0 != u_expect:
+                            return -1
+
+                        off1 = col_info[rg, 1, 0]
+                        tc1 = col_info[rg, 1, 1]
+                        u1, p1 = _dec_zigzag_nb(mm_u8, off1 + 3)
+                        c1, _ = _dec_zigzag_nb(mm_u8, p1 + 1)
+                        hdr1 = tc1 - c1
+                        res1 = ZSTD_decompressDCtx(
+                            dctx,
+                            out_multi[ps:pe].ctypes.data,
+                            u_expect,
+                            mm_u8.ctypes.data + off1 + hdr1,
+                            c1,
+                        )
+                        if res1 != u_expect or u1 != u_expect:
+                            return -1
+                    return 0
+
+                @njit(nogil=True)
+                def decode_col_pages(
+                    dctx: int,
+                    mm_u8: np.ndarray,
+                    col_off: int,
+                    col_tc: int,
+                    buf_u8: np.ndarray,
+                    rg_ps: int,
+                    rg_pe: int,
+                    pat_offsets: np.ndarray,
+                    out_u32: np.ndarray,
+                    pat_firsts: np.ndarray,
+                    pat_lasts: np.ndarray,
+                    dst_offsets: np.ndarray,
+                    is_delta: bool,
+                    is_shuffled: bool,
+                ) -> int:
+                    n_spans = len(pat_firsts)
+                    if n_spans == 0:
+                        return 0
+                    last_req_pat = pat_lasts[n_spans - 1]
+                    pos = col_off
+                    col_end = col_off + col_tc
+                    page_ps = rg_ps
+                    s_idx = 0
+
+                    while page_ps < rg_pe and pos < col_end:
+                        if page_ps >= last_req_pat:
+                            break
+                        u_len, p1 = _dec_zigzag_nb(mm_u8, pos + 3)
+                        c_len, p2 = _dec_zigzag_nb(mm_u8, p1 + 1)
+                        page_nr, p3 = _dec_zigzag_nb(mm_u8, p2 + 2)
+                        hdr_len = (p3 + 10) - pos
+                        page_pe = page_ps + page_nr
+
+                        while s_idx < n_spans and pat_lasts[s_idx] <= page_ps:
+                            s_idx += 1
+                        if s_idx >= n_spans:
+                            break
+
+                        if pat_firsts[s_idx] < page_pe:
+                            if u_len > len(buf_u8):
+                                buf_u8 = np.empty(u_len, dtype=np.uint8)
+                            res = ZSTD_decompressDCtx(
+                                dctx,
+                                buf_u8.ctypes.data,
+                                u_len,
+                                mm_u8.ctypes.data + pos + hdr_len,
+                                c_len,
+                            )
+                            if res != u_len:
+                                return -1
+                            page_base_elem = pat_offsets[page_ps]
+                            cur_s = s_idx
+                            while cur_s < n_spans and pat_firsts[cur_s] < page_pe:
+                                sp_start = pat_firsts[cur_s]
+                                sp_end = pat_lasts[cur_s]
+                                ov_start = sp_start if sp_start > page_ps else page_ps
+                                ov_end = sp_end if sp_end < page_pe else page_pe
+                                out_pos = dst_offsets[cur_s] + (
+                                    pat_offsets[ov_start] - pat_offsets[sp_start]
+                                )
+                                for p_idx in range(ov_start, ov_end):
+                                    s = pat_offsets[p_idx]
+                                    e = pat_offsets[p_idx + 1]
+                                    k = e - s
+                                    if k <= 0:
+                                        continue
+                                    b_s = (
+                                        s - page_base_elem + (p_idx - page_ps) + 1
+                                    ) * 4
+                                    sub_out = out_u32[out_pos : out_pos + k]
+                                    if is_shuffled:
+                                        b0 = buf_u8[b_s : b_s + k]
+                                        b1 = buf_u8[b_s + k : b_s + 2 * k]
+                                        b2 = buf_u8[b_s + 2 * k : b_s + 3 * k]
+                                        b3 = buf_u8[b_s + 3 * k : b_s + 4 * k]
+                                        for i in range(k):
+                                            sub_out[i] = (
+                                                np.uint32(b0[i])
+                                                | (np.uint32(b1[i]) << np.uint32(8))
+                                                | (np.uint32(b2[i]) << np.uint32(16))
+                                                | (np.uint32(b3[i]) << np.uint32(24))
+                                            )
+                                        if is_delta:
+                                            acc = np.uint32(0)
+                                            for i in range(k):
+                                                acc = np.uint32(acc + sub_out[i])
+                                                sub_out[i] = acc
+                                    else:
+                                        src_u32 = buf_u8[b_s : b_s + 4 * k].view(
+                                            np.uint32
+                                        )
+                                        if is_delta:
+                                            acc = np.uint32(0)
+                                            for i in range(k):
+                                                acc = np.uint32(acc + src_u32[i])
+                                                sub_out[i] = acc
+                                        else:
+                                            for i in range(k):
+                                                sub_out[i] = src_u32[i]
+                                    out_pos += k
+                                if sp_end <= page_pe:
+                                    cur_s += 1
+                                    s_idx = cur_s
+                                else:
+                                    break
+
+                        pos += hdr_len + c_len
+                        page_ps = page_pe
+                    return 0
+
+                @njit(nogil=True)
+                def decode_rg_batch(
+                    dctx: int,
+                    mm_u8: np.ndarray,
+                    col_offs: np.ndarray,
+                    unique_rgs: np.ndarray,
+                    group_starts: np.ndarray,
+                    group_stops: np.ndarray,
+                    group_span_ids: np.ndarray,
+                    g_start: int,
+                    g_stop: int,
+                    rg_pats: int,
+                    num_data: int,
+                    ones_idx: np.ndarray,
+                    multi_idx: np.ndarray,
+                    firsts: np.ndarray,
+                    lasts: np.ndarray,
+                    dst_ones: np.ndarray,
+                    dst_multi: np.ndarray,
+                    out_po: np.ndarray,
+                    out_pm: np.ndarray,
+                    out_cm: np.ndarray,
+                    buf_u8: np.ndarray,
+                    is_delta: bool,
+                    is_shuffled: bool,
+                ) -> int:
+                    for g_idx in range(g_start, g_stop):
+                        rg = unique_rgs[g_idx]
+                        ps = rg * rg_pats
+                        pe = (
+                            num_data
+                            if (rg + 1) * rg_pats > num_data
+                            else (rg + 1) * rg_pats
+                        )
+                        gs0 = group_starts[g_idx]
+                        gs1 = group_stops[g_idx]
+                        n_sp = gs1 - gs0
+                        p_firsts = np.empty(n_sp, dtype=np.int64)
+                        p_lasts = np.empty(n_sp, dtype=np.int64)
+                        d_ones = np.empty(n_sp, dtype=np.int64)
+                        d_multi = np.empty(n_sp, dtype=np.int64)
+                        need_o = False
+                        need_m = False
+                        for i in range(n_sp):
+                            sid = group_span_ids[gs0 + i]
+                            f = firsts[sid]
+                            last_p = lasts[sid]
+                            p_firsts[i] = f
+                            p_lasts[i] = last_p
+                            d_ones[i] = dst_ones[sid]
+                            d_multi[i] = dst_multi[sid]
+                            if ones_idx[last_p] > ones_idx[f]:
+                                need_o = True
+                            if multi_idx[last_p] > multi_idx[f]:
+                                need_m = True
+                        if need_o:
+                            rc = decode_col_pages(
+                                dctx,
+                                mm_u8,
+                                col_offs[rg, 2, 0],
+                                col_offs[rg, 2, 1],
+                                buf_u8,
+                                ps,
+                                pe,
+                                ones_idx,
+                                out_po,
+                                p_firsts,
+                                p_lasts,
+                                d_ones,
+                                is_delta,
+                                is_shuffled,
+                            )
+                            if rc != 0:
+                                return rc
+                        if need_m:
+                            rc = decode_col_pages(
+                                dctx,
+                                mm_u8,
+                                col_offs[rg, 3, 0],
+                                col_offs[rg, 3, 1],
+                                buf_u8,
+                                ps,
+                                pe,
+                                multi_idx,
+                                out_pm,
+                                p_firsts,
+                                p_lasts,
+                                d_multi,
+                                is_delta,
+                                is_shuffled,
+                            )
+                            if rc != 0:
+                                return rc
+                            rc = decode_col_pages(
+                                dctx,
+                                mm_u8,
+                                col_offs[rg, 4, 0],
+                                col_offs[rg, 4, 1],
+                                buf_u8,
+                                ps,
+                                pe,
+                                multi_idx,
+                                out_cm,
+                                p_firsts,
+                                p_lasts,
+                                d_multi,
+                                False,
+                                is_shuffled,
+                            )
+                            if rc != 0:
+                                return rc
+                    return 0
+
+                _zstd_c_kernels = (
+                    encode_rg_all_cols,
+                    parse_our_footer_nb,
+                    read_ones_multi_nb,
+                    decode_col_pages,
+                    decode_rg_batch,
+                )
+    return _zstd_c_kernels
 
 
 def _ensure_decode_kernel() -> Any:
@@ -485,6 +1218,31 @@ def _enc_zigzag(n: int) -> bytes:
     return _enc_uvarint((n << 1) ^ (n >> 63))
 
 
+def _dec_uvarint_py(mv: memoryview | bytes, pos: int) -> tuple[int, int]:
+    b = mv[pos]
+    if b < 0x80:
+        return b, pos + 1
+    n = b & 0x7F
+    b = mv[pos + 1]
+    if b < 0x80:
+        return n | (b << 7), pos + 2
+    n |= (b & 0x7F) << 7
+    shift = 14
+    pos += 2
+    while True:
+        b = mv[pos]
+        pos += 1
+        n |= (b & 0x7F) << shift
+        if b < 0x80:
+            return n, pos
+        shift += 7
+
+
+def _dec_zigzag_py(mv: memoryview | bytes, pos: int) -> tuple[int, int]:
+    n, pos = _dec_uvarint_py(mv, pos)
+    return (n >> 1) ^ -(n & 1), pos
+
+
 def _make_data_page_header(uncomp_len: int, comp_len: int, num_values: int) -> bytes:
     return (
         b"\x15\x00"
@@ -593,6 +1351,199 @@ def _encode_kv_metadata(kv: dict[bytes, bytes]) -> bytes:
         parts.append(b"\x18" + _enc_uvarint(len(v)) + v)
         parts.append(b"\x00")
     return b"".join(parts)
+
+
+def _decode_kv_metadata_py(
+    mv: memoryview | bytes, pos: int
+) -> dict[bytes, bytes] | None:
+    if pos + 2 > len(mv) or mv[pos] != 0x19:
+        return None
+    hdr_b = mv[pos + 1]
+    if hdr_b == 0xFC:
+        n_kv, pos = _dec_uvarint_py(mv, pos + 2)
+    else:
+        n_kv = hdr_b >> 4
+        pos += 2
+    out: dict[bytes, bytes] = {}
+    for _ in range(n_kv):
+        if pos >= len(mv) or mv[pos] != 0x18:
+            return None
+        k_len, pos = _dec_uvarint_py(mv, pos + 1)
+        k = bytes(mv[pos : pos + k_len])
+        pos += k_len
+        if pos >= len(mv) or mv[pos] != 0x18:
+            return None
+        v_len, pos = _dec_uvarint_py(mv, pos + 1)
+        v = bytes(mv[pos : pos + v_len])
+        pos += v_len
+        if pos >= len(mv) or mv[pos] != 0x00:
+            return None
+        pos += 1
+        out[k] = v
+    return out
+
+
+def _parse_our_footer_py(
+    footer_bytes: bytes,
+) -> tuple[dict[bytes, bytes], npt.NDArray[np.int64]] | None:
+    schema_prefix, _ = _get_zstd_footer_template()
+    if not footer_bytes.startswith(schema_prefix):
+        return None
+    pos = len(schema_prefix)
+    n_len = len(footer_bytes)
+    if pos >= n_len or footer_bytes[pos] != 0x16:
+        return None
+    _, pos = _dec_zigzag_py(footer_bytes, pos + 1)
+    if pos + 1 >= n_len or footer_bytes[pos] != 0x19:
+        return None
+    hdr_b = footer_bytes[pos + 1]
+    if hdr_b == 0xFC:
+        n_rgs, pos = _dec_uvarint_py(footer_bytes, pos + 2)
+    else:
+        n_rgs = hdr_b >> 4
+        pos += 2
+    if n_rgs < 0:
+        return None
+
+    col_info = np.empty((n_rgs, 5, 2), dtype=np.int64)
+    col_name_lens = (4, 5, 10, 11, 11)
+    for rg in range(n_rgs):
+        if (
+            pos + 1 >= n_len
+            or footer_bytes[pos] != 0x19
+            or footer_bytes[pos + 1] != 0x5C
+        ):
+            return None
+        pos += 2
+        for c in range(5):
+            if (
+                pos + 4 >= n_len
+                or footer_bytes[pos] != 0x26
+                or footer_bytes[pos + 3] != 0x15
+            ):
+                return None
+            _, pos = _dec_zigzag_py(footer_bytes, pos + 4)
+            pos += 7 + col_name_lens[c]
+            if pos >= n_len or footer_bytes[pos] != 0x15:
+                return None
+            codec, pos = _dec_zigzag_py(footer_bytes, pos + 1)
+            if codec != 6:
+                return None
+            if pos >= n_len or footer_bytes[pos] != 0x16:
+                return None
+            _, pos = _dec_zigzag_py(footer_bytes, pos + 1)
+            if pos >= n_len or footer_bytes[pos] != 0x16:
+                return None
+            _, pos = _dec_zigzag_py(footer_bytes, pos + 1)
+            if pos >= n_len or footer_bytes[pos] != 0x16:
+                return None
+            tc, pos = _dec_zigzag_py(footer_bytes, pos + 1)
+            if pos >= n_len or footer_bytes[pos] != 0x26:
+                return None
+            poff, pos = _dec_zigzag_py(footer_bytes, pos + 1)
+            col_info[rg, c, 0] = poff
+            col_info[rg, c, 1] = tc
+            pos += 11
+        for _ in range(4):
+            if pos >= n_len:
+                return None
+            _, pos = _dec_zigzag_py(footer_bytes, pos + 1)
+        if pos >= n_len or footer_bytes[pos] != 0x00:
+            return None
+        pos += 1
+
+    kv = _decode_kv_metadata_py(footer_bytes, pos)
+    if kv is None:
+        return None
+    return kv, col_info
+
+
+def _meta_dict_from_kv(meta: dict[bytes, bytes]) -> dict[str, Any]:
+    version = meta.get(b"version", b"2").decode("ascii")
+    if version != "2":
+        raise ValueError(f"Unsupported Parquet EMC format version {version!r}")
+    position_encoding = meta.get(b"position_encoding", b"absolute").decode("ascii")
+    if position_encoding not in {"absolute", "delta"}:
+        raise ValueError(f"Unsupported Parquet position encoding {position_encoding!r}")
+    num_pix = int(meta[b"num_pix"].decode("ascii"))
+    num_data = int(meta[b"num_data"].decode("ascii"))
+    rg_pats = int(meta.get(b"rg_pats", b"1").decode("ascii"))
+    shuffle = meta.get(b"shuffle", b"0") == b"1"
+    payload_codec = meta.get(b"payload_codec", b"none").decode("ascii")
+    return {
+        "version": version,
+        "num_pix": num_pix,
+        "num_data": num_data,
+        "rg_pats": rg_pats,
+        "position_encoding": position_encoding,
+        "shuffle": shuffle,
+        "payload_codec": payload_codec,
+    }
+
+
+def _get_file_info(
+    path: Path, cache: dict[str, Any] | None = None
+) -> tuple[dict[str, Any], npt.NDArray[np.int64] | None]:
+    if cache is not None and "file_info" in cache:
+        return cache["file_info"]
+
+    resolved = path.resolve()
+    try:
+        st = resolved.stat()
+        if st.st_size >= 16:
+            with resolved.open("rb") as fp:
+                head_sig = fp.read(min(64, st.st_size))
+                fp.seek(-8, os.SEEK_END)
+                tail8 = fp.read(8)
+                if tail8[4:8] == _PARQUET_MAGIC:
+                    fl = int.from_bytes(tail8[:4], "little")
+                    if 0 < fl <= st.st_size - 12:
+                        fp.seek(st.st_size - fl - 8)
+                        footer_bytes = fp.read(fl)
+                        tail_sig = footer_bytes[-min(32, fl) :] + tail8
+                        cache_key = (
+                            str(resolved),
+                            st.st_mtime_ns,
+                            st.st_size,
+                            head_sig,
+                            tail_sig,
+                        )
+                        with _file_info_lock:
+                            cached = _file_info_lru.get(cache_key)
+                            if cached is not None:
+                                if cache is not None:
+                                    cache["file_info"] = cached
+                                return cached
+
+                        parsed = _parse_our_footer_py(footer_bytes)
+                        if parsed is not None:
+                            kv, col_info = parsed
+                            meta_dict = _meta_dict_from_kv(kv)
+                            res: tuple[dict[str, Any], npt.NDArray[np.int64] | None] = (
+                                meta_dict,
+                                col_info,
+                            )
+                            with _file_info_lock:
+                                _file_info_lru[cache_key] = res
+                                if len(_file_info_lru) > 16:
+                                    _file_info_lru.pop(next(iter(_file_info_lru)))
+                            if cache is not None:
+                                cache["file_info"] = res
+                            return res
+    except OSError:
+        pass
+
+    _, pq = _require_pyarrow()
+    file_meta = pq.read_metadata(resolved)
+    meta = file_meta.metadata or {}
+    meta_dict = _meta_dict_from_kv(meta)
+    res_fallback: tuple[dict[str, Any], npt.NDArray[np.int64] | None] = (
+        meta_dict,
+        None,
+    )
+    if cache is not None:
+        cache["file_info"] = res_fallback
+    return res_fallback
 
 
 def _split_ranges_by_rg(
@@ -721,10 +1672,18 @@ def write_parquet_patterns(
                 "EMCFILE_PARQUET_CHUNK_BYTES must be a positive multiple of 4"
             )
     else:
-        chunk_bytes = max(4 << 20, ((total_bytes // 2048) + 3) & ~3)
+        chunk_bytes = max(4 << 20, ((total_bytes // 512) + 3) & ~3)
 
     bytes_per_pat = max(4, total_bytes // max(1, num_data))
     rg_pats = max(1, min(max(1, num_data), chunk_bytes // bytes_per_pat))
+
+    env_page_bytes = os.environ.get("EMCFILE_PARQUET_PAGE_BYTES")
+    if env_page_bytes is not None:
+        page_bytes = max(4, int(env_page_bytes))
+    else:
+        page_bytes = 64 << 10
+    page_pats = max(1, min(rg_pats, page_bytes // bytes_per_pat))
+
     workers = env_workers("EMCFILE_PARQUET_WRITE_WORKERS", 4, allow_zero=True)
     use_numba = (
         num_data > 0
@@ -749,138 +1708,9 @@ def write_parquet_patterns(
     from ._emc_patterns import PatternsSOne
 
     if pq_codec == "ZSTD" and use_numba and has_zstd and num_data > 0:
-        import zstandard
-
-        page_kernel, _ = _ensure_encode_kernels()
+        zstd_c = _ensure_zstd_c_kernels()
+        zstd_funcs = _get_libzstd()
         zstd_level = 1 if pq_level is None else int(pq_level)
-        tls = threading.local()
-
-        def encode_batch_zstd(batch: PatternsSOne) -> list[Any]:
-            b_n = int(batch.num_data)
-            b_rgs = (b_n + rg_pats - 1) // rg_pats
-            ones_arr = np.ascontiguousarray(batch.ones, dtype=np.uint32)
-            multi_arr = np.ascontiguousarray(batch.multi, dtype=np.uint32)
-            ones_idx = batch.ones_idx.astype(np.int64, copy=False)
-            multi_idx = batch.multi_idx.astype(np.int64, copy=False)
-            po_src = np.ascontiguousarray(batch.place_ones).view(np.int32)
-            pm_src = np.ascontiguousarray(batch.place_multi).view(np.int32)
-            cm_src = np.ascontiguousarray(batch.count_multi).view(np.int32)
-
-            def proc_rg_zstd(rg: int) -> Any:
-                compressor = getattr(tls, "compressor", None)
-                if compressor is None:
-                    compressor = zstandard.ZstdCompressor(level=zstd_level)
-                    tls.compressor = compressor
-
-                ps = rg * rg_pats
-                pe = min(b_n, (rg + 1) * rg_pats)
-                nr = pe - ps
-                no = int(ones_idx[pe] - ones_idx[ps])
-                nm = int(multi_idx[pe] - multi_idx[ps])
-
-                u_ones = nr * 4
-                u_multi = nr * 4
-                u_po = (no + nr) * 4
-                u_pm = (nm + nr) * 4
-                u_cm = (nm + nr) * 4
-
-                buf = getattr(tls, "buf", None)
-                need = max(u_po, u_pm)
-                if buf is None or len(buf) < need:
-                    buf = np.empty(max(need, 65536), dtype=np.uint8)
-                    tls.buf = buf
-
-                c_ones = compressor.compress(memoryview(ones_arr[ps:pe]).cast("B"))
-                c_multi = compressor.compress(memoryview(multi_arr[ps:pe]).cast("B"))
-
-                b_po = buf[:u_po]
-                rc = int(
-                    page_kernel(
-                        po_src,
-                        ones_idx,
-                        ps,
-                        pe,
-                        b_po,
-                        is_delta,
-                        shuffle,
-                        check_sorted,
-                    )
-                )
-                if rc == -1:
-                    raise ValueError("position values must fit in uint32")
-                if rc == -2:
-                    raise ValueError(
-                        "position values must be sorted within every pattern"
-                    )
-                c_po = compressor.compress(memoryview(b_po))
-
-                b_pm = buf[:u_pm]
-                rc = int(
-                    page_kernel(
-                        pm_src,
-                        multi_idx,
-                        ps,
-                        pe,
-                        b_pm,
-                        is_delta,
-                        shuffle,
-                        check_sorted,
-                    )
-                )
-                if rc == -1:
-                    raise ValueError("position values must fit in uint32")
-                if rc == -2:
-                    raise ValueError(
-                        "position values must be sorted within every pattern"
-                    )
-                c_pm = compressor.compress(memoryview(b_pm))
-
-                b_cm = buf[:u_cm]
-                page_kernel(cm_src, multi_idx, ps, pe, b_cm, False, shuffle, False)
-                c_cm = compressor.compress(memoryview(b_cm))
-
-                return nr, (
-                    (
-                        1,
-                        b"ones",
-                        u_ones,
-                        _make_data_page_header(u_ones, len(c_ones), nr),
-                        c_ones,
-                    ),
-                    (
-                        1,
-                        b"multi",
-                        u_multi,
-                        _make_data_page_header(u_multi, len(c_multi), nr),
-                        c_multi,
-                    ),
-                    (
-                        6,
-                        b"place_ones",
-                        u_po,
-                        _make_data_page_header(u_po, len(c_po), nr),
-                        c_po,
-                    ),
-                    (
-                        6,
-                        b"place_multi",
-                        u_pm,
-                        _make_data_page_header(u_pm, len(c_pm), nr),
-                        c_pm,
-                    ),
-                    (
-                        6,
-                        b"count_multi",
-                        u_cm,
-                        _make_data_page_header(u_cm, len(c_cm), nr),
-                        c_cm,
-                    ),
-                )
-
-            if workers > 1 and b_rgs > 1:
-                with ThreadPoolExecutor(max_workers=min(workers, b_rgs)) as pool:
-                    return list(pool.map(proc_rg_zstd, range(b_rgs)))
-            return [proc_rg_zstd(rg) for rg in range(b_rgs)]
 
         rg_bytes = max(1, rg_pats * bytes_per_pat)
         max_rgs_per_batch = max(1, buffer_size // rg_bytes)
@@ -893,64 +1723,180 @@ def write_parquet_patterns(
         kv_bytes = _encode_kv_metadata(meta_kv)
         suffix_bytes = kv_bytes + b"\x18" + created_by_suffix[1:]
 
-        col_metas_all: list[bytes] = []
-        total_rgs = 0
-        file_pos = 4
-        with path.open("wb") as fp:
-            fp.write(_PARQUET_MAGIC)
-            for batch in batches_iter:
-                for nr, cols in encode_batch_zstd(batch):
-                    total_rgs += 1
-                    rg_start_pos = file_pos
-                    total_uncomp_rg = 0
-                    total_comp_rg = 0
-                    col_metas = [b"\x19\x5c"]
-                    for c_type, c_name, u_len, hdr, comp_data in cols:
-                        page_off = file_pos
-                        fp.write(hdr)
-                        fp.write(comp_data)
-                        tc = len(hdr) + len(comp_data)
-                        tu = len(hdr) + u_len
-                        file_pos += tc
-                        total_uncomp_rg += tu
-                        total_comp_rg += tc
-                        col_metas.append(
-                            _make_col_chunk_meta(
-                                c_type, c_name, 6, nr, tu, tc, page_off
-                            )
-                        )
-                    col_metas.append(
-                        b"\x16"
-                        + _enc_zigzag(total_uncomp_rg)
-                        + b"\x16"
-                        + _enc_zigzag(nr)
-                        + b"\x26"
-                        + _enc_zigzag(rg_start_pos)
-                        + b"\x16"
-                        + _enc_zigzag(total_comp_rg)
-                        + b"\x00"
-                    )
-                    col_metas_all.extend(col_metas)
+        if zstd_c is not None and zstd_funcs is not None:
+            encode_rg_all_cols = zstd_c[0]
+            create_cctx, free_cctx, _, compress_bound, _, _, _ = zstd_funcs
+            c_names = (b"ones", b"multi", b"place_ones", b"place_multi", b"count_multi")
+            c_types = (1, 1, 6, 6, 6)
 
-            list_hdr = (
-                bytes([0x19, (total_rgs << 4) | 0x0C])
-                if total_rgs < 15
-                else b"\x19\xfc" + _enc_uvarint(total_rgs)
-            )
-            footer_bytes = b"".join(
-                [
-                    schema_prefix,
-                    b"\x16",
-                    _enc_zigzag(num_data),
-                    list_hdr,
-                    *col_metas_all,
-                    suffix_bytes,
-                ]
-            )
-            fp.write(footer_bytes)
-            fp.write(len(footer_bytes).to_bytes(4, "little"))
-            fp.write(_PARQUET_MAGIC)
-        return
+            n_slots = max(2, workers * 2)
+            ctx_q: queue.SimpleQueue[
+                tuple[int, npt.NDArray[np.uint8], npt.NDArray[np.uint8]]
+            ] = queue.SimpleQueue()
+            out_q: queue.SimpleQueue[npt.NDArray[np.uint8]] = queue.SimpleQueue()
+            created_cctxs: list[int] = []
+            for _ in range(max(1, workers)):
+                cctx_ptr = int(create_cctx())
+                created_cctxs.append(cctx_ptr)
+                ctx_q.put(
+                    (
+                        cctx_ptr,
+                        np.empty(256 * 1024, dtype=np.uint8),
+                        np.empty(300 * 1024, dtype=np.uint8),
+                    )
+                )
+            for _ in range(n_slots):
+                out_q.put(np.empty(max(512 * 1024, rg_bytes // 2), dtype=np.uint8))
+
+            col_metas_all: list[bytes] = []
+            total_rgs = 0
+            file_pos = 4
+            pool = _get_worker_pool(workers) if workers > 1 else None
+            try:
+                with path.open("wb") as fp:
+                    fp.write(_PARQUET_MAGIC)
+                    for batch in batches_iter:
+                        b_n = int(batch.num_data)
+                        b_rgs = (b_n + rg_pats - 1) // rg_pats
+                        ones_arr = np.ascontiguousarray(batch.ones, dtype=np.uint32)
+                        multi_arr = np.ascontiguousarray(batch.multi, dtype=np.uint32)
+                        ones_idx = batch.ones_idx.view(np.int64)
+                        multi_idx = batch.multi_idx.view(np.int64)
+                        po_src = np.ascontiguousarray(batch.place_ones).view(np.int32)
+                        pm_src = np.ascontiguousarray(batch.place_multi).view(np.int32)
+                        cm_src = np.ascontiguousarray(batch.count_multi).view(np.int32)
+                        meta_batch = np.empty((b_rgs, 5, 2), dtype=np.int64)
+
+                        def proc_rg_c(
+                            rg: int,
+                        ) -> tuple[int, int, int, npt.NDArray[np.uint8]]:
+                            cctx_ptr, sc, csc = ctx_q.get()
+                            out_buf = out_q.get()
+                            returned_out = False
+                            try:
+                                ps = rg * rg_pats
+                                pe = min(b_n, (rg + 1) * rg_pats)
+                                nr = pe - ps
+                                no = int(ones_idx[pe] - ones_idx[ps])
+                                nm = int(multi_idx[pe] - multi_idx[ps])
+                                need_sc = max((no + nr) * 4, (nm + nr) * 4, nr * 4, 64)
+                                if len(sc) < need_sc:
+                                    sc = np.empty(need_sc, dtype=np.uint8)
+                                need_csc = int(compress_bound(need_sc)) + 64
+                                if len(csc) < need_csc:
+                                    csc = np.empty(need_csc, dtype=np.uint8)
+                                n_pages = (nr + page_pats - 1) // page_pats
+                                need_out = (
+                                    int(compress_bound(nr * 4)) * 2
+                                    + int(compress_bound((no + nr) * 4))
+                                    + int(compress_bound((nm + nr) * 4)) * 2
+                                    + (n_pages * 3 + 2) * 64
+                                )
+                                if len(out_buf) < need_out:
+                                    out_buf = np.empty(need_out, dtype=np.uint8)
+                                rc, pos = encode_rg_all_cols(
+                                    cctx_ptr,
+                                    zstd_level,
+                                    ones_arr,
+                                    multi_arr,
+                                    po_src,
+                                    pm_src,
+                                    cm_src,
+                                    ones_idx,
+                                    multi_idx,
+                                    ps,
+                                    pe,
+                                    page_pats,
+                                    sc,
+                                    csc,
+                                    out_buf,
+                                    meta_batch[rg],
+                                    is_delta,
+                                    shuffle,
+                                    check_sorted,
+                                )
+                                returned_out = True
+                                return int(rc), nr, int(pos), out_buf
+                            finally:
+                                ctx_q.put((cctx_ptr, sc, csc))
+                                if not returned_out:
+                                    out_q.put(out_buf)
+
+                        rg_iter = (
+                            pool.map(proc_rg_c, range(b_rgs))
+                            if (pool is not None and b_rgs > 1)
+                            else (proc_rg_c(rg) for rg in range(b_rgs))
+                        )
+                        for rg, (rc, nr, pos, out_buf) in enumerate(rg_iter):
+                            try:
+                                if rc == -1:
+                                    raise ValueError(
+                                        "position values must fit in uint32"
+                                    )
+                                if rc == -2:
+                                    raise ValueError(
+                                        "position values must be sorted within every pattern"
+                                    )
+                                total_rgs += 1
+                                rg_start_pos = file_pos
+                                fp.write(memoryview(out_buf)[:pos])
+                            finally:
+                                out_q.put(out_buf)
+                            total_uncomp_rg = 0
+                            total_comp_rg = 0
+                            col_metas = [b"\x19\x5c"]
+                            for c in range(5):
+                                tu = int(meta_batch[rg, c, 0])
+                                tc = int(meta_batch[rg, c, 1])
+                                col_metas.append(
+                                    _make_col_chunk_meta(
+                                        c_types[c],
+                                        c_names[c],
+                                        6,
+                                        nr,
+                                        tu,
+                                        tc,
+                                        file_pos,
+                                    )
+                                )
+                                file_pos += tc
+                                total_uncomp_rg += tu
+                                total_comp_rg += tc
+                            col_metas.append(
+                                b"\x16"
+                                + _enc_zigzag(total_uncomp_rg)
+                                + b"\x16"
+                                + _enc_zigzag(nr)
+                                + b"\x26"
+                                + _enc_zigzag(rg_start_pos)
+                                + b"\x16"
+                                + _enc_zigzag(total_comp_rg)
+                                + b"\x00"
+                            )
+                            col_metas_all.extend(col_metas)
+
+                    list_hdr = (
+                        bytes([0x19, (total_rgs << 4) | 0x0C])
+                        if total_rgs < 15
+                        else b"\x19\xfc" + _enc_uvarint(total_rgs)
+                    )
+                    footer_bytes = b"".join(
+                        [
+                            schema_prefix,
+                            b"\x16",
+                            _enc_zigzag(num_data),
+                            list_hdr,
+                            *col_metas_all,
+                            suffix_bytes,
+                        ]
+                    )
+                    fp.write(footer_bytes)
+                    fp.write(len(footer_bytes).to_bytes(4, "little"))
+                    fp.write(_PARQUET_MAGIC)
+            finally:
+                for cctx_ptr in created_cctxs:
+                    free_cctx(cctx_ptr)
+            return
 
     _, raw_kernel = _ensure_encode_kernels() if use_numba else (None, None)
     schema = pa.schema(
@@ -1092,8 +2038,8 @@ def write_parquet_patterns(
             )
 
         if workers > 1 and b_rgs > 1:
-            with ThreadPoolExecutor(max_workers=min(workers, b_rgs)) as pool:
-                batches = list(pool.map(build_rg_batch, range(b_rgs)))
+            pool = _get_worker_pool(min(workers, b_rgs))
+            batches = list(pool.map(build_rg_batch, range(b_rgs)))
         else:
             batches = [build_rg_batch(rg) for rg in range(b_rgs)]
         return pa.Table.from_batches(batches, schema=schema)
@@ -1111,7 +2057,7 @@ def write_parquet_patterns(
             compression_level=pq_level,
             use_dictionary=False,
             write_statistics=False,
-            data_page_size=64 * 1024 * 1024,
+            data_page_size=max(4096, page_bytes),
         )
         return
 
@@ -1122,38 +2068,19 @@ def write_parquet_patterns(
         compression_level=pq_level,
         use_dictionary=False,
         write_statistics=False,
-        data_page_size=64 * 1024 * 1024,
+        data_page_size=max(4096, page_bytes),
     ) as writer:
         for batch in _iter_rg_batches(datas, rg_pats, max_rgs_per_batch):
             tbl = encode_batch_arrow(batch)
             writer.write_table(tbl, row_group_size=max(1, rg_pats))
 
 
-def read_parquet_metadata(path: Path) -> dict[str, Any]:
+def read_parquet_metadata(
+    path: Path, *, cache: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Read header metadata from a Parquet v2 pattern file."""
-    _, pq = _require_pyarrow()
-    file_meta = pq.read_metadata(path)
-    meta = file_meta.metadata or {}
-    version = meta.get(b"version", b"2").decode("ascii")
-    if version != "2":
-        raise ValueError(f"Unsupported Parquet EMC format version {version!r}")
-    position_encoding = meta.get(b"position_encoding", b"absolute").decode("ascii")
-    if position_encoding not in {"absolute", "delta"}:
-        raise ValueError(f"Unsupported Parquet position encoding {position_encoding!r}")
-    num_pix = int(meta[b"num_pix"].decode("ascii"))
-    num_data = int(meta[b"num_data"].decode("ascii"))
-    rg_pats = int(meta.get(b"rg_pats", b"1").decode("ascii"))
-    shuffle = meta.get(b"shuffle", b"0") == b"1"
-    payload_codec = meta.get(b"payload_codec", b"none").decode("ascii")
-    return {
-        "version": version,
-        "num_pix": num_pix,
-        "num_data": num_data,
-        "rg_pats": rg_pats,
-        "position_encoding": position_encoding,
-        "shuffle": shuffle,
-        "payload_codec": payload_codec,
-    }
+    meta_dict, _ = _get_file_info(path, cache=cache)
+    return meta_dict
 
 
 def read_parquet_ones_multi(
@@ -1161,10 +2088,97 @@ def read_parquet_ones_multi(
     num_data: int,
     *,
     pf: Any | None = None,
+    cache: dict[str, Any] | None = None,
 ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
     """Read the ``ones`` and ``multi`` count arrays from a Parquet v2 file."""
     if num_data == 0:
         return np.empty(0, dtype=np.uint32), np.empty(0, dtype=np.uint32)
+
+    meta_dict, col_info = _get_file_info(path, cache=cache)
+    if (
+        col_info is not None
+        and sys.byteorder == "little"
+        and importlib.util.find_spec("zstandard") is not None
+    ):
+        rg_pats = int(meta_dict["rg_pats"])
+        n_rgs = len(col_info)
+        out_ones = np.empty(num_data, dtype=np.uint32)
+        out_multi = np.empty(num_data, dtype=np.uint32)
+
+        mm_obj = cache.get("mm") if cache is not None else None
+        fp_local = None
+        mm_local = None
+        try:
+            if mm_obj is None:
+                fp_local = path.open("rb")
+                mm_local = mmap.mmap(fp_local.fileno(), 0, access=mmap.ACCESS_READ)
+                mm_obj = mm_local
+
+            if importlib.util.find_spec("numba") is not None:
+                zstd_c = _ensure_zstd_c_kernels()
+                zstd_funcs = _get_libzstd()
+                if zstd_c is not None and zstd_funcs is not None:
+                    read_ones_multi_nb = zstd_c[2]
+                    _, _, _, _, create_dctx, free_dctx, _ = zstd_funcs
+                    mm_u8 = np.frombuffer(mm_obj, dtype=np.uint8)
+                    dctx = int(create_dctx())
+                    try:
+                        rc = int(
+                            read_ones_multi_nb(
+                                dctx,
+                                mm_u8,
+                                col_info,
+                                n_rgs,
+                                rg_pats,
+                                num_data,
+                                out_ones,
+                                out_multi,
+                            )
+                        )
+                    finally:
+                        free_dctx(dctx)
+                    del mm_u8
+                    if rc == 0:
+                        return out_ones, out_multi
+
+            import zstandard
+
+            dctx_py = zstandard.ZstdDecompressor()
+            mv = memoryview(mm_obj)
+            try:
+                for rg in range(n_rgs):
+                    ps = rg * rg_pats
+                    pe = min(num_data, (rg + 1) * rg_pats)
+                    u_expect = (pe - ps) * 4
+
+                    off0 = int(col_info[rg, 0, 0])
+                    tc0 = int(col_info[rg, 0, 1])
+                    _, p1 = _dec_zigzag_py(mv, off0 + 3)
+                    c0, _ = _dec_zigzag_py(mv, p1 + 1)
+                    hdr0 = tc0 - c0
+                    raw0 = dctx_py.decompress(
+                        mv[off0 + hdr0 : off0 + tc0], max_output_size=u_expect
+                    )
+                    out_ones[ps:pe] = np.frombuffer(raw0, dtype=np.uint32)
+
+                    off1 = int(col_info[rg, 1, 0])
+                    tc1 = int(col_info[rg, 1, 1])
+                    _, p1 = _dec_zigzag_py(mv, off1 + 3)
+                    c1, _ = _dec_zigzag_py(mv, p1 + 1)
+                    hdr1 = tc1 - c1
+                    raw1 = dctx_py.decompress(
+                        mv[off1 + hdr1 : off1 + tc1], max_output_size=u_expect
+                    )
+                    out_multi[ps:pe] = np.frombuffer(raw1, dtype=np.uint32)
+            finally:
+                del mv
+            return out_ones, out_multi
+        finally:
+            if mm_local is not None:
+                mm_local.close()
+            if fp_local is not None:
+                fp_local.close()
+
     _, pq = _require_pyarrow()
     if pf is not None:
         tbl = pf.read(columns=_COUNT_COLUMNS, use_threads=True)
@@ -1181,12 +2195,85 @@ def read_parquet_ones_multi(
     return ones, multi
 
 
+def _extract_single_page_col_py(
+    mv: memoryview,
+    dctx: Any,
+    col_off: int,
+    col_tc: int,
+    rg: int,
+    col_idx: int,
+    rg_ps: int,
+    rg_pe: int,
+    frame: int,
+    pat_offsets: npt.NDArray[np.uint64],
+    is_delta: bool,
+    is_shuffled: bool,
+    dtype: str,
+    page_lru: dict[tuple[int, int, int], bytes] | None,
+) -> npt.NDArray[Any]:
+    s = int(pat_offsets[frame])
+    e = int(pat_offsets[frame + 1])
+    k = e - s
+    if k <= 0:
+        return np.empty(0, dtype=dtype)
+    pos = col_off
+    col_end = col_off + col_tc
+    page_ps = rg_ps
+    while page_ps < rg_pe and pos < col_end:
+        u_len, p1 = _dec_zigzag_py(mv, pos + 3)
+        c_len, p2 = _dec_zigzag_py(mv, p1 + 1)
+        page_nr, p3 = _dec_zigzag_py(mv, p2 + 2)
+        hdr_len = (p3 + 10) - pos
+        page_pe = page_ps + page_nr
+        if frame < page_pe:
+            key = (rg, col_idx, page_ps)
+            raw = None
+            if page_lru is not None and key in page_lru:
+                raw = page_lru.pop(key)
+                page_lru[key] = raw
+            if raw is None:
+                raw = dctx.decompress(
+                    mv[pos + hdr_len : pos + hdr_len + c_len], max_output_size=u_len
+                )
+                if page_lru is not None:
+                    page_lru[key] = raw
+                    if len(page_lru) > 6:
+                        page_lru.pop(next(iter(page_lru)))
+            u8 = np.frombuffer(raw, dtype=np.uint8)
+            b_s = (s - int(pat_offsets[page_ps]) + (frame - page_ps) + 1) * 4
+            if is_shuffled:
+                arr = (
+                    u8[b_s : b_s + 4 * k].reshape(4, k).T.copy().view(dtype).reshape(-1)
+                )
+            else:
+                arr = u8[b_s : b_s + 4 * k].view(dtype).copy()
+            if is_delta:
+                np.cumsum(arr, dtype=np.uint32, out=arr)
+            return arr
+        pos += hdr_len + c_len
+        page_ps = page_pe
+    raise RuntimeError("Frame not found in Parquet column chunk")
+
+
+class _ZstdDCtxHolder:
+    def __init__(self, ptr: int, free_fn: Any) -> None:
+        self.ptr = ptr
+        self._free_fn = free_fn
+
+    def __del__(self) -> None:
+        if self.ptr:
+            self._free_fn(self.ptr)
+            self.ptr = 0
+
+
 def read_single_frame_parquet(
     pf: Any,
     frame: int,
     ones_idx: npt.NDArray[np.uint64],
     multi_idx: npt.NDArray[np.uint64],
     *,
+    path: Path | None = None,
+    col_info: npt.NDArray[np.int64] | None = None,
     num_data: int,
     rg_pats: int,
     is_delta: bool,
@@ -1194,10 +2281,194 @@ def read_single_frame_parquet(
     payload_codec: str = "none",
     cache: dict[str, Any] | None = None,
 ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
-    """Fast single-frame read using a 2-Row-Group LRU cache and pure NumPy."""
-    del num_data, payload_codec
+    """Fast single-frame read using page-level decompression and pure NumPy."""
+    del payload_codec
     rg = frame // rg_pats
     ps = rg * rg_pats
+    pe = min(num_data, (rg + 1) * rg_pats)
+
+    if (
+        col_info is not None
+        and sys.byteorder == "little"
+        and importlib.util.find_spec("zstandard") is not None
+    ):
+        mm_obj = cache.get("mm") if cache is not None else None
+        fp_local = None
+        mm_local = None
+        try:
+            if mm_obj is None:
+                assert path is not None
+                fp_local = path.open("rb")
+                mm_local = mmap.mmap(fp_local.fileno(), 0, access=mmap.ACCESS_READ)
+                mm_obj = mm_local
+
+            if importlib.util.find_spec("numba") is not None:
+                zstd_c = _ensure_zstd_c_kernels()
+                zstd_funcs = _get_libzstd()
+                if zstd_c is not None and zstd_funcs is not None:
+                    decode_col_pages = zstd_c[3]
+                    _, _, _, _, create_dctx, free_dctx, _ = zstd_funcs
+                    k_o = int(ones_idx[frame + 1]) - int(ones_idx[frame])
+                    k_m = int(multi_idx[frame + 1]) - int(multi_idx[frame])
+                    po = np.empty(k_o, dtype=np.uint32)
+                    pm = np.empty(k_m, dtype=np.uint32)
+                    cm = np.empty(k_m, dtype=np.uint32)
+                    if k_o == 0 and k_m == 0:
+                        return po, pm, cm.view(np.int32)
+
+                    holder = cache.get("c_dctx") if cache is not None else None
+                    if holder is None:
+                        holder = _ZstdDCtxHolder(int(create_dctx()), free_dctx)
+                        if cache is not None:
+                            cache["c_dctx"] = holder
+                    s_buf = cache.get("s_buf") if cache is not None else None
+                    need_buf = max(256 * 1024, (max(k_o, k_m) + 16) * 4)
+                    if s_buf is None or len(s_buf) < need_buf:
+                        s_buf = np.empty(need_buf, dtype=np.uint8)
+                        if cache is not None:
+                            cache["s_buf"] = s_buf
+
+                    ones_i64 = (
+                        ones_idx.view(np.int64)
+                        if ones_idx.dtype == np.uint64
+                        else ones_idx.astype(np.int64, copy=False)
+                    )
+                    multi_i64 = (
+                        multi_idx.view(np.int64)
+                        if multi_idx.dtype == np.uint64
+                        else multi_idx.astype(np.int64, copy=False)
+                    )
+                    pf_arr = np.array([frame], dtype=np.int64)
+                    pl_arr = np.array([frame + 1], dtype=np.int64)
+                    dst_arr = np.array([0], dtype=np.int64)
+                    mm_u8 = np.frombuffer(mm_obj, dtype=np.uint8)
+                    try:
+                        if k_o > 0:
+                            decode_col_pages(
+                                holder.ptr,
+                                mm_u8,
+                                int(col_info[rg, 2, 0]),
+                                int(col_info[rg, 2, 1]),
+                                s_buf,
+                                ps,
+                                pe,
+                                ones_i64,
+                                po,
+                                pf_arr,
+                                pl_arr,
+                                dst_arr,
+                                is_delta,
+                                is_shuffled,
+                            )
+                        if k_m > 0:
+                            decode_col_pages(
+                                holder.ptr,
+                                mm_u8,
+                                int(col_info[rg, 3, 0]),
+                                int(col_info[rg, 3, 1]),
+                                s_buf,
+                                ps,
+                                pe,
+                                multi_i64,
+                                pm,
+                                pf_arr,
+                                pl_arr,
+                                dst_arr,
+                                is_delta,
+                                is_shuffled,
+                            )
+                            decode_col_pages(
+                                holder.ptr,
+                                mm_u8,
+                                int(col_info[rg, 4, 0]),
+                                int(col_info[rg, 4, 1]),
+                                s_buf,
+                                ps,
+                                pe,
+                                multi_i64,
+                                cm,
+                                pf_arr,
+                                pl_arr,
+                                dst_arr,
+                                False,
+                                is_shuffled,
+                            )
+                        return po, pm, cm.view(np.int32)
+                    finally:
+                        del mm_u8
+
+            import zstandard
+
+            dctx = cache.get("dctx") if cache is not None else None
+            if dctx is None:
+                dctx = zstandard.ZstdDecompressor()
+                if cache is not None:
+                    cache["dctx"] = dctx
+            page_lru = cache.setdefault("page_lru", {}) if cache is not None else None
+            mv = memoryview(mm_obj)
+            try:
+                po = _extract_single_page_col_py(
+                    mv,
+                    dctx,
+                    int(col_info[rg, 2, 0]),
+                    int(col_info[rg, 2, 1]),
+                    rg,
+                    2,
+                    ps,
+                    pe,
+                    frame,
+                    ones_idx,
+                    is_delta,
+                    is_shuffled,
+                    "<u4",
+                    page_lru,
+                )
+                pm = _extract_single_page_col_py(
+                    mv,
+                    dctx,
+                    int(col_info[rg, 3, 0]),
+                    int(col_info[rg, 3, 1]),
+                    rg,
+                    3,
+                    ps,
+                    pe,
+                    frame,
+                    multi_idx,
+                    is_delta,
+                    is_shuffled,
+                    "<u4",
+                    page_lru,
+                )
+                cm = _extract_single_page_col_py(
+                    mv,
+                    dctx,
+                    int(col_info[rg, 4, 0]),
+                    int(col_info[rg, 4, 1]),
+                    rg,
+                    4,
+                    ps,
+                    pe,
+                    frame,
+                    multi_idx,
+                    False,
+                    is_shuffled,
+                    "<i4",
+                    page_lru,
+                )
+                return po, pm, cm
+            finally:
+                del mv
+        finally:
+            if mm_local is not None:
+                mm_local.close()
+            if fp_local is not None:
+                fp_local.close()
+
+    if pf is None:
+        assert path is not None
+        _, pq = _require_pyarrow()
+        pf = pq.ParquetFile(path, memory_map=True, pre_buffer=False)
+
     rg_base_o = int(ones_idx[ps])
     rg_base_m = int(multi_idx[ps])
 
@@ -1298,17 +2569,23 @@ def read_parquet_patterns(
         or np.any(ranges[:, 0] > ranges[:, 1])
     ):
         raise IndexError("Pattern range is out of bounds")
-    if (
-        ones_idx.ndim != 1
-        or multi_idx.ndim != 1
-        or ones_idx.size != num_data + 1
-        or multi_idx.size != num_data + 1
-        or ones_idx[0] != 0
-        or multi_idx[0] != 0
-        or np.any(ones_idx[1:] < ones_idx[:-1])
-        or np.any(multi_idx[1:] < multi_idx[:-1])
-    ):
-        raise ValueError("Pattern counts do not match Parquet v2 payload size")
+
+    idx_pair = (id(ones_idx), id(multi_idx))
+    already_validated = cache is not None and cache.get("valid_idx") == idx_pair
+    if not already_validated:
+        if (
+            ones_idx.ndim != 1
+            or multi_idx.ndim != 1
+            or ones_idx.size != num_data + 1
+            or multi_idx.size != num_data + 1
+            or ones_idx[0] != 0
+            or multi_idx[0] != 0
+            or np.any(ones_idx[1:] < ones_idx[:-1])
+            or np.any(multi_idx[1:] < multi_idx[:-1])
+        ):
+            raise ValueError("Pattern counts do not match Parquet v2 payload size")
+        if cache is not None:
+            cache["valid_idx"] = idx_pair
 
     if num_data == 0 or len(ranges) == 0:
         return (
@@ -1325,9 +2602,7 @@ def read_parquet_patterns(
         and int(ranges[0, 1]) == num_data
     )
 
-    _, pq = _require_pyarrow()
-    if pf is None:
-        pf = pq.ParquetFile(path, memory_map=True, pre_buffer=False)
+    _, col_info = _get_file_info(path, cache=cache)
 
     if single:
         single_workers = env_workers(
@@ -1339,6 +2614,8 @@ def read_parquet_patterns(
                 int(ranges[0, 0]),
                 ones_idx,
                 multi_idx,
+                path=path,
+                col_info=col_info,
                 num_data=num_data,
                 rg_pats=rg_pats,
                 is_delta=is_delta,
@@ -1360,8 +2637,16 @@ def read_parquet_patterns(
             np.empty(0, dtype=np.int32),
         )
 
-    ones_idx_i64 = ones_idx.astype(np.int64, copy=False)
-    multi_idx_i64 = multi_idx.astype(np.int64, copy=False)
+    ones_idx_i64 = (
+        ones_idx.view(np.int64)
+        if ones_idx.dtype == np.uint64
+        else ones_idx.astype(np.int64, copy=False)
+    )
+    multi_idx_i64 = (
+        multi_idx.view(np.int64)
+        if multi_idx.dtype == np.uint64
+        else multi_idx.astype(np.int64, copy=False)
+    )
 
     ones_lens = ones_idx_i64[lasts] - ones_idx_i64[firsts]
     multi_lens = multi_idx_i64[lasts] - multi_idx_i64[firsts]
@@ -1381,27 +2666,129 @@ def read_parquet_patterns(
     out_pm = np.empty(total_multi, dtype=np.uint32)
     out_cm = np.empty(total_multi, dtype=np.uint32)
 
-    order = np.argsort(rgs, kind="stable")
+    order = (
+        np.arange(len(rgs), dtype=np.int64) if is_full else np.lexsort((firsts, rgs))
+    )
     sorted_rgs = rgs[order]
     unique_rgs, split_pts = np.unique(sorted_rgs, return_index=True)
-    groups = np.split(order, split_pts[1:])
 
     use_numba_decode = (
         workers > 0
         and sys.byteorder == "little"
         and importlib.util.find_spec("numba") is not None
     )
+    has_zstd = importlib.util.find_spec("zstandard") is not None
+
+    if col_info is not None and use_numba_decode and has_zstd:
+        zstd_c = _ensure_zstd_c_kernels()
+        zstd_funcs = _get_libzstd()
+        if zstd_c is not None and zstd_funcs is not None:
+            decode_rg_batch = zstd_c[4]
+            _, _, _, _, create_dctx, free_dctx, _ = zstd_funcs
+            group_starts = split_pts.astype(np.int64)
+            group_stops = np.empty_like(group_starts)
+            group_stops[:-1] = group_starts[1:]
+            group_stops[-1] = len(order)
+            group_span_ids = order.astype(np.int64)
+            n_groups = len(unique_rgs)
+            n_workers = max(1, min(workers, n_groups))
+
+            mm_obj = cache.get("mm") if cache is not None else None
+            fp_local = None
+            mm_local = None
+            dctxs = [int(create_dctx()) for _ in range(n_workers)]
+            bufs = [np.empty(256 * 1024, dtype=np.uint8) for _ in range(n_workers)]
+            try:
+                if mm_obj is None:
+                    fp_local = path.open("rb")
+                    mm_local = mmap.mmap(fp_local.fileno(), 0, access=mmap.ACCESS_READ)
+                    mm_obj = mm_local
+                mm_u8 = np.frombuffer(mm_obj, dtype=np.uint8)
+                try:
+                    if n_workers > 1:
+                        bounds = np.linspace(0, n_groups, n_workers + 1, dtype=np.int64)
+                        pool = _get_worker_pool(n_workers)
+                        futs = [
+                            pool.submit(
+                                decode_rg_batch,
+                                dctxs[w],
+                                mm_u8,
+                                col_info,
+                                unique_rgs,
+                                group_starts,
+                                group_stops,
+                                group_span_ids,
+                                int(bounds[w]),
+                                int(bounds[w + 1]),
+                                rg_pats,
+                                num_data,
+                                ones_idx_i64,
+                                multi_idx_i64,
+                                firsts,
+                                lasts,
+                                dst_ones,
+                                dst_multi,
+                                out_po,
+                                out_pm,
+                                out_cm,
+                                bufs[w],
+                                is_delta,
+                                shuffle,
+                            )
+                            for w in range(n_workers)
+                        ]
+                        for fut in futs:
+                            if int(fut.result()) != 0:
+                                raise ValueError("Corrupted Zstd page in Parquet file")
+                    else:
+                        rc = int(
+                            decode_rg_batch(
+                                dctxs[0],
+                                mm_u8,
+                                col_info,
+                                unique_rgs,
+                                group_starts,
+                                group_stops,
+                                group_span_ids,
+                                0,
+                                n_groups,
+                                rg_pats,
+                                num_data,
+                                ones_idx_i64,
+                                multi_idx_i64,
+                                firsts,
+                                lasts,
+                                dst_ones,
+                                dst_multi,
+                                out_po,
+                                out_pm,
+                                out_cm,
+                                bufs[0],
+                                is_delta,
+                                shuffle,
+                            )
+                        )
+                        if rc != 0:
+                            raise ValueError("Corrupted Zstd page in Parquet file")
+                finally:
+                    del mm_u8
+            finally:
+                for dctx in dctxs:
+                    free_dctx(dctx)
+                if mm_local is not None:
+                    mm_local.close()
+                if fp_local is not None:
+                    fp_local.close()
+            return out_po, out_pm, out_cm.view(np.int32)
+
+    _, pq = _require_pyarrow()
+    if pf is None:
+        pf = pq.ParquetFile(path, memory_map=True, pre_buffer=False)
+
+    groups = np.split(order, split_pts[1:])
     decode_kernel = _ensure_decode_kernel() if use_numba_decode else None
-    tls = threading.local()
 
     def proc_group(g_idx: int) -> None:
-        f = pf
-        if workers > 1 and len(unique_rgs) > 1:
-            f = getattr(tls, "pf", None)
-            if f is None:
-                f = pq.ParquetFile(path, memory_map=True, pre_buffer=False)
-                tls.pf = f
-
         rg = int(unique_rgs[g_idx])
         span_ids = groups[g_idx]
         p_firsts = firsts[span_ids]
@@ -1414,7 +2801,7 @@ def read_parquet_patterns(
         rg_base_m = int(multi_idx_i64[ps])
         rg_nm = int(multi_idx_i64[pe]) - rg_base_m
 
-        rt = f.read_row_group(rg, columns=_PAYLOAD_COLUMNS, use_threads=False)
+        rt = pf.read_row_group(rg, columns=_PAYLOAD_COLUMNS, use_threads=False)
 
         if rg_no > 0:
             u8_po = _extract_chunk_val_u8(rt.column("place_ones"))
@@ -1495,8 +2882,8 @@ def read_parquet_patterns(
 
     n_groups = len(unique_rgs)
     if workers > 1 and n_groups > 1:
-        with ThreadPoolExecutor(max_workers=min(workers, n_groups)) as pool:
-            list(pool.map(proc_group, range(n_groups)))
+        pool = _get_worker_pool(min(workers, n_groups))
+        list(pool.map(proc_group, range(n_groups)))
     else:
         for g_idx in range(n_groups):
             proc_group(g_idx)
@@ -1515,6 +2902,7 @@ def read_parquet_column(
     shuffle: bool,
     payload_codec: str = "none",
     dtype: str = "u4",
+    cache: dict[str, Any] | None = None,
 ) -> npt.NDArray[Any]:
     """Read and decode a single full event column from a Parquet v2 file."""
     del payload_codec
@@ -1522,39 +2910,115 @@ def read_parquet_column(
     if num_data == 0 or total_elems == 0:
         return np.empty(0, dtype=dtype)
 
-    _, pq = _require_pyarrow()
     workers = env_workers("EMCFILE_PARQUET_FULL_SCAN_WORKERS", 4, allow_zero=True)
     use_numba_decode = (
         workers > 0
         and sys.byteorder == "little"
         and importlib.util.find_spec("numba") is not None
     )
-    decode_kernel = _ensure_decode_kernel() if use_numba_decode else None
+    has_zstd = importlib.util.find_spec("zstandard") is not None
+    _, col_info = _get_file_info(path, cache=cache)
 
-    offsets_i64 = offsets.astype(np.int64, copy=False)
+    offsets_i64 = (
+        offsets.view(np.int64)
+        if offsets.dtype == np.uint64
+        else offsets.astype(np.int64, copy=False)
+    )
     out_u32 = np.empty(total_elems, dtype=np.uint32)
     n_rgs = (num_data + rg_pats - 1) // rg_pats
-    tls = threading.local()
-    pf_main = (
-        pq.ParquetFile(path, memory_map=True, pre_buffer=False)
-        if not (workers > 1 and n_rgs > 1)
-        else None
-    )
+
+    col_idx_map = {"place_ones": 2, "place_multi": 3, "count_multi": 4}
+    if col_info is not None and column in col_idx_map and use_numba_decode and has_zstd:
+        zstd_c = _ensure_zstd_c_kernels()
+        zstd_funcs = _get_libzstd()
+        if zstd_c is not None and zstd_funcs is not None:
+            decode_col_pages = zstd_c[3]
+            _, _, _, _, create_dctx, free_dctx, _ = zstd_funcs
+            c_idx = col_idx_map[column]
+            n_workers = max(1, min(workers, n_rgs))
+            dctxs = [int(create_dctx()) for _ in range(n_workers)]
+            bufs = [np.empty(256 * 1024, dtype=np.uint8) for _ in range(n_workers)]
+
+            mm_obj = cache.get("mm") if cache is not None else None
+            fp_local = None
+            mm_local = None
+            try:
+                if mm_obj is None:
+                    fp_local = path.open("rb")
+                    mm_local = mmap.mmap(fp_local.fileno(), 0, access=mmap.ACCESS_READ)
+                    mm_obj = mm_local
+                mm_u8 = np.frombuffer(mm_obj, dtype=np.uint8)
+                try:
+
+                    def proc_col_range(w: int, r0: int, r1: int) -> None:
+                        dctx = dctxs[w]
+                        buf = bufs[w]
+                        for rg in range(r0, r1):
+                            ps = rg * rg_pats
+                            pe = min(num_data, (rg + 1) * rg_pats)
+                            rg_base = int(offsets_i64[ps])
+                            if int(offsets_i64[pe]) <= rg_base:
+                                continue
+                            pf_arr = np.array([ps], dtype=np.int64)
+                            pl_arr = np.array([pe], dtype=np.int64)
+                            dst_arr = np.array([rg_base], dtype=np.int64)
+                            rc = int(
+                                decode_col_pages(
+                                    dctx,
+                                    mm_u8,
+                                    int(col_info[rg, c_idx, 0]),
+                                    int(col_info[rg, c_idx, 1]),
+                                    buf,
+                                    ps,
+                                    pe,
+                                    offsets_i64,
+                                    out_u32,
+                                    pf_arr,
+                                    pl_arr,
+                                    dst_arr,
+                                    is_delta,
+                                    shuffle,
+                                )
+                            )
+                            if rc != 0:
+                                raise ValueError("Corrupted Zstd page in Parquet file")
+
+                    if n_workers > 1:
+                        bounds = np.linspace(0, n_rgs, n_workers + 1, dtype=np.int64)
+                        pool = _get_worker_pool(n_workers)
+                        futs = [
+                            pool.submit(
+                                proc_col_range, w, int(bounds[w]), int(bounds[w + 1])
+                            )
+                            for w in range(n_workers)
+                        ]
+                        for fut in futs:
+                            fut.result()
+                    else:
+                        proc_col_range(0, 0, n_rgs)
+                finally:
+                    del mm_u8
+            finally:
+                for dctx in dctxs:
+                    free_dctx(dctx)
+                if mm_local is not None:
+                    mm_local.close()
+                if fp_local is not None:
+                    fp_local.close()
+            return out_u32.view(dtype)
+
+    _, pq = _require_pyarrow()
+    decode_kernel = _ensure_decode_kernel() if use_numba_decode else None
+    pf_main = pq.ParquetFile(path, memory_map=True, pre_buffer=False)
 
     def proc_rg(rg: int) -> None:
-        f = pf_main
-        if f is None:
-            f = getattr(tls, "pf", None)
-            if f is None:
-                f = pq.ParquetFile(path, memory_map=True, pre_buffer=False)
-                tls.pf = f
         ps = rg * rg_pats
         pe = min(num_data, (rg + 1) * rg_pats)
         rg_base = int(offsets_i64[ps])
         rg_n = int(offsets_i64[pe]) - rg_base
         if rg_n <= 0:
             return
-        rt = f.read_row_group(rg, columns=[column], use_threads=False)
+        rt = pf_main.read_row_group(rg, columns=[column], use_threads=False)
         u8 = _extract_chunk_val_u8(rt.column(column))
         p_first = np.array([ps], dtype=np.int64)
         p_last = np.array([pe], dtype=np.int64)
@@ -1585,8 +3049,8 @@ def read_parquet_column(
             )
 
     if workers > 1 and n_rgs > 1:
-        with ThreadPoolExecutor(max_workers=min(workers, n_rgs)) as pool:
-            list(pool.map(proc_rg, range(n_rgs)))
+        pool = _get_worker_pool(min(workers, n_rgs))
+        list(pool.map(proc_rg, range(n_rgs)))
     else:
         for rg in range(n_rgs):
             proc_rg(rg)

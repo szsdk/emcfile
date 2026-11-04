@@ -292,7 +292,15 @@ class PatternsSOneFile:
         ``index`` is a zero-based index in ``[0, num_patterns)``. Returns a
         ``SparsePattern`` without allocating a dense array of pixel counts.
         """
-        return self[index : index + 1].sparse_pattern(0)
+        idx = int(index)
+        if idx < 0:
+            idx += self.num_data
+        if idx < 0 or idx >= self.num_data:
+            raise IndexError("Pattern index out of range")
+        place_ones, place_multi, count_multi = self._read_patterns(
+            np.array([[idx, idx + 1]])
+        )
+        return SPARSE_PATTERN(self.num_pix, place_ones, place_multi, count_multi)
 
     def sum(
         self,
@@ -950,7 +958,8 @@ class PatternsSOneParquet(PatternsSOneFile):
         from ._parquet import read_parquet_metadata
 
         self._fn = Path(fn).resolve()
-        meta = read_parquet_metadata(self._fn)
+        self._cache: dict[str, Any] = {}
+        meta = read_parquet_metadata(self._fn, cache=self._cache)
         self.num_data = int(meta["num_data"])
         self.num_pix = int(meta["num_pix"])
         self.pqversion = str(meta["version"])
@@ -964,7 +973,7 @@ class PatternsSOneParquet(PatternsSOneFile):
     def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
         from ._parquet import read_parquet_ones_multi
 
-        return read_parquet_ones_multi(self._fn, self.num_data)
+        return read_parquet_ones_multi(self._fn, self.num_data, cache=self._cache)
 
     def _read_patterns(
         self, index_ranges: INDEX_ARRAY
@@ -982,6 +991,7 @@ class PatternsSOneParquet(PatternsSOneFile):
             position_encoding=self.position_encoding,
             shuffle=self.shuffle,
             payload_codec=self.payload_codec,
+            cache=self._cache,
         )
 
     def open(self) -> PatternsSOneParquetReadBuffer:
@@ -1003,6 +1013,7 @@ class PatternsSOneParquet(PatternsSOneFile):
             shuffle=self.shuffle,
             payload_codec=self.payload_codec,
             dtype="u4",
+            cache=self._cache,
         )
 
     @property
@@ -1020,6 +1031,7 @@ class PatternsSOneParquet(PatternsSOneFile):
             shuffle=self.shuffle,
             payload_codec=self.payload_codec,
             dtype="u4",
+            cache=self._cache,
         )
 
     @property
@@ -1037,28 +1049,47 @@ class PatternsSOneParquet(PatternsSOneFile):
             shuffle=self.shuffle,
             payload_codec=self.payload_codec,
             dtype="i4",
+            cache=self._cache,
         )
 
 
 class PatternsSOneParquetReadBuffer(PatternsSOneParquet):
     def __init__(self, fn: str | Path):
-        from ._parquet import _require_pyarrow
+        import mmap
 
         super().__init__(fn)
-        _, pq = _require_pyarrow()
-        self._file_handle: Any = pq.ParquetFile(
-            self._fn, memory_map=True, pre_buffer=False
-        )
-        self._cache: dict[str, Any] = {}
+        self._fp: Any = None
+        self._mm: mmap.mmap | None = None
+        try:
+            if self._fn.stat().st_size > 0:
+                self._fp = self._fn.open("rb")
+                self._mm = mmap.mmap(self._fp.fileno(), 0, access=mmap.ACCESS_READ)
+                self._cache["mm"] = self._mm
+        except OSError:
+            pass
+        self._file_handle: Any = None
+        if self._cache.get("file_info", (None, None))[1] is None:
+            from ._parquet import _require_pyarrow
+
+            _, pq = _require_pyarrow()
+            self._file_handle = pq.ParquetFile(
+                self._fn, memory_map=True, pre_buffer=False
+            )
 
     def __enter__(self) -> PatternsSOneParquetReadBuffer:
         return self
 
     def close(self) -> None:
+        self._cache.clear()
+        if self._mm is not None:
+            self._mm.close()
+            self._mm = None
+        if self._fp is not None:
+            self._fp.close()
+            self._fp = None
         if self._file_handle is not None:
             self._file_handle.close()
             self._file_handle = None
-        self._cache.clear()
 
     def __exit__(self, exc_type: Any, exc_value: Any, exc_traceback: Any) -> None:
         self.close()
@@ -1066,8 +1097,9 @@ class PatternsSOneParquetReadBuffer(PatternsSOneParquet):
     def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
         from ._parquet import read_parquet_ones_multi
 
-        assert self._file_handle is not None
-        return read_parquet_ones_multi(self._fn, self.num_data, pf=self._file_handle)
+        return read_parquet_ones_multi(
+            self._fn, self.num_data, pf=self._file_handle, cache=self._cache
+        )
 
     def _read_patterns(
         self, index_ranges: INDEX_ARRAY
@@ -1075,7 +1107,6 @@ class PatternsSOneParquetReadBuffer(PatternsSOneParquet):
         from ._parquet import read_parquet_patterns
 
         self.init_idx()
-        assert self._file_handle is not None
         return read_parquet_patterns(
             self._fn,
             index_ranges,
