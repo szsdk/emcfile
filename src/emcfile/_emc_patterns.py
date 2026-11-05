@@ -4,8 +4,8 @@ import io
 import logging
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import (
     Any,
@@ -23,9 +23,10 @@ import numpy.typing as npt
 from scipy.sparse import csr_array, hstack
 from typing_extensions import deprecated
 
-from ._formatting import pretty_size
 from ._delta import encode_pattern_local_delta_parallel
-from ._h5_direct_write import PrefilteredDatasetWriter, available as direct_zstd_available
+from ._formatting import pretty_size
+from ._h5_direct_write import PrefilteredDatasetWriter
+from ._h5_direct_write import available as direct_zstd_available
 from ._h5_filters import hdf5plugin
 from ._h5_workers import env_workers
 from ._hdf5 import PATH_TYPE, H5Path, check_remove_groups, make_path
@@ -46,6 +47,7 @@ class SPARSE_PATTERN(NamedTuple):
 
     The tuple is immutable, but its NumPy arrays can be writable views.
     """
+
     num_pix: int
     place_ones: npt.NDArray[np.uint32]
     place_multi: npt.NDArray[np.uint32]
@@ -72,8 +74,9 @@ def _count_offsets(
     counts: npt.NDArray[np.integer[Any]],
 ) -> npt.NDArray[np.uint64]:
     """Return cumulative event offsets for per-pattern counts."""
-    offsets = np.zeros(len(counts) + 1, dtype=np.uint64)
-    np.cumsum(counts, out=offsets[1:])
+    offsets = np.empty(len(counts) + 1, dtype=np.uint64)
+    offsets[0] = 0
+    np.cumsum(counts, dtype=np.uint64, out=offsets[1:])
     return offsets
 
 
@@ -598,8 +601,10 @@ class PatternsSOne:
                     return source
                 if (
                     source.num_pix <= np.iinfo(np.int32).max
-                    and source.place_ones.dtype in (np.dtype(np.uint32), np.dtype(np.int32))
-                    and source.place_multi.dtype in (np.dtype(np.uint32), np.dtype(np.int32))
+                    and source.place_ones.dtype
+                    in (np.dtype(np.uint32), np.dtype(np.int32))
+                    and source.place_multi.dtype
+                    in (np.dtype(np.uint32), np.dtype(np.int32))
                     and source.place_ones.flags.c_contiguous
                     and source.place_multi.flags.c_contiguous
                 ):
@@ -907,47 +912,133 @@ def _write_h5_v2(
     num_pix = datas[0].num_pix
     if any(data.num_pix != num_pix for data in datas):
         raise ValueError("all pattern sources must have the same number of pixels")
-    direct_zstd = position_encoding == "delta" and compression == "zstd" and shuffle and all(size > 0 for size in (num_data, num_ones, num_multi)) and direct_zstd_available()
-    chunk_bytes = int(os.environ.get("EMCFILE_H5_DIRECT_CHUNK_BYTES", str(16 << 20)))
+    direct_zstd = (
+        position_encoding == "delta"
+        and compression == "zstd"
+        and shuffle
+        and all(size > 0 for size in (num_data, num_ones, num_multi))
+        and direct_zstd_available()
+    )
+    env_chunk_bytes = os.environ.get("EMCFILE_H5_DIRECT_CHUNK_BYTES")
+    chunk_bytes = int(env_chunk_bytes) if env_chunk_bytes is not None else (512 << 10)
     if chunk_bytes <= 0 or chunk_bytes % np.dtype("u4").itemsize:
-        raise ValueError("EMCFILE_H5_DIRECT_CHUNK_BYTES must be a positive multiple of 4")
+        raise ValueError(
+            "EMCFILE_H5_DIRECT_CHUNK_BYTES must be a positive multiple of 4"
+        )
     workers = env_workers("EMCFILE_H5_WRITE_WORKERS", 4)
     kwargs = _h5_filter_kwargs(compression, compression_opts, shuffle)
     with path.open_group("a", "a") as (_, fp):
         assert isinstance(fp, (h5py.Group, h5py.File))
         names = ["ones", "multi", "place_ones", "place_multi", "count_multi"]
         check_remove_groups(fp, names, overwrite)
-        shapes = {"ones": (num_data, "i4"), "multi": (num_data, "i4"), "place_ones": (num_ones, "u4"), "place_multi": (num_multi, "u4"), "count_multi": (num_multi, "i4")}
+        shapes = {
+            "ones": (num_data, "i4"),
+            "multi": (num_data, "i4"),
+            "place_ones": (num_ones, "u4"),
+            "place_multi": (num_multi, "u4"),
+            "count_multi": (num_multi, "i4"),
+        }
         datasets = {}
         for name, (size, dtype) in shapes.items():
             dataset_kwargs = dict(kwargs)
-            if direct_zstd:
-                dataset_kwargs["chunks"] = (max(1, min(size, chunk_bytes // 4)),)
-            datasets[name] = fp.create_dataset(name, (size,), dtype=dtype, **dataset_kwargs)
-        fp.attrs.update(num_pix=num_pix, num_data=num_data, version="2", position_encoding=position_encoding)
+            if (direct_zstd or (compression == "zstd" and shuffle)) and size > 0:
+                if (
+                    env_chunk_bytes is None
+                    and name in ("place_multi", "count_multi")
+                    and num_ones > 0
+                ):
+                    ds_chunk_bytes = max(
+                        64 << 10,
+                        min(
+                            chunk_bytes, (chunk_bytes * size + num_ones - 1) // num_ones
+                        ),
+                    )
+                    ds_chunk_elems = max(1, min(size, ds_chunk_bytes // 4))
+                else:
+                    ds_chunk_elems = max(1, min(size, chunk_bytes // 4))
+                dataset_kwargs["chunks"] = (ds_chunk_elems,)
+            datasets[name] = fp.create_dataset(
+                name, (size,), dtype=dtype, **dataset_kwargs
+            )
+        fp.attrs.update(
+            num_pix=num_pix,
+            num_data=num_data,
+            version="2",
+            position_encoding=position_encoding,
+        )
         pool = ThreadPoolExecutor(max_workers=workers) if direct_zstd else None
         slots = threading.Semaphore(max(2, workers * 2)) if direct_zstd else None
-        writers = {name: PrefilteredDatasetWriter(dataset, 1 if compression_opts is None else int(compression_opts), workers, pool=pool, slots=slots) for name, dataset in datasets.items()} if direct_zstd else None
+        writers = (
+            {
+                name: PrefilteredDatasetWriter(
+                    dataset,
+                    1 if compression_opts is None else int(compression_opts),
+                    workers,
+                    pool=pool,
+                    slots=slots,
+                )
+                for name, dataset in datasets.items()
+            }
+            if direct_zstd
+            else None
+        )
         offsets = {name: 0 for name in names}
         try:
             for data in datas:
-                patterns_per_batch = max(1, buffer_size // max(1, data.nbytes // max(1, data.num_data)))
+                patterns_per_batch = max(
+                    1, buffer_size // max(1, data.nbytes // max(1, data.num_data))
+                )
                 for start in range(0, data.num_data, patterns_per_batch):
                     batch = data[start : min(start + patterns_per_batch, data.num_data)]
                     assert isinstance(batch, PatternsSOne)
-                    arrays = {
-                        "ones": np.asarray(batch.ones), "multi": np.asarray(batch.multi),
-                        "place_ones": encode_pattern_local_delta_parallel(batch.place_ones, batch.ones, workers, check_sorted=check_sorted, accelerated=direct_zstd) if position_encoding == "delta" else np.asarray(batch.place_ones),
-                        "place_multi": encode_pattern_local_delta_parallel(batch.place_multi, batch.multi, workers, check_sorted=check_sorted, accelerated=direct_zstd) if position_encoding == "delta" else np.asarray(batch.place_multi),
-                        "count_multi": np.asarray(batch.count_multi),
-                    }
-                    for name, array in arrays.items():
-                        if writers is None:
-                            datasets[name][offsets[name] : offsets[name] + array.size] = array
+                    if writers is None:
+                        arrays = {
+                            "ones": np.asarray(batch.ones),
+                            "multi": np.asarray(batch.multi),
+                            "place_ones": encode_pattern_local_delta_parallel(
+                                batch.place_ones,
+                                batch.ones,
+                                workers,
+                                check_sorted=check_sorted,
+                                accelerated=False,
+                            )
+                            if position_encoding == "delta"
+                            else np.asarray(batch.place_ones),
+                            "place_multi": encode_pattern_local_delta_parallel(
+                                batch.place_multi,
+                                batch.multi,
+                                workers,
+                                check_sorted=check_sorted,
+                                accelerated=False,
+                            )
+                            if position_encoding == "delta"
+                            else np.asarray(batch.place_multi),
+                            "count_multi": np.asarray(batch.count_multi),
+                        }
+                        for name, array in arrays.items():
+                            datasets[name][
+                                offsets[name] : offsets[name] + array.size
+                            ] = array
                             offsets[name] += array.size
-                        else:
-                            writers[name].write(array)
-                            writers[name].drain()
+                    else:
+                        writers["ones"].write(np.asarray(batch.ones))
+                        writers["ones"].drain()
+                        writers["multi"].write(np.asarray(batch.multi))
+                        writers["multi"].drain()
+                        writers["place_ones"].write_delta(
+                            np.asarray(batch.place_ones),
+                            batch.ones_idx,
+                            check_sorted=check_sorted,
+                        )
+                        writers["place_ones"].drain()
+                        writers["place_multi"].write_delta(
+                            np.asarray(batch.place_multi),
+                            batch.multi_idx,
+                            check_sorted=check_sorted,
+                        )
+                        writers["place_multi"].drain()
+                        writers["count_multi"].write(np.asarray(batch.count_multi))
+                        writers["count_multi"].drain()
         finally:
             if writers is not None:
                 for writer in writers.values():
@@ -1052,7 +1143,17 @@ def write_patterns(
             )
             return _write_h5_v1(datas[0], f, overwrite)
         elif h5version == "2":
-            return _write_h5_v2(datas, f, overwrite, buffer_size, compression, compression_opts, shuffle, position_encoding, check_sorted)
+            return _write_h5_v2(
+                datas,
+                f,
+                overwrite,
+                buffer_size,
+                compression,
+                compression_opts,
+                shuffle,
+                position_encoding,
+                check_sorted,
+            )
         else:
             raise ValueError(f"The h5version(={h5version}) should be '1' or '2'.")
     raise ValueError(f"Wrong file name {path}")
