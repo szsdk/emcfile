@@ -971,31 +971,114 @@ class PatternsSOneParquet(PatternsSOneFile):
         self.rg_pats = int(meta["rg_pats"])
         self.shuffle = bool(meta["shuffle"])
         self.payload_codec = str(meta["payload_codec"])
+        self._num_ones: int | None = meta.get("num_ones")
+        self._num_multi: int | None = meta.get("num_multi")
+        self._file_handle: Any = None
         self.ndim = 2
         self._init_idx = False
+
+    @property
+    def nbytes(self) -> int:
+        if self._num_ones is not None and self._num_multi is not None:
+            return int((self.num_data * 2 + self._num_ones + self._num_multi * 2) * I4)
+        return super().nbytes
 
     def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
         from ._parquet import read_parquet_ones_multi
 
-        return read_parquet_ones_multi(self._fn, self.num_data, cache=self._cache)
+        return read_parquet_ones_multi(
+            self._fn, self.num_data, pf=self._file_handle, cache=self._cache
+        )
 
     def _read_patterns(
         self, index_ranges: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         from ._parquet import read_parquet_patterns
 
-        self.init_idx()
         return read_parquet_patterns(
             self._fn,
             index_ranges,
-            self.ones_idx,
-            self.multi_idx,
+            self.ones_idx if self._init_idx else None,
+            self.multi_idx if self._init_idx else None,
             num_data=self.num_data,
             rg_pats=self.rg_pats,
             position_encoding=self.position_encoding,
             shuffle=self.shuffle,
             payload_codec=self.payload_codec,
+            pf=self._file_handle,
             cache=self._cache,
+        )
+
+    @overload
+    def __getitem__(self, index: int | np.integer) -> npt.NDArray[np.int32]: ...
+
+    @overload
+    def __getitem__(self, index: TRANGE) -> PatternsSOne: ...
+
+    @overload
+    def __getitem__(self, index: tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
+
+    def __getitem__(
+        self,
+        index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
+    ) -> npt.NDArray[np.int32] | PatternsSOne:
+        from ._parquet import read_parquet_patterns_with_counts
+
+        match index:
+            case (ax0, ax1) if isinstance(index, tuple):
+                return self[ax0][:, ax1]
+            case int() | np.integer():
+                idx = int(index)
+                if idx < 0:
+                    idx += self.num_data
+                if idx < 0 or idx >= self.num_data:
+                    raise IndexError("Pattern index out of range")
+                place_ones, place_multi, count_multi = self._read_patterns(
+                    np.array([[idx, idx + 1]])
+                )
+                ans = np.zeros(self.num_pix, np.int32)
+                ans[place_ones] = 1
+                ans[place_multi] = count_multi
+                return ans
+            case np.ndarray() if np.issubdtype(index.dtype, bool):
+                index_ranges = contiguous_ranges(np.where(index)[0])
+            case np.ndarray():
+                index_ranges = contiguous_ranges(index)
+            case slice():
+                start, stop, step = index.indices(self.num_data)
+                if step == 1:
+                    index_ranges = (
+                        np.array([(start, stop)])
+                        if stop > start
+                        else np.empty((0, 2), dtype=int)
+                    )
+                else:
+                    index_ranges = np.array(
+                        [(i, i + 1) for i in range(start, stop, step)]
+                    ).reshape(-1, 2)
+
+        sel_ones, sel_multi, place_ones, place_multi, count_multi = (
+            read_parquet_patterns_with_counts(
+                self._fn,
+                index_ranges,
+                self.ones_idx if self._init_idx else None,
+                self.multi_idx if self._init_idx else None,
+                num_data=self.num_data,
+                rg_pats=self.rg_pats,
+                position_encoding=self.position_encoding,
+                shuffle=self.shuffle,
+                payload_codec=self.payload_codec,
+                pf=self._file_handle,
+                cache=self._cache,
+            )
+        )
+        return PatternsSOne(
+            self.num_pix,
+            sel_ones,
+            sel_multi,
+            place_ones,
+            place_multi,
+            count_multi,
         )
 
     def open(self) -> PatternsSOneParquetReadBuffer:
@@ -1006,11 +1089,9 @@ class PatternsSOneParquet(PatternsSOneFile):
     def place_ones(self) -> npt.NDArray[np.uint32]:
         from ._parquet import read_parquet_column
 
-        self.init_idx()
         return read_parquet_column(
             self._fn,
             "place_ones",
-            self.ones_idx,
             num_data=self.num_data,
             rg_pats=self.rg_pats,
             is_delta=(self.position_encoding == "delta"),
@@ -1024,11 +1105,9 @@ class PatternsSOneParquet(PatternsSOneFile):
     def place_multi(self) -> npt.NDArray[np.uint32]:
         from ._parquet import read_parquet_column
 
-        self.init_idx()
         return read_parquet_column(
             self._fn,
             "place_multi",
-            self.multi_idx,
             num_data=self.num_data,
             rg_pats=self.rg_pats,
             is_delta=(self.position_encoding == "delta"),
@@ -1042,11 +1121,9 @@ class PatternsSOneParquet(PatternsSOneFile):
     def count_multi(self) -> npt.NDArray[np.int32]:
         from ._parquet import read_parquet_column
 
-        self.init_idx()
         return read_parquet_column(
             self._fn,
             "count_multi",
-            self.multi_idx,
             num_data=self.num_data,
             rg_pats=self.rg_pats,
             is_delta=False,
@@ -1071,7 +1148,6 @@ class PatternsSOneParquetReadBuffer(PatternsSOneParquet):
                 self._cache["mm"] = self._mm
         except OSError:
             pass
-        self._file_handle: Any = None
         if self._cache.get("file_info", (None, None))[1] is None:
             from ._parquet import _require_pyarrow
 
@@ -1097,33 +1173,6 @@ class PatternsSOneParquetReadBuffer(PatternsSOneParquet):
 
     def __exit__(self, exc_type: Any, exc_value: Any, exc_traceback: Any) -> None:
         self.close()
-
-    def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
-        from ._parquet import read_parquet_ones_multi
-
-        return read_parquet_ones_multi(
-            self._fn, self.num_data, pf=self._file_handle, cache=self._cache
-        )
-
-    def _read_patterns(
-        self, index_ranges: INDEX_ARRAY
-    ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
-        from ._parquet import read_parquet_patterns
-
-        self.init_idx()
-        return read_parquet_patterns(
-            self._fn,
-            index_ranges,
-            self.ones_idx,
-            self.multi_idx,
-            num_data=self.num_data,
-            rg_pats=self.rg_pats,
-            position_encoding=self.position_encoding,
-            shuffle=self.shuffle,
-            payload_codec=self.payload_codec,
-            pf=self._file_handle,
-            cache=self._cache,
-        )
 
 
 def file_patterns(fn: Sequence[PATH_TYPE] | PATH_TYPE) -> PatternsSOneFile:

@@ -67,9 +67,7 @@ PARQUET_EXTRA_MESSAGE = (
     "Install with: pip install 'emcfile[parquet]'"
 )
 
-_COUNT_COLUMNS = ["ones", "multi"]
 _PAYLOAD_COLUMNS = ["place_ones", "place_multi", "count_multi"]
-_ALL_COLUMNS = ["ones", "multi", "place_ones", "place_multi", "count_multi"]
 
 _template_lock = threading.Lock()
 _zstd_footer_template: tuple[bytes, bytes] | None = None
@@ -189,8 +187,8 @@ def _encode_rg_numpy(
 
 def _decode_rg_spans_numpy(
     rg_u8: npt.NDArray[np.uint8],
-    rg_base_elem: int,
-    pat_offsets: npt.NDArray[np.int64],
+    rg_ps: int,
+    rg_local_offs: npt.NDArray[np.int64],
     out_u32: npt.NDArray[np.uint32],
     p_firsts: npt.NDArray[np.int64],
     p_lasts: npt.NDArray[np.int64],
@@ -204,12 +202,13 @@ def _decode_rg_spans_numpy(
         last_p = int(p_lasts[s_i])
         out_idx = int(dst_offs[s_i])
         for p in range(f, last_p):
-            s = int(pat_offsets[p])
-            e = int(pat_offsets[p + 1])
+            loc_p = p - rg_ps
+            s = int(rg_local_offs[loc_p])
+            e = int(rg_local_offs[loc_p + 1])
             k = e - s
             if k <= 0:
                 continue
-            b_s = (s - rg_base_elem) * 4
+            b_s = s * 4
             if is_shuffled:
                 pat_u32 = (
                     rg_u8[b_s : b_s + 4 * k]
@@ -316,6 +315,7 @@ def _make_col_chunk_meta(
     total_uncomp: int,
     total_comp: int,
     page_offset: int,
+    data_bytes: int,
 ) -> bytes:
     return (
         b"\x26\x00\x1c"
@@ -336,7 +336,9 @@ def _make_col_chunk_meta(
         + b"\x26"
         + _enc_zigzag(page_offset)
         + _COL_ENCODING_STATS_BYTES
-        + b"\x00\x00"
+        + b"\x3c\x16"
+        + _enc_zigzag(data_bytes)
+        + b"\x19\x06\x19\x06\x00\x00\x00"
     )
 
 
@@ -348,8 +350,6 @@ def _get_zstd_footer_template() -> tuple[bytes, bytes]:
                 pa, pq = _require_pyarrow()
                 schema = pa.schema(
                     [
-                        pa.field("ones", pa.uint32(), nullable=False),
-                        pa.field("multi", pa.uint32(), nullable=False),
                         pa.field("place_ones", pa.binary(), nullable=False),
                         pa.field("place_multi", pa.binary(), nullable=False),
                         pa.field("count_multi", pa.binary(), nullable=False),
@@ -367,8 +367,6 @@ def _get_zstd_footer_template() -> tuple[bytes, bytes]:
                     w.write_table(
                         pa.Table.from_pydict(
                             {
-                                "ones": [0],
-                                "multi": [0],
                                 "place_ones": [b""],
                                 "place_multi": [b""],
                                 "count_multi": [b""],
@@ -454,17 +452,17 @@ def _parse_our_footer_py(
     if n_rgs < 0:
         return None
 
-    col_info = np.empty((n_rgs, 5, 2), dtype=np.int64)
-    col_name_lens = (4, 5, 10, 11, 11)
+    col_info = np.empty((n_rgs, 3, 3), dtype=np.int64)
+    col_name_lens = (10, 11, 11)
     for rg in range(n_rgs):
         if (
             pos + 1 >= n_len
             or footer_bytes[pos] != 0x19
-            or footer_bytes[pos + 1] != 0x5C
+            or footer_bytes[pos + 1] != 0x3C
         ):
             return None
         pos += 2
-        for c in range(5):
+        for c in range(3):
             if (
                 pos + 4 >= n_len
                 or footer_bytes[pos] != 0x26
@@ -490,9 +488,18 @@ def _parse_our_footer_py(
             if pos >= n_len or footer_bytes[pos] != 0x26:
                 return None
             poff, pos = _dec_zigzag_py(footer_bytes, pos + 1)
+            pos += 9
+            if (
+                pos + 1 >= n_len
+                or footer_bytes[pos] != 0x3C
+                or footer_bytes[pos + 1] != 0x16
+            ):
+                return None
+            data_bytes, pos = _dec_zigzag_py(footer_bytes, pos + 2)
             col_info[rg, c, 0] = poff
             col_info[rg, c, 1] = tc
-            pos += 11
+            col_info[rg, c, 2] = data_bytes >> 2
+            pos += 7
         for _ in range(4):
             if pos >= n_len:
                 return None
@@ -507,7 +514,9 @@ def _parse_our_footer_py(
     return kv, col_info
 
 
-def _meta_dict_from_kv(meta: dict[bytes, bytes]) -> dict[str, Any]:
+def _meta_dict_from_kv(
+    meta: dict[bytes, bytes], col_info: npt.NDArray[np.int64] | None = None
+) -> dict[str, Any]:
     version = meta.get(b"version", b"2").decode("ascii")
     if version != "2":
         raise ValueError(f"Unsupported Parquet EMC format version {version!r}")
@@ -519,6 +528,16 @@ def _meta_dict_from_kv(meta: dict[bytes, bytes]) -> dict[str, Any]:
     rg_pats = int(meta.get(b"rg_pats", b"1").decode("ascii"))
     shuffle = meta.get(b"shuffle", b"0") == b"1"
     payload_codec = meta.get(b"payload_codec", b"none").decode("ascii")
+    if col_info is not None:
+        num_ones: int | None = int(col_info[:, 0, 2].sum()) if len(col_info) > 0 else 0
+        num_multi: int | None = int(col_info[:, 1, 2].sum()) if len(col_info) > 0 else 0
+    else:
+        num_ones = (
+            int(meta[b"num_ones"].decode("ascii")) if b"num_ones" in meta else None
+        )
+        num_multi = (
+            int(meta[b"num_multi"].decode("ascii")) if b"num_multi" in meta else None
+        )
     return {
         "version": version,
         "num_pix": num_pix,
@@ -527,6 +546,8 @@ def _meta_dict_from_kv(meta: dict[bytes, bytes]) -> dict[str, Any]:
         "position_encoding": position_encoding,
         "shuffle": shuffle,
         "payload_codec": payload_codec,
+        "num_ones": num_ones,
+        "num_multi": num_multi,
     }
 
 
@@ -567,7 +588,7 @@ def _get_file_info(
                         parsed = _parse_our_footer_py(footer_bytes)
                         if parsed is not None:
                             kv, col_info = parsed
-                            meta_dict = _meta_dict_from_kv(kv)
+                            meta_dict = _meta_dict_from_kv(kv, col_info)
                             res: tuple[dict[str, Any], npt.NDArray[np.int64] | None] = (
                                 meta_dict,
                                 col_info,
@@ -584,7 +605,7 @@ def _get_file_info(
 
     _, pq = _require_pyarrow()
     meta = pq.read_metadata(path).metadata or {}
-    meta_dict = _meta_dict_from_kv(meta)
+    meta_dict = _meta_dict_from_kv(meta, None)
     res_fallback: tuple[dict[str, Any], npt.NDArray[np.int64] | None] = (
         meta_dict,
         None,
@@ -649,9 +670,11 @@ def _split_ranges_by_rg(
     return rgs, firsts, lasts
 
 
-def _extract_chunk_val_u8(col_chunked: Any) -> npt.NDArray[np.uint8]:
+def _extract_chunk_offs_and_u8(
+    col_chunked: Any,
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.uint8]]:
     if col_chunked.num_chunks == 0 or len(col_chunked) == 0:
-        return np.empty(0, dtype=np.uint8)
+        return np.zeros(1, dtype=np.int64), np.empty(0, dtype=np.uint8)
     chunk = (
         col_chunked.chunk(0)
         if col_chunked.num_chunks == 1
@@ -659,14 +682,16 @@ def _extract_chunk_val_u8(col_chunked: Any) -> npt.NDArray[np.uint8]:
     )
     off_buf = chunk.buffers()[1]
     val_buf = chunk.buffers()[2]
-    if val_buf is None or off_buf is None:
-        return np.empty(0, dtype=np.uint8)
-    offs = np.frombuffer(off_buf, dtype=np.int32, count=len(chunk) + 1)
-    s_b = int(offs[0])
-    e_b = int(offs[-1])
-    if e_b <= s_b:
-        return np.empty(0, dtype=np.uint8)
-    return np.frombuffer(val_buf, dtype=np.uint8, count=e_b - s_b, offset=s_b)
+    if off_buf is None:
+        return np.zeros(len(chunk) + 1, dtype=np.int64), np.empty(0, dtype=np.uint8)
+    offs_i32 = np.frombuffer(off_buf, dtype=np.int32, count=len(chunk) + 1)
+    s_b = int(offs_i32[0])
+    e_b = int(offs_i32[-1])
+    local_offs = ((offs_i32.astype(np.int64) - s_b) >> 2).astype(np.int64, copy=False)
+    if val_buf is None or e_b <= s_b:
+        return local_offs, np.empty(0, dtype=np.uint8)
+    u8 = np.frombuffer(val_buf, dtype=np.uint8, count=e_b - s_b, offset=s_b)
+    return local_offs, u8
 
 
 def _iter_rg_batches(
@@ -774,6 +799,8 @@ def write_parquet_patterns(
         b"shuffle": b"1" if shuffle else b"0",
         b"payload_codec": b"none",
         b"compression": pq_codec.lower().encode("ascii"),
+        b"num_ones": str(num_ones).encode("ascii"),
+        b"num_multi": str(num_multi).encode("ascii"),
     }
 
     from ._emc_patterns import PatternsSOne
@@ -789,8 +816,7 @@ def write_parquet_patterns(
 
         schema_prefix, created_by_suffix = _get_zstd_footer_template()
         kv_bytes = _encode_kv_metadata(meta_kv)
-        c_names = (b"ones", b"multi", b"place_ones", b"place_multi", b"count_multi")
-        c_types = (1, 1, 6, 6, 6)
+        c_names = (b"place_ones", b"place_multi", b"count_multi")
 
         with path.open("wb") as fp:
             fp.write(_PARQUET_MAGIC)
@@ -804,19 +830,15 @@ def write_parquet_patterns(
                 if b_pats == 0:
                     continue
                 b_rgs = (b_pats + rg_pats - 1) // rg_pats
-                ones_arr = np.ascontiguousarray(batch.ones, dtype=np.uint32)
-                multi_arr = np.ascontiguousarray(batch.multi, dtype=np.uint32)
                 po_src = np.ascontiguousarray(batch.place_ones, dtype=np.uint32)
                 pm_src = np.ascontiguousarray(batch.place_multi, dtype=np.uint32)
                 cm_src = np.ascontiguousarray(batch.count_multi).view(np.uint32)
                 ones_idx = np.ascontiguousarray(batch.ones_idx, dtype=np.uint64)
                 multi_idx = np.ascontiguousarray(batch.multi_idx, dtype=np.uint64)
 
-                meta_batch = np.empty((b_rgs, 5, 2), dtype=np.int64)
+                meta_batch = np.empty((b_rgs, 3, 3), dtype=np.int64)
                 _parquet_rs.write_batch_zstd(
                     fp.fileno(),
-                    ones_arr,
-                    multi_arr,
                     po_src,
                     pm_src,
                     cm_src,
@@ -841,19 +863,21 @@ def write_parquet_patterns(
                     rg_start_pos = file_pos
                     total_uncomp_rg = 0
                     total_comp_rg = 0
-                    col_metas = [b"\x19\x5c"]
-                    for c in range(5):
+                    col_metas = [b"\x19\x3c"]
+                    for c in range(3):
                         tu = int(meta_batch[rg, c, 0])
                         tc = int(meta_batch[rg, c, 1])
+                        n_el = int(meta_batch[rg, c, 2])
                         col_metas.append(
                             _make_col_chunk_meta(
-                                c_types[c],
+                                6,
                                 c_names[c],
                                 6,
                                 nr,
                                 tu,
                                 tc,
                                 file_pos,
+                                n_el * 4,
                             )
                         )
                         file_pos += tc
@@ -895,8 +919,6 @@ def write_parquet_patterns(
 
     schema = pa.schema(
         [
-            pa.field("ones", pa.uint32(), nullable=False),
-            pa.field("multi", pa.uint32(), nullable=False),
             pa.field("place_ones", pa.binary(), nullable=False),
             pa.field("place_multi", pa.binary(), nullable=False),
             pa.field("count_multi", pa.binary(), nullable=False),
@@ -907,8 +929,6 @@ def write_parquet_patterns(
     if num_data == 0:
         empty_tbl = pa.Table.from_arrays(
             [
-                pa.array(np.empty(0, dtype=np.uint32), type=pa.uint32()),
-                pa.array(np.empty(0, dtype=np.uint32), type=pa.uint32()),
                 pa.array([], type=pa.binary()),
                 pa.array([], type=pa.binary()),
                 pa.array([], type=pa.binary()),
@@ -931,12 +951,6 @@ def write_parquet_patterns(
     def encode_batch_arrow(batch: PatternsSOne) -> Any:
         b_pats = batch.num_data
         b_rgs = (b_pats + rg_pats - 1) // rg_pats
-        ones_arr = pa.array(
-            np.ascontiguousarray(batch.ones, dtype=np.uint32), type=pa.uint32()
-        )
-        multi_arr = pa.array(
-            np.ascontiguousarray(batch.multi, dtype=np.uint32), type=pa.uint32()
-        )
         ones_b = batch.ones_idx * 4
         multi_b = batch.multi_idx * 4
         po_chunks = [None] * b_rgs
@@ -993,8 +1007,6 @@ def write_parquet_patterns(
 
         return pa.Table.from_arrays(
             [
-                ones_arr,
-                multi_arr,
                 pa.chunked_array(po_chunks, type=pa.binary()),
                 pa.chunked_array(pm_chunks, type=pa.binary()),
                 pa.chunked_array(cm_chunks, type=pa.binary()),
@@ -1024,6 +1036,24 @@ def read_parquet_metadata(
     return meta_dict
 
 
+def _counts_from_chunked_binary(
+    col_chunked: Any, num_data: int
+) -> npt.NDArray[np.uint32]:
+    out = np.empty(num_data, dtype=np.uint32)
+    pos = 0
+    for chunk in col_chunked.chunks:
+        n_c = len(chunk)
+        if n_c == 0:
+            continue
+        off_buf = chunk.buffers()[1]
+        offs = np.frombuffer(off_buf, dtype=np.int32, count=n_c + 1)
+        out[pos : pos + n_c] = ((offs[1:] - offs[:-1]) >> 2).astype(
+            np.uint32, copy=False
+        )
+        pos += n_c
+    return out
+
+
 def read_parquet_ones_multi(
     path: Path,
     num_data: int,
@@ -1031,27 +1061,30 @@ def read_parquet_ones_multi(
     pf: Any | None = None,
     cache: dict[str, Any] | None = None,
 ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
-    """Read the ``ones`` and ``multi`` count arrays from a Parquet v2 file."""
+    """Derive ``ones`` and ``multi`` count arrays from a Parquet v2 file."""
     if num_data == 0:
         return np.empty(0, dtype=np.uint32), np.empty(0, dtype=np.uint32)
 
     meta_dict, col_info = _get_file_info(path, cache=cache)
+    workers = env_workers("EMCFILE_PARQUET_FULL_SCAN_WORKERS", 4, allow_zero=True)
     if col_info is not None and _accel_enabled():
         rg_pats = int(meta_dict["rg_pats"])
         n_rgs = len(col_info)
         out_ones = np.empty(num_data, dtype=np.uint32)
         out_multi = np.empty(num_data, dtype=np.uint32)
+        n_workers = max(1, min(max(1, workers), n_rgs))
 
-        mm_obj = cache.get("mm") if cache is not None else None
-        fp_local = None
-        mm_local = None
+        mm_obj, fp_local, mm_local = _get_or_open_mmap(path, cache)
         try:
-            if mm_obj is None:
-                fp_local = path.open("rb")
-                mm_local = mmap.mmap(fp_local.fileno(), 0, access=mmap.ACCESS_READ)
-                mm_obj = mm_local
             _parquet_rs.read_ones_multi(
-                mm_obj, col_info, n_rgs, rg_pats, num_data, out_ones, out_multi
+                mm_obj,
+                col_info,
+                n_rgs,
+                rg_pats,
+                num_data,
+                out_ones,
+                out_multi,
+                n_workers,
             )
             return out_ones, out_multi
         finally:
@@ -1062,25 +1095,24 @@ def read_parquet_ones_multi(
 
     _, pq = _require_pyarrow()
     if pf is not None:
-        tbl = pf.read(columns=_COUNT_COLUMNS, use_threads=True)
+        tbl = pf.read(columns=["place_ones", "place_multi"], use_threads=True)
     else:
         tbl = pq.read_table(
-            path, columns=_COUNT_COLUMNS, use_threads=True, memory_map=True
+            path,
+            columns=["place_ones", "place_multi"],
+            use_threads=True,
+            memory_map=True,
         )
-    ones = np.ascontiguousarray(
-        tbl.column("ones").to_numpy(zero_copy_only=False), dtype=np.uint32
-    )
-    multi = np.ascontiguousarray(
-        tbl.column("multi").to_numpy(zero_copy_only=False), dtype=np.uint32
-    )
+    ones = _counts_from_chunked_binary(tbl.column("place_ones"), num_data)
+    multi = _counts_from_chunked_binary(tbl.column("place_multi"), num_data)
     return ones, multi
 
 
 def read_single_frame_parquet(
     pf: Any,
     frame: int,
-    ones_idx: npt.NDArray[np.uint64],
-    multi_idx: npt.NDArray[np.uint64],
+    ones_idx: npt.NDArray[np.uint64] | None = None,
+    multi_idx: npt.NDArray[np.uint64] | None = None,
     *,
     path: Path | None = None,
     col_info: npt.NDArray[np.int64] | None = None,
@@ -1092,45 +1124,22 @@ def read_single_frame_parquet(
     cache: dict[str, Any] | None = None,
 ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
     """Fast single-frame read using Rust page-level Zstd + SIMD decoding."""
-    del payload_codec
+    del ones_idx, multi_idx, payload_codec
     rg = frame // rg_pats
     ps = rg * rg_pats
     pe = min(num_data, (rg + 1) * rg_pats)
 
     if col_info is not None and _accel_enabled():
-        k_o = int(ones_idx[frame + 1]) - int(ones_idx[frame])
-        k_m = int(multi_idx[frame + 1]) - int(multi_idx[frame])
-        po = np.empty(k_o, dtype=np.uint32)
-        pm = np.empty(k_m, dtype=np.uint32)
-        cm = np.empty(k_m, dtype=np.uint32)
-        if k_o == 0 and k_m == 0:
-            return po, pm, cm.view(np.int32)
-
         assert path is not None
         mm_obj, fp_local, mm_local = _get_or_open_mmap(path, cache)
         try:
-            ones_i64 = (
-                ones_idx.view(np.int64)
-                if ones_idx.dtype == np.uint64
-                else ones_idx.astype(np.int64, copy=False)
-            )
-            multi_i64 = (
-                multi_idx.view(np.int64)
-                if multi_idx.dtype == np.uint64
-                else multi_idx.astype(np.int64, copy=False)
-            )
-            _parquet_rs.decode_single_frame(
+            po, pm, cm = _parquet_rs.decode_single_frame(
                 mm_obj,
                 col_info,
                 rg,
                 ps,
                 pe,
                 frame,
-                ones_i64,
-                multi_i64,
-                po,
-                pm,
-                cm,
                 is_delta,
                 is_shuffled,
             )
@@ -1146,9 +1155,6 @@ def read_single_frame_parquet(
         _, pq = _require_pyarrow()
         pf = pq.ParquetFile(path, memory_map=True, pre_buffer=False)
 
-    rg_base_o = int(ones_idx[ps])
-    rg_base_m = int(multi_idx[ps])
-
     cached_vecs = None
     if cache is not None:
         lru = cache.get("lru")
@@ -1158,20 +1164,21 @@ def read_single_frame_parquet(
 
     if cached_vecs is None:
         rt = pf.read_row_group(rg, columns=_PAYLOAD_COLUMNS, use_threads=False)
-        u8_po = _extract_chunk_val_u8(rt.column("place_ones"))
-        u8_pm = _extract_chunk_val_u8(rt.column("place_multi"))
-        u8_cm = _extract_chunk_val_u8(rt.column("count_multi"))
-        cached_vecs = (u8_po, u8_pm, u8_cm)
+        off_o, u8_po = _extract_chunk_offs_and_u8(rt.column("place_ones"))
+        off_m, u8_pm = _extract_chunk_offs_and_u8(rt.column("place_multi"))
+        _, u8_cm = _extract_chunk_offs_and_u8(rt.column("count_multi"))
+        cached_vecs = (off_o, u8_po, off_m, u8_pm, u8_cm)
         if cache is not None:
             lru = cache.setdefault("lru", {})
             lru[rg] = cached_vecs
             if len(lru) > 2:
                 lru.pop(next(iter(lru)))
     else:
-        u8_po, u8_pm, u8_cm = cached_vecs
+        off_o, u8_po, off_m, u8_pm, u8_cm = cached_vecs
 
-    s_o = int(ones_idx[frame]) - rg_base_o
-    e_o = int(ones_idx[frame + 1]) - rg_base_o
+    loc_f = frame - ps
+    s_o = int(off_o[loc_f])
+    e_o = int(off_o[loc_f + 1])
     k_o = e_o - s_o
     if k_o > 0:
         b_o = s_o * 4
@@ -1190,8 +1197,8 @@ def read_single_frame_parquet(
     else:
         po = np.empty(0, dtype=np.uint32)
 
-    s_m = int(multi_idx[frame]) - rg_base_m
-    e_m = int(multi_idx[frame + 1]) - rg_base_m
+    s_m = int(off_m[loc_f])
+    e_m = int(off_m[loc_f + 1])
     k_m = e_m - s_m
     if k_m > 0:
         b_m = s_m * 4
@@ -1222,11 +1229,11 @@ def read_single_frame_parquet(
     return po, pm, cm
 
 
-def read_parquet_patterns(
+def read_parquet_patterns_with_counts(
     path: Path,
     index_ranges: npt.NDArray[np.integer[Any]],
-    ones_idx: npt.NDArray[np.uint64],
-    multi_idx: npt.NDArray[np.uint64],
+    ones_idx: npt.NDArray[np.uint64] | None = None,
+    multi_idx: npt.NDArray[np.uint64] | None = None,
     *,
     num_data: int,
     rg_pats: int,
@@ -1235,8 +1242,15 @@ def read_parquet_patterns(
     payload_codec: str = "none",
     pf: Any | None = None,
     cache: dict[str, Any] | None = None,
-) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
-    """Read selected pattern ranges from a 1-row-per-pattern Parquet v2 file."""
+) -> tuple[
+    npt.NDArray[np.uint32],
+    npt.NDArray[np.uint32],
+    npt.NDArray[np.uint32],
+    npt.NDArray[np.uint32],
+    npt.NDArray[np.int32],
+]:
+    """Read selected pattern ranges and their per-pattern counts from Parquet v2."""
+    del payload_codec
     ranges = np.asarray(index_ranges)
     if ranges.ndim != 2 or ranges.shape[1] != 2:
         raise ValueError("Pattern ranges must have shape (N, 2)")
@@ -1247,25 +1261,30 @@ def read_parquet_patterns(
     ):
         raise IndexError("Pattern range is out of bounds")
 
-    idx_pair = (id(ones_idx), id(multi_idx))
-    already_validated = cache is not None and cache.get("valid_idx") == idx_pair
-    if not already_validated:
-        if (
-            ones_idx.ndim != 1
-            or multi_idx.ndim != 1
-            or ones_idx.size != num_data + 1
-            or multi_idx.size != num_data + 1
-            or ones_idx[0] != 0
-            or multi_idx[0] != 0
-            or np.any(ones_idx[1:] < ones_idx[:-1])
-            or np.any(multi_idx[1:] < multi_idx[:-1])
-        ):
+    if ones_idx is not None or multi_idx is not None:
+        if ones_idx is None or multi_idx is None:
             raise ValueError("Pattern counts do not match Parquet v2 payload size")
-        if cache is not None:
-            cache["valid_idx"] = idx_pair
+        idx_pair = (id(ones_idx), id(multi_idx))
+        already_validated = cache is not None and cache.get("valid_idx") == idx_pair
+        if not already_validated:
+            if (
+                ones_idx.ndim != 1
+                or multi_idx.ndim != 1
+                or ones_idx.size != num_data + 1
+                or multi_idx.size != num_data + 1
+                or ones_idx[0] != 0
+                or multi_idx[0] != 0
+                or np.any(ones_idx[1:] < ones_idx[:-1])
+                or np.any(multi_idx[1:] < multi_idx[:-1])
+            ):
+                raise ValueError("Pattern counts do not match Parquet v2 payload size")
+            if cache is not None:
+                cache["valid_idx"] = idx_pair
 
     if num_data == 0 or len(ranges) == 0:
         return (
+            np.empty(0, dtype=np.uint32),
+            np.empty(0, dtype=np.uint32),
             np.empty(0, dtype=np.uint32),
             np.empty(0, dtype=np.uint32),
             np.empty(0, dtype=np.int32),
@@ -1286,19 +1305,23 @@ def read_parquet_patterns(
             "EMCFILE_PARQUET_INDEXED_WORKERS", 1, allow_zero=True
         )
         if single_workers > 0:
-            return read_single_frame_parquet(
+            po, pm, cm = read_single_frame_parquet(
                 pf,
                 int(ranges[0, 0]),
-                ones_idx,
-                multi_idx,
                 path=path,
                 col_info=col_info,
                 num_data=num_data,
                 rg_pats=rg_pats,
                 is_delta=is_delta,
                 is_shuffled=shuffle,
-                payload_codec=payload_codec,
                 cache=cache,
+            )
+            return (
+                np.array([len(po)], dtype=np.uint32),
+                np.array([len(pm)], dtype=np.uint32),
+                po,
+                pm,
+                cm,
             )
 
     if is_full:
@@ -1311,37 +1334,19 @@ def read_parquet_patterns(
         return (
             np.empty(0, dtype=np.uint32),
             np.empty(0, dtype=np.uint32),
+            np.empty(0, dtype=np.uint32),
+            np.empty(0, dtype=np.uint32),
             np.empty(0, dtype=np.int32),
         )
 
-    ones_idx_i64 = (
-        ones_idx.view(np.int64)
-        if ones_idx.dtype == np.uint64
-        else ones_idx.astype(np.int64, copy=False)
-    )
-    multi_idx_i64 = (
-        multi_idx.view(np.int64)
-        if multi_idx.dtype == np.uint64
-        else multi_idx.astype(np.int64, copy=False)
-    )
+    pat_lens = lasts - firsts
+    dst_pats = np.empty(len(firsts) + 1, dtype=np.int64)
+    dst_pats[0] = 0
+    np.cumsum(pat_lens, out=dst_pats[1:])
+    total_sel_pats = int(dst_pats[-1])
 
-    ones_lens = ones_idx_i64[lasts] - ones_idx_i64[firsts]
-    multi_lens = multi_idx_i64[lasts] - multi_idx_i64[firsts]
-
-    dst_ones = np.empty(len(firsts) + 1, dtype=np.int64)
-    dst_ones[0] = 0
-    np.cumsum(ones_lens, out=dst_ones[1:])
-
-    dst_multi = np.empty(len(firsts) + 1, dtype=np.int64)
-    dst_multi[0] = 0
-    np.cumsum(multi_lens, out=dst_multi[1:])
-
-    total_ones = int(dst_ones[-1])
-    total_multi = int(dst_multi[-1])
-
-    out_po = np.empty(total_ones, dtype=np.uint32)
-    out_pm = np.empty(total_multi, dtype=np.uint32)
-    out_cm = np.empty(total_multi, dtype=np.uint32)
+    out_ones = np.empty(total_sel_pats, dtype=np.uint32)
+    out_multi = np.empty(total_sel_pats, dtype=np.uint32)
 
     order = (
         np.arange(len(rgs), dtype=np.int64) if is_full else np.lexsort((firsts, rgs))
@@ -1362,6 +1367,56 @@ def read_parquet_patterns(
 
         mm_obj, fp_local, mm_local = _get_or_open_mmap(path, cache)
         try:
+            if is_full:
+                ones_lens = np.ascontiguousarray(col_info[:, 0, 2], dtype=np.int64)
+                multi_lens = np.ascontiguousarray(col_info[:, 1, 2], dtype=np.int64)
+            elif ones_idx is not None and multi_idx is not None:
+                ones_idx_i64 = (
+                    ones_idx.view(np.int64)
+                    if ones_idx.dtype == np.uint64
+                    else ones_idx.astype(np.int64, copy=False)
+                )
+                multi_idx_i64 = (
+                    multi_idx.view(np.int64)
+                    if multi_idx.dtype == np.uint64
+                    else multi_idx.astype(np.int64, copy=False)
+                )
+                ones_lens = ones_idx_i64[lasts] - ones_idx_i64[firsts]
+                multi_lens = multi_idx_i64[lasts] - multi_idx_i64[firsts]
+            else:
+                ones_lens = np.empty(len(firsts), dtype=np.int64)
+                multi_lens = np.empty(len(firsts), dtype=np.int64)
+                _parquet_rs.count_span_elems(
+                    mm_obj,
+                    col_info,
+                    unique_rgs_i64,
+                    group_starts,
+                    group_stops,
+                    group_span_ids,
+                    rg_pats,
+                    num_data,
+                    firsts,
+                    lasts,
+                    ones_lens,
+                    multi_lens,
+                    n_workers,
+                )
+
+            dst_ones = np.empty(len(firsts) + 1, dtype=np.int64)
+            dst_ones[0] = 0
+            np.cumsum(ones_lens, out=dst_ones[1:])
+
+            dst_multi = np.empty(len(firsts) + 1, dtype=np.int64)
+            dst_multi[0] = 0
+            np.cumsum(multi_lens, out=dst_multi[1:])
+
+            total_ones = int(dst_ones[-1])
+            total_multi = int(dst_multi[-1])
+
+            out_po = np.empty(total_ones, dtype=np.uint32)
+            out_pm = np.empty(total_multi, dtype=np.uint32)
+            out_cm = np.empty(total_multi, dtype=np.uint32)
+
             _parquet_rs.decode_rg_batch(
                 mm_obj,
                 col_info,
@@ -1371,12 +1426,13 @@ def read_parquet_patterns(
                 group_span_ids,
                 rg_pats,
                 num_data,
-                ones_idx_i64,
-                multi_idx_i64,
                 firsts,
                 lasts,
+                dst_pats,
                 dst_ones,
                 dst_multi,
+                out_ones,
+                out_multi,
                 out_po,
                 out_pm,
                 out_cm,
@@ -1389,35 +1445,89 @@ def read_parquet_patterns(
                 mm_local.close()
             if fp_local is not None:
                 fp_local.close()
-        return out_po, out_pm, out_cm.view(np.int32)
+        return out_ones, out_multi, out_po, out_pm, out_cm.view(np.int32)
 
     _, pq = _require_pyarrow()
     if pf is None:
         pf = pq.ParquetFile(path, memory_map=True, pre_buffer=False)
 
     groups = np.split(order, split_pts[1:])
+    n_groups = len(unique_rgs)
+    group_tables: list[Any] = [None] * n_groups
+
+    def read_group_tbl(g_idx: int) -> None:
+        rg = int(unique_rgs[g_idx])
+        group_tables[g_idx] = pf.read_row_group(
+            rg, columns=_PAYLOAD_COLUMNS, use_threads=False
+        )
+
+    if workers > 1 and n_groups > 1:
+        pool = _get_worker_pool(min(workers, n_groups))
+        list(pool.map(read_group_tbl, range(n_groups)))
+    else:
+        for g_idx in range(n_groups):
+            read_group_tbl(g_idx)
+
+    ones_lens = np.empty(len(firsts), dtype=np.int64)
+    multi_lens = np.empty(len(firsts), dtype=np.int64)
+    group_parsed: list[
+        tuple[
+            npt.NDArray[np.int64],
+            npt.NDArray[np.uint8],
+            npt.NDArray[np.int64],
+            npt.NDArray[np.uint8],
+            npt.NDArray[np.uint8],
+        ]
+    ] = [None] * n_groups  # type: ignore[list-item]
+
+    for g_idx in range(n_groups):
+        rg = int(unique_rgs[g_idx])
+        ps = rg * rg_pats
+        rt = group_tables[g_idx]
+        off_o, u8_po = _extract_chunk_offs_and_u8(rt.column("place_ones"))
+        off_m, u8_pm = _extract_chunk_offs_and_u8(rt.column("place_multi"))
+        _, u8_cm = _extract_chunk_offs_and_u8(rt.column("count_multi"))
+        group_parsed[g_idx] = (off_o, u8_po, off_m, u8_pm, u8_cm)
+
+        span_ids = groups[g_idx]
+        for sid in span_ids:
+            f = int(firsts[sid]) - ps
+            l = int(lasts[sid]) - ps
+            dp = int(dst_pats[sid])
+            out_ones[dp : dp + (l - f)] = (off_o[f + 1 : l + 1] - off_o[f:l]).astype(
+                np.uint32
+            )
+            out_multi[dp : dp + (l - f)] = (off_m[f + 1 : l + 1] - off_m[f:l]).astype(
+                np.uint32
+            )
+            ones_lens[sid] = int(off_o[l]) - int(off_o[f])
+            multi_lens[sid] = int(off_m[l]) - int(off_m[f])
+
+    dst_ones = np.empty(len(firsts) + 1, dtype=np.int64)
+    dst_ones[0] = 0
+    np.cumsum(ones_lens, out=dst_ones[1:])
+
+    dst_multi = np.empty(len(firsts) + 1, dtype=np.int64)
+    dst_multi[0] = 0
+    np.cumsum(multi_lens, out=dst_multi[1:])
+
+    out_po = np.empty(int(dst_ones[-1]), dtype=np.uint32)
+    out_pm = np.empty(int(dst_multi[-1]), dtype=np.uint32)
+    out_cm = np.empty(int(dst_multi[-1]), dtype=np.uint32)
 
     def proc_group(g_idx: int) -> None:
         rg = int(unique_rgs[g_idx])
+        ps = rg * rg_pats
         span_ids = groups[g_idx]
         p_firsts = firsts[span_ids]
         p_lasts = lasts[span_ids]
+        off_o, u8_po, off_m, u8_pm, u8_cm = group_parsed[g_idx]
 
-        ps = rg * rg_pats
-        pe = min(num_data, (rg + 1) * rg_pats)
-        rg_base_o = int(ones_idx_i64[ps])
-        rg_no = int(ones_idx_i64[pe]) - rg_base_o
-        rg_base_m = int(multi_idx_i64[ps])
-        rg_nm = int(multi_idx_i64[pe]) - rg_base_m
-
-        rt = pf.read_row_group(rg, columns=_PAYLOAD_COLUMNS, use_threads=False)
-
-        if rg_no > 0:
-            u8_po = _extract_chunk_val_u8(rt.column("place_ones"))
+        if len(u8_po) > 0:
             _decode_rg_spans_numpy(
                 u8_po,
-                rg_base_o,
-                ones_idx_i64,
+                ps,
+                off_o,
                 out_po,
                 p_firsts,
                 p_lasts,
@@ -1426,13 +1536,11 @@ def read_parquet_patterns(
                 is_shuffled=shuffle,
             )
 
-        if rg_nm > 0:
-            u8_pm = _extract_chunk_val_u8(rt.column("place_multi"))
-            u8_cm = _extract_chunk_val_u8(rt.column("count_multi"))
+        if len(u8_pm) > 0:
             _decode_rg_spans_numpy(
                 u8_pm,
-                rg_base_m,
-                multi_idx_i64,
+                ps,
+                off_m,
                 out_pm,
                 p_firsts,
                 p_lasts,
@@ -1442,8 +1550,8 @@ def read_parquet_patterns(
             )
             _decode_rg_spans_numpy(
                 u8_cm,
-                rg_base_m,
-                multi_idx_i64,
+                ps,
+                off_m,
                 out_cm,
                 p_firsts,
                 p_lasts,
@@ -1452,7 +1560,6 @@ def read_parquet_patterns(
                 is_shuffled=shuffle,
             )
 
-    n_groups = len(unique_rgs)
     if workers > 1 and n_groups > 1:
         pool = _get_worker_pool(min(workers, n_groups))
         list(pool.map(proc_group, range(n_groups)))
@@ -1460,13 +1567,44 @@ def read_parquet_patterns(
         for g_idx in range(n_groups):
             proc_group(g_idx)
 
-    return out_po, out_pm, out_cm.view(np.int32)
+    return out_ones, out_multi, out_po, out_pm, out_cm.view(np.int32)
+
+
+def read_parquet_patterns(
+    path: Path,
+    index_ranges: npt.NDArray[np.integer[Any]],
+    ones_idx: npt.NDArray[np.uint64] | None = None,
+    multi_idx: npt.NDArray[np.uint64] | None = None,
+    *,
+    num_data: int,
+    rg_pats: int,
+    position_encoding: str,
+    shuffle: bool,
+    payload_codec: str = "none",
+    pf: Any | None = None,
+    cache: dict[str, Any] | None = None,
+) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
+    """Read selected pattern ranges from a 1-row-per-pattern Parquet v2 file."""
+    _, _, po, pm, cm = read_parquet_patterns_with_counts(
+        path,
+        index_ranges,
+        ones_idx,
+        multi_idx,
+        num_data=num_data,
+        rg_pats=rg_pats,
+        position_encoding=position_encoding,
+        shuffle=shuffle,
+        payload_codec=payload_codec,
+        pf=pf,
+        cache=cache,
+    )
+    return po, pm, cm
 
 
 def read_parquet_column(
     path: Path,
     column: str,
-    offsets: npt.NDArray[np.uint64],
+    offsets: npt.NDArray[np.uint64] | None = None,
     *,
     num_data: int,
     rg_pats: int,
@@ -1477,26 +1615,25 @@ def read_parquet_column(
     cache: dict[str, Any] | None = None,
 ) -> npt.NDArray[Any]:
     """Read and decode a single full event column from a Parquet v2 file."""
-    del payload_codec
-    total_elems = int(offsets[-1]) if offsets.size > 0 else 0
-    if num_data == 0 or total_elems == 0:
+    del offsets, payload_codec
+    if num_data == 0:
         return np.empty(0, dtype=dtype)
 
     workers = env_workers("EMCFILE_PARQUET_FULL_SCAN_WORKERS", 4, allow_zero=True)
     use_rs = workers > 0 and _accel_enabled()
     _, col_info = _get_file_info(path, cache=cache)
-
-    offsets_i64 = (
-        offsets.view(np.int64)
-        if offsets.dtype == np.uint64
-        else offsets.astype(np.int64, copy=False)
-    )
-    out_u32 = np.empty(total_elems, dtype=np.uint32)
     n_rgs = (num_data + rg_pats - 1) // rg_pats
 
-    col_idx_map = {"place_ones": 2, "place_multi": 3, "count_multi": 4}
+    col_idx_map = {"place_ones": 0, "place_multi": 1, "count_multi": 2}
     if col_info is not None and column in col_idx_map and use_rs:
         c_idx = col_idx_map[column]
+        rg_offs = np.empty(n_rgs + 1, dtype=np.int64)
+        rg_offs[0] = 0
+        np.cumsum(col_info[:, c_idx, 2], out=rg_offs[1:])
+        total_elems = int(rg_offs[-1])
+        if total_elems == 0:
+            return np.empty(0, dtype=dtype)
+        out_u32 = np.empty(total_elems, dtype=np.uint32)
         n_workers = max(1, min(workers, n_rgs))
         mm_obj, fp_local, mm_local = _get_or_open_mmap(path, cache)
         try:
@@ -1507,7 +1644,7 @@ def read_parquet_column(
                 n_rgs,
                 rg_pats,
                 num_data,
-                offsets_i64,
+                rg_offs,
                 out_u32,
                 is_delta,
                 shuffle,
@@ -1522,23 +1659,37 @@ def read_parquet_column(
 
     _, pq = _require_pyarrow()
     pf_main = pq.ParquetFile(path, memory_map=True, pre_buffer=False)
+    rg_Data: list[tuple[npt.NDArray[np.int64], npt.NDArray[np.uint8]]] = [None] * n_rgs  # type: ignore[list-item]
+    rg_lens = np.empty(n_rgs, dtype=np.int64)
+
+    for rg in range(n_rgs):
+        rt = pf_main.read_row_group(rg, columns=[column], use_threads=False)
+        local_offs, u8 = _extract_chunk_offs_and_u8(rt.column(column))
+        rg_Data[rg] = (local_offs, u8)
+        rg_lens[rg] = int(local_offs[-1])
+
+    rg_offs = np.empty(n_rgs + 1, dtype=np.int64)
+    rg_offs[0] = 0
+    np.cumsum(rg_lens, out=rg_offs[1:])
+    total_elems = int(rg_offs[-1])
+    if total_elems == 0:
+        return np.empty(0, dtype=dtype)
+
+    out_u32 = np.empty(total_elems, dtype=np.uint32)
 
     def proc_rg(rg: int) -> None:
         ps = rg * rg_pats
         pe = min(num_data, (rg + 1) * rg_pats)
-        rg_base = int(offsets_i64[ps])
-        rg_n = int(offsets_i64[pe]) - rg_base
-        if rg_n <= 0:
+        local_offs, u8 = rg_Data[rg]
+        if len(u8) == 0:
             return
-        rt = pf_main.read_row_group(rg, columns=[column], use_threads=False)
-        u8 = _extract_chunk_val_u8(rt.column(column))
         p_first = np.array([ps], dtype=np.int64)
         p_last = np.array([pe], dtype=np.int64)
-        dst_off = np.array([rg_base], dtype=np.int64)
+        dst_off = np.array([rg_offs[rg]], dtype=np.int64)
         _decode_rg_spans_numpy(
             u8,
-            rg_base,
-            offsets_i64,
+            ps,
+            local_offs,
             out_u32,
             p_first,
             p_last,

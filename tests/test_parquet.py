@@ -78,14 +78,20 @@ def test_parquet_aliases_and_metadata(tmp_path: Path):
     tbl = pq.read_table(path)
     assert tbl.num_rows == expected.num_data
     assert tbl.column_names == [
-        "ones",
-        "multi",
         "place_ones",
         "place_multi",
         "count_multi",
     ]
-    np.testing.assert_array_equal(tbl.column("ones").to_numpy(), expected.ones)
-    np.testing.assert_array_equal(tbl.column("multi").to_numpy(), expected.multi)
+
+    fresh = ef.open_patterns(path)
+    assert not fresh._init_idx
+    assert fresh.nbytes == expected.nbytes
+    assert np.isclose(fresh.sparsity(), expected.sparsity())
+    np.testing.assert_array_equal(fresh[2], expected[2])
+    assert fresh[1:5] == expected[1:5]
+    assert fresh[:] == expected
+    np.testing.assert_array_equal(fresh.place_ones, expected.place_ones)
+    assert not fresh._init_idx
 
 
 @pytest.mark.parametrize("suffix", [".parquet", ".pq", ".PARQUET"])
