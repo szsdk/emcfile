@@ -1,16 +1,73 @@
-mod pool;
-mod py_ffi;
 mod simd;
-mod zstd_ffi;
 
-use std::ffi::{c_char, c_int, c_void};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::io::Write;
+use std::mem::ManuallyDrop;
+use std::os::fd::FromRawFd;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
-use pool::par_for_each;
-use py_ffi::*;
+use numpy::{PyReadonlyArray1, PyReadonlyArray3, PyReadwriteArray1, PyReadwriteArray3};
+use pyo3::buffer::PyBuffer;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::prelude::*;
+use rayon::prelude::*;
+
 use simd::{decode_pattern_u32, encode_pattern_u32};
-use zstd_ffi::{get_zstd, ZstdApi, THREAD_ZSTD};
+
+struct ThreadZstd {
+    cctx: zstd_safe::CCtx<'static>,
+    dctx: zstd_safe::DCtx<'static>,
+    scratch: Vec<u8>,
+    comp_scratch: Vec<u8>,
+}
+
+impl ThreadZstd {
+    fn new() -> Self {
+        Self {
+            cctx: zstd_safe::CCtx::create(),
+            dctx: zstd_safe::DCtx::create(),
+            scratch: Vec::new(),
+            comp_scratch: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn ensure_scratch(&mut self, n: usize) {
+        if self.scratch.len() < n {
+            self.scratch.resize(n, 0);
+        }
+    }
+
+    #[inline]
+    fn ensure_comp_scratch(&mut self, n: usize) {
+        if self.comp_scratch.len() < n {
+            self.comp_scratch.resize(n, 0);
+        }
+    }
+}
+
+thread_local! {
+    static THREAD_ZSTD: RefCell<ThreadZstd> = RefCell::new(ThreadZstd::new());
+}
+
+fn get_pool(n_threads: usize) -> Arc<rayon::ThreadPool> {
+    static POOLS: OnceLock<Mutex<HashMap<usize, Arc<rayon::ThreadPool>>>> = OnceLock::new();
+    let mtx = POOLS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = mtx.lock().unwrap();
+    let n = n_threads.max(1);
+    map.entry(n)
+        .or_insert_with(|| {
+            Arc::new(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(n)
+                    .build()
+                    .expect("failed to build rayon ThreadPool"),
+            )
+        })
+        .clone()
+}
 
 #[inline]
 fn write_uvarint(buf: &mut [u8], mut pos: usize, mut val: u64) -> usize {
@@ -33,8 +90,7 @@ fn write_zigzag_i32(buf: &mut [u8], pos: usize, n: i32) -> usize {
 fn read_zigzag(buf: &[u8], mut pos: usize) -> (i64, usize) {
     let b0 = buf[pos] as u64;
     if b0 < 0x80 {
-        let n = b0;
-        return (((n >> 1) as i64) ^ -((n & 1) as i64), pos + 1);
+        return (((b0 >> 1) as i64) ^ -((b0 & 1) as i64), pos + 1);
     }
     let b1 = buf[pos + 1] as u64;
     if b1 < 0x80 {
@@ -78,8 +134,7 @@ fn write_page_header(
 }
 
 fn encode_u32_col(
-    api: &ZstdApi,
-    cctx: *mut c_void,
+    cctx: &mut zstd_safe::CCtx<'static>,
     level: i32,
     arr: &[u32],
     comp_scratch: &mut [u8],
@@ -88,20 +143,10 @@ fn encode_u32_col(
 ) -> Result<(usize, i64, i64), i32> {
     let nr = arr.len();
     let u_len = nr * 4;
-    let c_bound = comp_scratch.len();
-    let c_len = unsafe {
-        (api.compress_cctx)(
-            cctx,
-            comp_scratch.as_mut_ptr() as *mut c_void,
-            c_bound,
-            arr.as_ptr() as *const c_void,
-            u_len,
-            level as c_int,
-        )
-    };
-    if unsafe { (api.is_error)(c_len) } != 0 {
-        return Err(-3);
-    }
+    let src_u8 = unsafe { std::slice::from_raw_parts(arr.as_ptr() as *const u8, u_len) };
+    let c_len = cctx
+        .compress(comp_scratch, src_u8, level)
+        .map_err(|_| -3i32)?;
     let pos0 = pos;
     let hdr_end = write_page_header(out_buf, pos, u_len, c_len, nr);
     out_buf[hdr_end..hdr_end + c_len].copy_from_slice(&comp_scratch[..c_len]);
@@ -112,8 +157,7 @@ fn encode_u32_col(
 
 #[allow(clippy::too_many_arguments)]
 fn encode_payload_col_pages(
-    api: &ZstdApi,
-    cctx: *mut c_void,
+    cctx: &mut zstd_safe::CCtx<'static>,
     level: i32,
     src_u32: &[u32],
     pat_offsets: &[u64],
@@ -159,20 +203,9 @@ fn encode_payload_col_pages(
                 b_off += k * 4;
             }
         }
-        let c_bound = comp_scratch.len();
-        let c_len = unsafe {
-            (api.compress_cctx)(
-                cctx,
-                comp_scratch.as_mut_ptr() as *mut c_void,
-                c_bound,
-                scratch.as_ptr() as *const c_void,
-                u_len,
-                level as c_int,
-            )
-        };
-        if unsafe { (api.is_error)(c_len) } != 0 {
-            return Err(-3);
-        }
+        let c_len = cctx
+            .compress(comp_scratch, &scratch[..u_len], level)
+            .map_err(|_| -3i32)?;
         let pos0 = pos;
         let hdr_end = write_page_header(out_buf, pos, u_len, c_len, page_nr);
         out_buf[hdr_end..hdr_end + c_len].copy_from_slice(&comp_scratch[..c_len]);
@@ -187,7 +220,6 @@ fn encode_payload_col_pages(
 
 #[allow(clippy::too_many_arguments)]
 fn encode_rg_into_vec(
-    api: &ZstdApi,
     rg: usize,
     num_data: usize,
     rg_pats: usize,
@@ -223,14 +255,12 @@ fn encode_rg_into_vec(
     }
 
     let need_sc = ((max_page_elems + page_pats) * 4).max(nr * 4) + 64;
-    let need_csc = unsafe { (api.compress_bound)(need_sc) } + 64;
+    let need_csc = zstd_safe::compress_bound(need_sc) + 64;
     let n_pages = (nr + page_pats - 1) / page_pats;
-    let need_out = unsafe {
-        (api.compress_bound)(nr * 4) * 2
-            + (api.compress_bound)((no + nr) * 4)
-            + (api.compress_bound)((nm + nr) * 4) * 2
-            + (n_pages * 3 + 2) * 64
-    };
+    let need_out = zstd_safe::compress_bound(nr * 4) * 2
+        + zstd_safe::compress_bound((no + nr) * 4)
+        + zstd_safe::compress_bound((nm + nr) * 4) * 2
+        + (n_pages * 3 + 2) * 64;
 
     if out_vec.len() < need_out {
         out_vec.resize(need_out, 0);
@@ -240,13 +270,13 @@ fn encode_rg_into_vec(
         let mut ctx = cell.borrow_mut();
         ctx.ensure_scratch(need_sc);
         ctx.ensure_comp_scratch(need_csc);
-        let cctx = ctx.cctx;
         let zctx = &mut *ctx;
+        let cctx = &mut zctx.cctx;
         let sc = &mut zctx.scratch[..need_sc];
         let csc = &mut zctx.comp_scratch[..need_csc];
 
         let mut pos = 0usize;
-        match encode_u32_col(api, cctx, level, &ones[ps..pe], csc, out_vec, pos) {
+        match encode_u32_col(cctx, level, &ones[ps..pe], csc, out_vec, pos) {
             Ok((p, tu, tc)) => {
                 pos = p;
                 meta_rg[0] = tu;
@@ -254,7 +284,7 @@ fn encode_rg_into_vec(
             }
             Err(e) => return e,
         }
-        match encode_u32_col(api, cctx, level, &multi[ps..pe], csc, out_vec, pos) {
+        match encode_u32_col(cctx, level, &multi[ps..pe], csc, out_vec, pos) {
             Ok((p, tu, tc)) => {
                 pos = p;
                 meta_rg[2] = tu;
@@ -263,7 +293,7 @@ fn encode_rg_into_vec(
             Err(e) => return e,
         }
         match encode_payload_col_pages(
-            api, cctx, level, po_src, ones_idx, ps, pe, page_pats, sc, csc, out_vec, pos, is_delta,
+            cctx, level, po_src, ones_idx, ps, pe, page_pats, sc, csc, out_vec, pos, is_delta,
             is_shuffled, check_sorted,
         ) {
             Ok((p, tu, tc)) => {
@@ -274,8 +304,8 @@ fn encode_rg_into_vec(
             Err(e) => return e,
         }
         match encode_payload_col_pages(
-            api, cctx, level, pm_src, multi_idx, ps, pe, page_pats, sc, csc, out_vec, pos,
-            is_delta, is_shuffled, check_sorted,
+            cctx, level, pm_src, multi_idx, ps, pe, page_pats, sc, csc, out_vec, pos, is_delta,
+            is_shuffled, check_sorted,
         ) {
             Ok((p, tu, tc)) => {
                 pos = p;
@@ -285,7 +315,7 @@ fn encode_rg_into_vec(
             Err(e) => return e,
         }
         match encode_payload_col_pages(
-            api, cctx, level, cm_src, multi_idx, ps, pe, page_pats, sc, csc, out_vec, pos, false,
+            cctx, level, cm_src, multi_idx, ps, pe, page_pats, sc, csc, out_vec, pos, false,
             is_shuffled, false,
         ) {
             Ok((p, tu, tc)) => {
@@ -299,25 +329,14 @@ fn encode_rg_into_vec(
     })
 }
 
-unsafe extern "C" {
-    fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
-}
-
-fn write_all_fd(fd: c_int, mut buf: &[u8]) -> bool {
-    while !buf.is_empty() {
-        let n = unsafe { write(fd, buf.as_ptr() as *const c_void, buf.len()) };
-        if n <= 0 {
-            return false;
-        }
-        buf = &buf[n as usize..];
-    }
-    true
+fn write_all_fd(fd: i32, buf: &[u8]) -> bool {
+    let mut f = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+    f.write_all(buf).is_ok()
 }
 
 #[allow(clippy::too_many_arguments)]
 fn decode_col_pages_inner(
-    api: &ZstdApi,
-    dctx: *mut c_void,
+    dctx: &mut zstd_safe::DCtx<'static>,
     mm_u8: &[u8],
     col_off: usize,
     col_tc: usize,
@@ -380,17 +399,10 @@ fn decode_col_pages_inner(
             if page_buf.len() < u_len {
                 page_buf.resize(u_len.max(256 * 1024), 0);
             }
-            let d_sz = unsafe {
-                (api.decompress_dctx)(
-                    dctx,
-                    page_buf.as_mut_ptr() as *mut c_void,
-                    u_len,
-                    mm_u8.as_ptr().add(pos + hdr_len) as *const c_void,
-                    c_len,
-                )
-            };
-            if d_sz != u_len {
-                return -1;
+            let c_start = pos + hdr_len;
+            match dctx.decompress(&mut page_buf[..u_len], &mm_u8[c_start..c_start + c_len]) {
+                Ok(d_sz) if d_sz == u_len => {}
+                _ => return -1,
             }
             let page_base_elem = pat_offsets[page_ps] as usize;
             let page_slice = &page_buf[..u_len];
@@ -430,84 +442,58 @@ fn decode_col_pages_inner(
     0
 }
 
-unsafe extern "C" fn py_write_batch_zstd(
-    _self: *mut PyObject,
-    args: *const *mut PyObject,
-    nargs: Py_ssize_t,
-) -> *mut PyObject {
-    if nargs != 17 {
-        return raise_value_error(b"write_batch_zstd expects 17 arguments\0");
+#[inline]
+fn view_pybuffer_u8(buf: &PyBuffer<u8>) -> PyResult<&[u8]> {
+    if !buf.is_c_contiguous() {
+        return Err(PyValueError::new_err("buffer must be C-contiguous"));
     }
-    let fd = arg_i64(args, 0) as c_int;
-    let b_ones = match PyBuf::get_readonly(unsafe { *args.add(1) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_multi = match PyBuf::get_readonly(unsafe { *args.add(2) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_po = match PyBuf::get_readonly(unsafe { *args.add(3) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_pm = match PyBuf::get_readonly(unsafe { *args.add(4) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_cm = match PyBuf::get_readonly(unsafe { *args.add(5) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_ones_idx = match PyBuf::get_readonly(unsafe { *args.add(6) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_multi_idx = match PyBuf::get_readonly(unsafe { *args.add(7) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let num_data = arg_usize(args, 8);
-    let rg_pats = arg_usize(args, 9);
-    let page_pats = arg_usize(args, 10);
-    let level = arg_i64(args, 11) as i32;
-    let is_delta = arg_bool(args, 12);
-    let is_shuffled = arg_bool(args, 13);
-    let check_sorted = arg_bool(args, 14);
-    let n_workers = arg_usize(args, 15).max(1);
-    let mut b_meta = match PyBuf::get_writable(unsafe { *args.add(16) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
+    let slice =
+        unsafe { std::slice::from_raw_parts(buf.buf_ptr() as *const u8, buf.len_bytes()) };
+    Ok(slice)
+}
 
-    let api = match get_zstd() {
-        Some(a) => a,
-        None => return raise_runtime_error(b"libzstd not available\0"),
-    };
-
-    let ones = b_ones.as_slice::<u32>();
-    let multi = b_multi.as_slice::<u32>();
-    let po_src = b_po.as_slice::<u32>();
-    let pm_src = b_pm.as_slice::<u32>();
-    let cm_src = b_cm.as_slice::<u32>();
-    let ones_idx = b_ones_idx.as_slice::<u64>();
-    let multi_idx = b_multi_idx.as_slice::<u64>();
-    let meta_slice = b_meta.as_mut_slice::<i64>();
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn write_batch_zstd<'py>(
+    py: Python<'py>,
+    fd: i32,
+    b_ones: PyReadonlyArray1<'py, u32>,
+    b_multi: PyReadonlyArray1<'py, u32>,
+    b_po: PyReadonlyArray1<'py, u32>,
+    b_pm: PyReadonlyArray1<'py, u32>,
+    b_cm: PyReadonlyArray1<'py, u32>,
+    b_ones_idx: PyReadonlyArray1<'py, u64>,
+    b_multi_idx: PyReadonlyArray1<'py, u64>,
+    num_data: usize,
+    rg_pats: usize,
+    page_pats: usize,
+    level: i32,
+    is_delta: bool,
+    is_shuffled: bool,
+    check_sorted: bool,
+    n_workers: usize,
+    mut b_meta: PyReadwriteArray3<'py, i64>,
+) -> PyResult<i64> {
+    let ones = b_ones.as_slice()?;
+    let multi = b_multi.as_slice()?;
+    let po_src = b_po.as_slice()?;
+    let pm_src = b_pm.as_slice()?;
+    let cm_src = b_cm.as_slice()?;
+    let ones_idx = b_ones_idx.as_slice()?;
+    let multi_idx = b_multi_idx.as_slice()?;
+    let meta_slice = b_meta.as_slice_mut()?;
     let b_rgs = (num_data + rg_pats - 1) / rg_pats;
+    let n_workers = n_workers.max(1);
+    let meta_addr = meta_slice.as_mut_ptr() as usize;
 
-    let rc = {
-        let _nogil = AllowThreads::new();
-        let meta_addr = meta_slice.as_mut_ptr() as usize;
-
+    let rc = py.detach(|| {
         if n_workers <= 1 || b_rgs <= 1 {
             let mut out_vec = Vec::new();
-            let mut single_rc = 0i32;
             for rg in 0..b_rgs {
                 let meta_rg = unsafe {
                     std::slice::from_raw_parts_mut((meta_addr as *mut i64).add(rg * 10), 10)
                 };
                 let res = encode_rg_into_vec(
-                    api,
                     rg,
                     num_data,
                     rg_pats,
@@ -527,312 +513,244 @@ unsafe extern "C" fn py_write_batch_zstd(
                     meta_rg,
                 );
                 if res < 0 {
-                    single_rc = res;
-                    break;
+                    return res;
                 }
                 if !write_all_fd(fd, &out_vec[..res as usize]) {
-                    single_rc = -4;
-                    break;
+                    return -4;
                 }
             }
-            single_rc
+            0
         } else {
             let ring_size = (n_workers * 3).max(4).min(b_rgs);
             let mut ring_bufs: Vec<Vec<u8>> = (0..ring_size).map(|_| Vec::new()).collect();
             let bufs_addr = ring_bufs.as_mut_ptr() as usize;
             let next_rg = AtomicUsize::new(0);
             let abort_err = AtomicI32::new(0);
-            // state: (written_count, ready_len_per_rg)
             let pipe_mtx = Mutex::new((0usize, vec![usize::MAX; b_rgs]));
             let cv_writer = Condvar::new();
             let cv_worker = Condvar::new();
 
-            par_for_each(n_workers + 1, n_workers + 1, |tid| {
-                if tid == 0 {
-                    for rg in 0..b_rgs {
-                        let len = {
+            let pool = get_pool(n_workers + 1);
+            pool.install(|| {
+                rayon::scope(|s| {
+                    // Writer task
+                    s.spawn(|_| {
+                        for rg in 0..b_rgs {
+                            let len = {
+                                let mut g = pipe_mtx.lock().unwrap();
+                                while g.1[rg] == usize::MAX
+                                    && abort_err.load(Ordering::Relaxed) == 0
+                                {
+                                    g = cv_writer.wait(g).unwrap();
+                                }
+                                if abort_err.load(Ordering::Relaxed) != 0 {
+                                    return;
+                                }
+                                g.1[rg]
+                            };
+                            let slot = rg % ring_size;
+                            let out_vec = unsafe { &*(bufs_addr as *const Vec<u8>).add(slot) };
+                            if !write_all_fd(fd, &out_vec[..len]) {
+                                abort_err.store(-4, Ordering::Relaxed);
+                                cv_worker.notify_all();
+                                return;
+                            }
                             let mut g = pipe_mtx.lock().unwrap();
-                            while g.1[rg] == usize::MAX && abort_err.load(Ordering::Relaxed) == 0 {
-                                g = cv_writer.wait(g).unwrap();
-                            }
-                            if abort_err.load(Ordering::Relaxed) != 0 {
-                                return abort_err.load(Ordering::Relaxed);
-                            }
-                            g.1[rg]
-                        };
-                        let slot = rg % ring_size;
-                        let out_vec = unsafe { &*(bufs_addr as *const Vec<u8>).add(slot) };
-                        if !write_all_fd(fd, &out_vec[..len]) {
-                            abort_err.store(-4, Ordering::Relaxed);
+                            g.0 = rg + 1;
+                            drop(g);
                             cv_worker.notify_all();
-                            return -4;
                         }
-                        let mut g = pipe_mtx.lock().unwrap();
-                        g.0 = rg + 1;
-                        drop(g);
-                        cv_worker.notify_all();
-                    }
-                    0
-                } else {
-                    loop {
-                        if abort_err.load(Ordering::Relaxed) != 0 {
-                            return abort_err.load(Ordering::Relaxed);
-                        }
-                        let rg = next_rg.fetch_add(1, Ordering::Relaxed);
-                        if rg >= b_rgs {
-                            break;
-                        }
-                        if rg >= ring_size {
+                    });
+
+                    // Worker tasks
+                    for _ in 0..n_workers {
+                        s.spawn(|_| loop {
+                            if abort_err.load(Ordering::Relaxed) != 0 {
+                                return;
+                            }
+                            let rg = next_rg.fetch_add(1, Ordering::Relaxed);
+                            if rg >= b_rgs {
+                                break;
+                            }
+                            if rg >= ring_size {
+                                let mut g = pipe_mtx.lock().unwrap();
+                                while g.0 + ring_size <= rg
+                                    && abort_err.load(Ordering::Relaxed) == 0
+                                {
+                                    g = cv_worker.wait(g).unwrap();
+                                }
+                                if abort_err.load(Ordering::Relaxed) != 0 {
+                                    return;
+                                }
+                            }
+                            let slot = rg % ring_size;
+                            let out_vec = unsafe { &mut *(bufs_addr as *mut Vec<u8>).add(slot) };
+                            let meta_rg = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    (meta_addr as *mut i64).add(rg * 10),
+                                    10,
+                                )
+                            };
+                            let res = encode_rg_into_vec(
+                                rg,
+                                num_data,
+                                rg_pats,
+                                page_pats,
+                                level,
+                                ones,
+                                multi,
+                                po_src,
+                                pm_src,
+                                cm_src,
+                                ones_idx,
+                                multi_idx,
+                                is_delta,
+                                is_shuffled,
+                                check_sorted,
+                                out_vec,
+                                meta_rg,
+                            );
+                            if res < 0 {
+                                abort_err.store(res, Ordering::Relaxed);
+                                cv_writer.notify_all();
+                                cv_worker.notify_all();
+                                return;
+                            }
                             let mut g = pipe_mtx.lock().unwrap();
-                            while g.0 + ring_size <= rg && abort_err.load(Ordering::Relaxed) == 0 {
-                                g = cv_worker.wait(g).unwrap();
-                            }
-                            if abort_err.load(Ordering::Relaxed) != 0 {
-                                return abort_err.load(Ordering::Relaxed);
-                            }
-                        }
-                        let slot = rg % ring_size;
-                        let out_vec = unsafe { &mut *(bufs_addr as *mut Vec<u8>).add(slot) };
-                        let meta_rg = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                (meta_addr as *mut i64).add(rg * 10),
-                                10,
-                            )
-                        };
-                        let res = encode_rg_into_vec(
-                            api,
-                            rg,
-                            num_data,
-                            rg_pats,
-                            page_pats,
-                            level,
-                            ones,
-                            multi,
-                            po_src,
-                            pm_src,
-                            cm_src,
-                            ones_idx,
-                            multi_idx,
-                            is_delta,
-                            is_shuffled,
-                            check_sorted,
-                            out_vec,
-                            meta_rg,
-                        );
-                        if res < 0 {
-                            abort_err.store(res, Ordering::Relaxed);
-                            cv_writer.notify_all();
-                            cv_worker.notify_all();
-                            return res;
-                        }
-                        let mut g = pipe_mtx.lock().unwrap();
-                        g.1[rg] = res as usize;
-                        drop(g);
-                        cv_writer.notify_one();
+                            g.1[rg] = res as usize;
+                            drop(g);
+                            cv_writer.notify_one();
+                        });
                     }
-                    0
-                }
-            })
+                });
+            });
+            abort_err.load(Ordering::Relaxed)
         }
-    };
+    });
 
     if rc == -2 {
-        return raise_value_error(b"position values must be sorted within every pattern\0");
+        return Err(PyValueError::new_err(
+            "position values must be sorted within every pattern",
+        ));
     }
     if rc != 0 {
-        return raise_runtime_error(b"Zstd compression or write failed in _parquet_rs\0");
+        return Err(PyRuntimeError::new_err(
+            "Zstd compression or write failed in _parquet_rs",
+        ));
     }
-    unsafe { PyLong_FromLongLong(0) }
+    Ok(0)
 }
 
-unsafe extern "C" fn py_read_ones_multi(
-    _self: *mut PyObject,
-    args: *const *mut PyObject,
-    nargs: Py_ssize_t,
-) -> *mut PyObject {
-    if nargs != 7 {
-        return raise_value_error(b"read_ones_multi expects 7 arguments\0");
-    }
-    let b_mm = match PyBuf::get_readonly(unsafe { *args.add(0) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_col = match PyBuf::get_readonly(unsafe { *args.add(1) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let n_rgs = arg_usize(args, 2);
-    let rg_pats = arg_usize(args, 3);
-    let num_data = arg_usize(args, 4);
-    let mut b_ones = match PyBuf::get_writable(unsafe { *args.add(5) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let mut b_multi = match PyBuf::get_writable(unsafe { *args.add(6) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
+#[pyfunction]
+fn read_ones_multi<'py>(
+    py: Python<'py>,
+    b_mm: PyBuffer<u8>,
+    b_col: PyReadonlyArray3<'py, i64>,
+    n_rgs: usize,
+    rg_pats: usize,
+    num_data: usize,
+    mut b_ones: PyReadwriteArray1<'py, u32>,
+    mut b_multi: PyReadwriteArray1<'py, u32>,
+) -> PyResult<i64> {
+    let mm_u8 = view_pybuffer_u8(&b_mm)?;
+    let col_info = b_col.as_slice()?;
+    let out_ones = b_ones.as_slice_mut()?;
+    let out_multi = b_multi.as_slice_mut()?;
 
-    let api = match get_zstd() {
-        Some(a) => a,
-        None => return raise_runtime_error(b"libzstd not available\0"),
-    };
+    let rc = py.detach(|| {
+        THREAD_ZSTD.with(|cell| {
+            let mut ctx = cell.borrow_mut();
+            let dctx = &mut ctx.dctx;
+            for rg in 0..n_rgs {
+                let ps = rg * rg_pats;
+                let pe = ((rg + 1) * rg_pats).min(num_data);
+                let u_expect = (pe - ps) * 4;
 
-    let mm_u8 = b_mm.as_slice::<u8>();
-    let col_info = b_col.as_slice::<i64>();
-    let out_ones = b_ones.as_mut_slice::<u32>();
-    let out_multi = b_multi.as_mut_slice::<u32>();
+                let off0 = col_info[rg * 10] as usize;
+                let tc0 = col_info[rg * 10 + 1] as usize;
+                let (_, p1) = read_zigzag(mm_u8, off0 + 3);
+                let (c0_i, _) = read_zigzag(mm_u8, p1 + 1);
+                let c0 = c0_i as usize;
+                let hdr0 = tc0 - c0;
+                let dst0 = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        out_ones[ps..pe].as_mut_ptr() as *mut u8,
+                        u_expect,
+                    )
+                };
+                match dctx.decompress(dst0, &mm_u8[off0 + hdr0..off0 + hdr0 + c0]) {
+                    Ok(d0) if d0 == u_expect => {}
+                    _ => return -1,
+                }
 
-    let rc = THREAD_ZSTD.with(|cell| {
-        let ctx = cell.borrow();
-        let dctx = ctx.dctx;
-        for rg in 0..n_rgs {
-            let ps = rg * rg_pats;
-            let pe = ((rg + 1) * rg_pats).min(num_data);
-            let u_expect = (pe - ps) * 4;
-
-            let off0 = col_info[rg * 10] as usize;
-            let tc0 = col_info[rg * 10 + 1] as usize;
-            let (_, p1) = read_zigzag(mm_u8, off0 + 3);
-            let (c0_i, _) = read_zigzag(mm_u8, p1 + 1);
-            let c0 = c0_i as usize;
-            let hdr0 = tc0 - c0;
-            let d0 = unsafe {
-                (api.decompress_dctx)(
-                    dctx,
-                    out_ones.as_mut_ptr().add(ps) as *mut c_void,
-                    u_expect,
-                    mm_u8.as_ptr().add(off0 + hdr0) as *const c_void,
-                    c0,
-                )
-            };
-            if d0 != u_expect {
-                return -1;
+                let off1 = col_info[rg * 10 + 2] as usize;
+                let tc1 = col_info[rg * 10 + 3] as usize;
+                let (_, p1b) = read_zigzag(mm_u8, off1 + 3);
+                let (c1_i, _) = read_zigzag(mm_u8, p1b + 1);
+                let c1 = c1_i as usize;
+                let hdr1 = tc1 - c1;
+                let dst1 = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        out_multi[ps..pe].as_mut_ptr() as *mut u8,
+                        u_expect,
+                    )
+                };
+                match dctx.decompress(dst1, &mm_u8[off1 + hdr1..off1 + hdr1 + c1]) {
+                    Ok(d1) if d1 == u_expect => {}
+                    _ => return -1,
+                }
             }
-
-            let off1 = col_info[rg * 10 + 2] as usize;
-            let tc1 = col_info[rg * 10 + 3] as usize;
-            let (_, p1b) = read_zigzag(mm_u8, off1 + 3);
-            let (c1_i, _) = read_zigzag(mm_u8, p1b + 1);
-            let c1 = c1_i as usize;
-            let hdr1 = tc1 - c1;
-            let d1 = unsafe {
-                (api.decompress_dctx)(
-                    dctx,
-                    out_multi.as_mut_ptr().add(ps) as *mut c_void,
-                    u_expect,
-                    mm_u8.as_ptr().add(off1 + hdr1) as *const c_void,
-                    c1,
-                )
-            };
-            if d1 != u_expect {
-                return -1;
-            }
-        }
-        0
+            0
+        })
     });
 
     if rc != 0 {
-        return raise_value_error(b"Corrupted Zstd page in Parquet file\0");
+        return Err(PyValueError::new_err("Corrupted Zstd page in Parquet file"));
     }
-    unsafe { PyLong_FromLongLong(0) }
+    Ok(0)
 }
 
-unsafe extern "C" fn py_decode_rg_batch(
-    _self: *mut PyObject,
-    args: *const *mut PyObject,
-    nargs: Py_ssize_t,
-) -> *mut PyObject {
-    if nargs != 20 {
-        return raise_value_error(b"decode_rg_batch expects 20 arguments\0");
-    }
-    let b_mm = match PyBuf::get_readonly(unsafe { *args.add(0) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_col = match PyBuf::get_readonly(unsafe { *args.add(1) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_urgs = match PyBuf::get_readonly(unsafe { *args.add(2) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_gstarts = match PyBuf::get_readonly(unsafe { *args.add(3) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_gstops = match PyBuf::get_readonly(unsafe { *args.add(4) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_gsids = match PyBuf::get_readonly(unsafe { *args.add(5) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let rg_pats = arg_usize(args, 6);
-    let num_data = arg_usize(args, 7);
-    let b_ones_idx = match PyBuf::get_readonly(unsafe { *args.add(8) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_multi_idx = match PyBuf::get_readonly(unsafe { *args.add(9) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_firsts = match PyBuf::get_readonly(unsafe { *args.add(10) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_lasts = match PyBuf::get_readonly(unsafe { *args.add(11) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_dst_ones = match PyBuf::get_readonly(unsafe { *args.add(12) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_dst_multi = match PyBuf::get_readonly(unsafe { *args.add(13) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let mut b_out_po = match PyBuf::get_writable(unsafe { *args.add(14) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let mut b_out_pm = match PyBuf::get_writable(unsafe { *args.add(15) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let mut b_out_cm = match PyBuf::get_writable(unsafe { *args.add(16) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let is_delta = arg_bool(args, 17);
-    let is_shuffled = arg_bool(args, 18);
-    let n_workers = arg_usize(args, 19).max(1);
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn decode_rg_batch<'py>(
+    py: Python<'py>,
+    b_mm: PyBuffer<u8>,
+    b_col: PyReadonlyArray3<'py, i64>,
+    b_urgs: PyReadonlyArray1<'py, i64>,
+    b_gstarts: PyReadonlyArray1<'py, i64>,
+    b_gstops: PyReadonlyArray1<'py, i64>,
+    b_gsids: PyReadonlyArray1<'py, i64>,
+    rg_pats: usize,
+    num_data: usize,
+    b_ones_idx: PyReadonlyArray1<'py, i64>,
+    b_multi_idx: PyReadonlyArray1<'py, i64>,
+    b_firsts: PyReadonlyArray1<'py, i64>,
+    b_lasts: PyReadonlyArray1<'py, i64>,
+    b_dst_ones: PyReadonlyArray1<'py, i64>,
+    b_dst_multi: PyReadonlyArray1<'py, i64>,
+    mut b_out_po: PyReadwriteArray1<'py, u32>,
+    mut b_out_pm: PyReadwriteArray1<'py, u32>,
+    mut b_out_cm: PyReadwriteArray1<'py, u32>,
+    is_delta: bool,
+    is_shuffled: bool,
+    n_workers: usize,
+) -> PyResult<i64> {
+    let mm_u8 = view_pybuffer_u8(&b_mm)?;
+    let col_info = b_col.as_slice()?;
+    let unique_rgs = b_urgs.as_slice()?;
+    let group_starts = b_gstarts.as_slice()?;
+    let group_stops = b_gstops.as_slice()?;
+    let group_span_ids = b_gsids.as_slice()?;
+    let ones_idx = b_ones_idx.as_slice()?;
+    let multi_idx = b_multi_idx.as_slice()?;
+    let firsts = b_firsts.as_slice()?;
+    let lasts = b_lasts.as_slice()?;
+    let dst_ones = b_dst_ones.as_slice()?;
+    let dst_multi = b_dst_multi.as_slice()?;
 
-    let api = match get_zstd() {
-        Some(a) => a,
-        None => return raise_runtime_error(b"libzstd not available\0"),
-    };
-
-    let mm_u8 = b_mm.as_slice::<u8>();
-    let col_info = b_col.as_slice::<i64>();
-    let unique_rgs = b_urgs.as_slice::<i64>();
-    let group_starts = b_gstarts.as_slice::<i64>();
-    let group_stops = b_gstops.as_slice::<i64>();
-    let group_span_ids = b_gsids.as_slice::<i64>();
-    let ones_idx = b_ones_idx.as_slice::<i64>();
-    let multi_idx = b_multi_idx.as_slice::<i64>();
-    let firsts = b_firsts.as_slice::<i64>();
-    let lasts = b_lasts.as_slice::<i64>();
-    let dst_ones = b_dst_ones.as_slice::<i64>();
-    let dst_multi = b_dst_multi.as_slice::<i64>();
-
-    let out_po_slice = b_out_po.as_mut_slice::<u32>();
-    let out_pm_slice = b_out_pm.as_mut_slice::<u32>();
-    let out_cm_slice = b_out_cm.as_mut_slice::<u32>();
+    let out_po_slice = b_out_po.as_slice_mut()?;
+    let out_pm_slice = b_out_pm.as_slice_mut()?;
+    let out_cm_slice = b_out_cm.as_slice_mut()?;
 
     let out_po_addr = out_po_slice.as_mut_ptr() as usize;
     let out_po_len = out_po_slice.len();
@@ -842,178 +760,158 @@ unsafe extern "C" fn py_decode_rg_batch(
     let out_cm_len = out_cm_slice.len();
 
     let n_groups = unique_rgs.len();
-    let rc = {
-        let _nogil = AllowThreads::new();
-        par_for_each(n_groups, n_workers, |g_idx| {
-            let rg = unique_rgs[g_idx] as usize;
-            let ps = rg * rg_pats;
-            let pe = ((rg + 1) * rg_pats).min(num_data);
-            let gs0 = group_starts[g_idx] as usize;
-            let gs1 = group_stops[g_idx] as usize;
-            let n_sp = gs1 - gs0;
+    let n_workers = n_workers.max(1);
 
-            let mut p_firsts = Vec::with_capacity(n_sp);
-            let mut p_lasts = Vec::with_capacity(n_sp);
-            let mut d_ones = Vec::with_capacity(n_sp);
-            let mut d_multi = Vec::with_capacity(n_sp);
-            let mut need_o = false;
-            let mut need_m = false;
+    let decode_group = |g_idx: usize| -> Result<(), i32> {
+        let rg = unique_rgs[g_idx] as usize;
+        let ps = rg * rg_pats;
+        let pe = ((rg + 1) * rg_pats).min(num_data);
+        let gs0 = group_starts[g_idx] as usize;
+        let gs1 = group_stops[g_idx] as usize;
+        let n_sp = gs1 - gs0;
 
-            for i in 0..n_sp {
-                let sid = group_span_ids[gs0 + i] as usize;
-                let f = firsts[sid];
-                let l = lasts[sid];
-                p_firsts.push(f);
-                p_lasts.push(l);
-                d_ones.push(dst_ones[sid]);
-                d_multi.push(dst_multi[sid]);
-                if ones_idx[l as usize] > ones_idx[f as usize] {
-                    need_o = true;
-                }
-                if multi_idx[l as usize] > multi_idx[f as usize] {
-                    need_m = true;
+        let mut p_firsts = Vec::with_capacity(n_sp);
+        let mut p_lasts = Vec::with_capacity(n_sp);
+        let mut d_ones = Vec::with_capacity(n_sp);
+        let mut d_multi = Vec::with_capacity(n_sp);
+        let mut need_o = false;
+        let mut need_m = false;
+
+        for i in 0..n_sp {
+            let sid = group_span_ids[gs0 + i] as usize;
+            let f = firsts[sid];
+            let l = lasts[sid];
+            p_firsts.push(f);
+            p_lasts.push(l);
+            d_ones.push(dst_ones[sid]);
+            d_multi.push(dst_multi[sid]);
+            if ones_idx[l as usize] > ones_idx[f as usize] {
+                need_o = true;
+            }
+            if multi_idx[l as usize] > multi_idx[f as usize] {
+                need_m = true;
+            }
+        }
+
+        let out_po = unsafe { std::slice::from_raw_parts_mut(out_po_addr as *mut u32, out_po_len) };
+        let out_pm = unsafe { std::slice::from_raw_parts_mut(out_pm_addr as *mut u32, out_pm_len) };
+        let out_cm = unsafe { std::slice::from_raw_parts_mut(out_cm_addr as *mut u32, out_cm_len) };
+
+        let rc = THREAD_ZSTD.with(|cell| {
+            let mut ctx = cell.borrow_mut();
+            let zctx = &mut *ctx;
+            let dctx = &mut zctx.dctx;
+            let scratch = &mut zctx.scratch;
+
+            if need_o {
+                let r = decode_col_pages_inner(
+                    dctx,
+                    mm_u8,
+                    col_info[rg * 10 + 4] as usize,
+                    col_info[rg * 10 + 5] as usize,
+                    scratch,
+                    ps,
+                    pe,
+                    ones_idx,
+                    out_po,
+                    &p_firsts,
+                    &p_lasts,
+                    &d_ones,
+                    is_delta,
+                    is_shuffled,
+                );
+                if r != 0 {
+                    return r;
                 }
             }
-
-            let out_po = unsafe { std::slice::from_raw_parts_mut(out_po_addr as *mut u32, out_po_len) };
-            let out_pm = unsafe { std::slice::from_raw_parts_mut(out_pm_addr as *mut u32, out_pm_len) };
-            let out_cm = unsafe { std::slice::from_raw_parts_mut(out_cm_addr as *mut u32, out_cm_len) };
-
-            THREAD_ZSTD.with(|cell| {
-                let mut ctx = cell.borrow_mut();
-                let dctx = ctx.dctx;
-                let scratch = &mut ctx.scratch;
-
-                if need_o {
-                    let r = decode_col_pages_inner(
-                        api,
-                        dctx,
-                        mm_u8,
-                        col_info[rg * 10 + 4] as usize,
-                        col_info[rg * 10 + 5] as usize,
-                        scratch,
-                        ps,
-                        pe,
-                        ones_idx,
-                        out_po,
-                        &p_firsts,
-                        &p_lasts,
-                        &d_ones,
-                        is_delta,
-                        is_shuffled,
-                    );
-                    if r != 0 {
-                        return r;
-                    }
+            if need_m {
+                let r = decode_col_pages_inner(
+                    dctx,
+                    mm_u8,
+                    col_info[rg * 10 + 6] as usize,
+                    col_info[rg * 10 + 7] as usize,
+                    scratch,
+                    ps,
+                    pe,
+                    multi_idx,
+                    out_pm,
+                    &p_firsts,
+                    &p_lasts,
+                    &d_multi,
+                    is_delta,
+                    is_shuffled,
+                );
+                if r != 0 {
+                    return r;
                 }
-                if need_m {
-                    let r = decode_col_pages_inner(
-                        api,
-                        dctx,
-                        mm_u8,
-                        col_info[rg * 10 + 6] as usize,
-                        col_info[rg * 10 + 7] as usize,
-                        scratch,
-                        ps,
-                        pe,
-                        multi_idx,
-                        out_pm,
-                        &p_firsts,
-                        &p_lasts,
-                        &d_multi,
-                        is_delta,
-                        is_shuffled,
-                    );
-                    if r != 0 {
-                        return r;
-                    }
-                    let r2 = decode_col_pages_inner(
-                        api,
-                        dctx,
-                        mm_u8,
-                        col_info[rg * 10 + 8] as usize,
-                        col_info[rg * 10 + 9] as usize,
-                        scratch,
-                        ps,
-                        pe,
-                        multi_idx,
-                        out_cm,
-                        &p_firsts,
-                        &p_lasts,
-                        &d_multi,
-                        false,
-                        is_shuffled,
-                    );
-                    if r2 != 0 {
-                        return r2;
-                    }
+                let r2 = decode_col_pages_inner(
+                    dctx,
+                    mm_u8,
+                    col_info[rg * 10 + 8] as usize,
+                    col_info[rg * 10 + 9] as usize,
+                    scratch,
+                    ps,
+                    pe,
+                    multi_idx,
+                    out_cm,
+                    &p_firsts,
+                    &p_lasts,
+                    &d_multi,
+                    false,
+                    is_shuffled,
+                );
+                if r2 != 0 {
+                    return r2;
                 }
-                0
-            })
-        })
+            }
+            0
+        });
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(rc)
+        }
     };
 
-    if rc != 0 {
-        return raise_value_error(b"Corrupted Zstd page in Parquet file\0");
+    let res = py.detach(|| {
+        if n_workers <= 1 || n_groups <= 1 {
+            (0..n_groups).try_for_each(decode_group)
+        } else {
+            get_pool(n_workers.min(n_groups))
+                .install(|| (0..n_groups).into_par_iter().try_for_each(decode_group))
+        }
+    });
+
+    if res.is_err() {
+        return Err(PyValueError::new_err("Corrupted Zstd page in Parquet file"));
     }
-    unsafe { PyLong_FromLongLong(0) }
+    Ok(0)
 }
 
-unsafe extern "C" fn py_decode_single_frame(
-    _self: *mut PyObject,
-    args: *const *mut PyObject,
-    nargs: Py_ssize_t,
-) -> *mut PyObject {
-    if nargs != 13 {
-        return raise_value_error(b"decode_single_frame expects 13 arguments\0");
-    }
-    let b_mm = match PyBuf::get_readonly(unsafe { *args.add(0) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_col = match PyBuf::get_readonly(unsafe { *args.add(1) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let rg = arg_usize(args, 2);
-    let ps = arg_usize(args, 3);
-    let pe = arg_usize(args, 4);
-    let frame = arg_i64(args, 5);
-    let b_ones_idx = match PyBuf::get_readonly(unsafe { *args.add(6) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_multi_idx = match PyBuf::get_readonly(unsafe { *args.add(7) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let mut b_po = match PyBuf::get_writable(unsafe { *args.add(8) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let mut b_pm = match PyBuf::get_writable(unsafe { *args.add(9) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let mut b_cm = match PyBuf::get_writable(unsafe { *args.add(10) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let is_delta = arg_bool(args, 11);
-    let is_shuffled = arg_bool(args, 12);
-
-    let api = match get_zstd() {
-        Some(a) => a,
-        None => return raise_runtime_error(b"libzstd not available\0"),
-    };
-
-    let mm_u8 = b_mm.as_slice::<u8>();
-    let col_info = b_col.as_slice::<i64>();
-    let ones_idx = b_ones_idx.as_slice::<i64>();
-    let multi_idx = b_multi_idx.as_slice::<i64>();
-    let out_po = b_po.as_mut_slice::<u32>();
-    let out_pm = b_pm.as_mut_slice::<u32>();
-    let out_cm = b_cm.as_mut_slice::<u32>();
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn decode_single_frame<'py>(
+    b_mm: PyBuffer<u8>,
+    b_col: PyReadonlyArray3<'py, i64>,
+    rg: usize,
+    ps: usize,
+    pe: usize,
+    frame: i64,
+    b_ones_idx: PyReadonlyArray1<'py, i64>,
+    b_multi_idx: PyReadonlyArray1<'py, i64>,
+    mut b_po: PyReadwriteArray1<'py, u32>,
+    mut b_pm: PyReadwriteArray1<'py, u32>,
+    mut b_cm: PyReadwriteArray1<'py, u32>,
+    is_delta: bool,
+    is_shuffled: bool,
+) -> PyResult<i64> {
+    let mm_u8 = view_pybuffer_u8(&b_mm)?;
+    let col_info = b_col.as_slice()?;
+    let ones_idx = b_ones_idx.as_slice()?;
+    let multi_idx = b_multi_idx.as_slice()?;
+    let out_po = b_po.as_slice_mut()?;
+    let out_pm = b_pm.as_slice_mut()?;
+    let out_cm = b_cm.as_slice_mut()?;
 
     let pf_arr = [frame];
     let pl_arr = [frame + 1];
@@ -1021,12 +919,12 @@ unsafe extern "C" fn py_decode_single_frame(
 
     let rc = THREAD_ZSTD.with(|cell| {
         let mut ctx = cell.borrow_mut();
-        let dctx = ctx.dctx;
-        let scratch = &mut ctx.scratch;
+        let zctx = &mut *ctx;
+        let dctx = &mut zctx.dctx;
+        let scratch = &mut zctx.scratch;
 
         if !out_po.is_empty() {
             let r = decode_col_pages_inner(
-                api,
                 dctx,
                 mm_u8,
                 col_info[rg * 10 + 4] as usize,
@@ -1048,7 +946,6 @@ unsafe extern "C" fn py_decode_single_frame(
         }
         if !out_pm.is_empty() {
             let r = decode_col_pages_inner(
-                api,
                 dctx,
                 mm_u8,
                 col_info[rg * 10 + 6] as usize,
@@ -1068,7 +965,6 @@ unsafe extern "C" fn py_decode_single_frame(
                 return r;
             }
             let r2 = decode_col_pages_inner(
-                api,
                 dctx,
                 mm_u8,
                 col_info[rg * 10 + 8] as usize,
@@ -1092,161 +988,97 @@ unsafe extern "C" fn py_decode_single_frame(
     });
 
     if rc != 0 {
-        return raise_value_error(b"Corrupted Zstd page in Parquet file\0");
+        return Err(PyValueError::new_err("Corrupted Zstd page in Parquet file"));
     }
-    unsafe { PyLong_FromLongLong(0) }
+    Ok(0)
 }
 
-unsafe extern "C" fn py_decode_col(
-    _self: *mut PyObject,
-    args: *const *mut PyObject,
-    nargs: Py_ssize_t,
-) -> *mut PyObject {
-    if nargs != 11 {
-        return raise_value_error(b"decode_col expects 11 arguments\0");
-    }
-    let b_mm = match PyBuf::get_readonly(unsafe { *args.add(0) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let b_col = match PyBuf::get_readonly(unsafe { *args.add(1) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let c_idx = arg_usize(args, 2);
-    let n_rgs = arg_usize(args, 3);
-    let rg_pats = arg_usize(args, 4);
-    let num_data = arg_usize(args, 5);
-    let b_offs = match PyBuf::get_readonly(unsafe { *args.add(6) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let mut b_out = match PyBuf::get_writable(unsafe { *args.add(7) }) {
-        Some(b) => b,
-        None => return std::ptr::null_mut(),
-    };
-    let is_delta = arg_bool(args, 8);
-    let is_shuffled = arg_bool(args, 9);
-    let n_workers = arg_usize(args, 10).max(1);
-
-    let api = match get_zstd() {
-        Some(a) => a,
-        None => return raise_runtime_error(b"libzstd not available\0"),
-    };
-
-    let mm_u8 = b_mm.as_slice::<u8>();
-    let col_info = b_col.as_slice::<i64>();
-    let offsets = b_offs.as_slice::<i64>();
-    let out_slice = b_out.as_mut_slice::<u32>();
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn decode_col<'py>(
+    py: Python<'py>,
+    b_mm: PyBuffer<u8>,
+    b_col: PyReadonlyArray3<'py, i64>,
+    c_idx: usize,
+    n_rgs: usize,
+    rg_pats: usize,
+    num_data: usize,
+    b_offs: PyReadonlyArray1<'py, i64>,
+    mut b_out: PyReadwriteArray1<'py, u32>,
+    is_delta: bool,
+    is_shuffled: bool,
+    n_workers: usize,
+) -> PyResult<i64> {
+    let mm_u8 = view_pybuffer_u8(&b_mm)?;
+    let col_info = b_col.as_slice()?;
+    let offsets = b_offs.as_slice()?;
+    let out_slice = b_out.as_slice_mut()?;
     let out_addr = out_slice.as_mut_ptr() as usize;
     let out_len = out_slice.len();
+    let n_workers = n_workers.max(1);
 
-    let rc = {
-        let _nogil = AllowThreads::new();
-        par_for_each(n_rgs, n_workers, |rg| {
-            let ps = rg * rg_pats;
-            let pe = ((rg + 1) * rg_pats).min(num_data);
-            let rg_base = offsets[ps];
-            if offsets[pe] <= rg_base {
-                return 0;
-            }
-            let pf_arr = [ps as i64];
-            let pl_arr = [pe as i64];
-            let dst_arr = [rg_base];
-            let out_u32 = unsafe { std::slice::from_raw_parts_mut(out_addr as *mut u32, out_len) };
+    let decode_one_rg = |rg: usize| -> Result<(), i32> {
+        let ps = rg * rg_pats;
+        let pe = ((rg + 1) * rg_pats).min(num_data);
+        let rg_base = offsets[ps];
+        if offsets[pe] <= rg_base {
+            return Ok(());
+        }
+        let pf_arr = [ps as i64];
+        let pl_arr = [pe as i64];
+        let dst_arr = [rg_base];
+        let out_u32 = unsafe { std::slice::from_raw_parts_mut(out_addr as *mut u32, out_len) };
 
-            THREAD_ZSTD.with(|cell| {
-                let mut ctx = cell.borrow_mut();
-                let dctx = ctx.dctx;
-                let scratch = &mut ctx.scratch;
-                decode_col_pages_inner(
-                    api,
-                    dctx,
-                    mm_u8,
-                    col_info[rg * 10 + c_idx * 2] as usize,
-                    col_info[rg * 10 + c_idx * 2 + 1] as usize,
-                    scratch,
-                    ps,
-                    pe,
-                    offsets,
-                    out_u32,
-                    &pf_arr,
-                    &pl_arr,
-                    &dst_arr,
-                    is_delta,
-                    is_shuffled,
-                )
-            })
-        })
+        let rc = THREAD_ZSTD.with(|cell| {
+            let mut ctx = cell.borrow_mut();
+            let zctx = &mut *ctx;
+            let dctx = &mut zctx.dctx;
+            let scratch = &mut zctx.scratch;
+            decode_col_pages_inner(
+                dctx,
+                mm_u8,
+                col_info[rg * 10 + c_idx * 2] as usize,
+                col_info[rg * 10 + c_idx * 2 + 1] as usize,
+                scratch,
+                ps,
+                pe,
+                offsets,
+                out_u32,
+                &pf_arr,
+                &pl_arr,
+                &dst_arr,
+                is_delta,
+                is_shuffled,
+            )
+        });
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(rc)
+        }
     };
 
-    if rc != 0 {
-        return raise_value_error(b"Corrupted Zstd page in Parquet file\0");
+    let res = py.detach(|| {
+        if n_workers <= 1 || n_rgs <= 1 {
+            (0..n_rgs).try_for_each(decode_one_rg)
+        } else {
+            get_pool(n_workers.min(n_rgs))
+                .install(|| (0..n_rgs).into_par_iter().try_for_each(decode_one_rg))
+        }
+    });
+
+    if res.is_err() {
+        return Err(PyValueError::new_err("Corrupted Zstd page in Parquet file"));
     }
-    unsafe { PyLong_FromLongLong(0) }
+    Ok(0)
 }
 
-static METHODS: [PyMethodDef; 6] = [
-    PyMethodDef {
-        ml_name: b"write_batch_zstd\0".as_ptr() as *const c_char,
-        ml_meth: Some(py_write_batch_zstd),
-        ml_flags: METH_FASTCALL,
-        ml_doc: b"Encode and write a batch of Parquet row groups in parallel.\0".as_ptr()
-            as *const c_char,
-    },
-    PyMethodDef {
-        ml_name: b"read_ones_multi\0".as_ptr() as *const c_char,
-        ml_meth: Some(py_read_ones_multi),
-        ml_flags: METH_FASTCALL,
-        ml_doc: b"Read ones and multi columns directly via Zstd.\0".as_ptr() as *const c_char,
-    },
-    PyMethodDef {
-        ml_name: b"decode_rg_batch\0".as_ptr() as *const c_char,
-        ml_meth: Some(py_decode_rg_batch),
-        ml_flags: METH_FASTCALL,
-        ml_doc: b"Decode a batch of row groups and spans in parallel.\0".as_ptr() as *const c_char,
-    },
-    PyMethodDef {
-        ml_name: b"decode_single_frame\0".as_ptr() as *const c_char,
-        ml_meth: Some(py_decode_single_frame),
-        ml_flags: METH_FASTCALL,
-        ml_doc: b"Decode a single pattern frame from sub-pages.\0".as_ptr() as *const c_char,
-    },
-    PyMethodDef {
-        ml_name: b"decode_col\0".as_ptr() as *const c_char,
-        ml_meth: Some(py_decode_col),
-        ml_flags: METH_FASTCALL,
-        ml_doc: b"Decode a single full column in parallel.\0".as_ptr() as *const c_char,
-    },
-    PyMethodDef {
-        ml_name: std::ptr::null(),
-        ml_meth: None,
-        ml_flags: 0,
-        ml_doc: std::ptr::null(),
-    },
-];
-
-static mut MODULE_DEF: PyModuleDef = PyModuleDef {
-    m_base: PyModuleDef_Base {
-        ob_base: PyObject {
-            ob_refcnt: 1,
-            ob_type: std::ptr::null_mut(),
-        },
-        m_init: None,
-        m_index: 0,
-        m_copy: std::ptr::null_mut(),
-    },
-    m_name: b"_parquet_rs\0".as_ptr() as *const c_char,
-    m_doc: b"Rust + SIMD + Zstd Parquet acceleration for emcfile.\0".as_ptr() as *const c_char,
-    m_size: -1,
-    m_methods: METHODS.as_ptr(),
-    m_slots: std::ptr::null(),
-    m_traverse: std::ptr::null(),
-    m_clear: std::ptr::null(),
-    m_free: std::ptr::null(),
-};
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn PyInit__parquet_rs() -> *mut PyObject {
-    unsafe { PyModule_Create2(&raw mut MODULE_DEF, PYTHON_ABI_VERSION) }
+#[pymodule]
+fn _parquet_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(write_batch_zstd, m)?)?;
+    m.add_function(wrap_pyfunction!(read_ones_multi, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_rg_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_single_frame, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_col, m)?)?;
+    Ok(())
 }
