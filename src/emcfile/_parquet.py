@@ -594,6 +594,25 @@ def _get_file_info(
     return res_fallback
 
 
+def _get_or_open_mmap(
+    path: Path, cache: dict[str, Any] | None
+) -> tuple[mmap.mmap, Any, mmap.mmap | None]:
+    if cache is not None:
+        mm_cached = cache.get("mm")
+        if mm_cached is not None:
+            return mm_cached, None, None
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            mm_new = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
+        finally:
+            os.close(fd)
+        cache["mm"] = mm_new
+        return mm_new, None, None
+    fp_local = path.open("rb")
+    mm_local = mmap.mmap(fp_local.fileno(), 0, access=mmap.ACCESS_READ)
+    return mm_local, fp_local, mm_local
+
+
 def _split_ranges_by_rg(
     ranges: npt.NDArray[np.integer[Any]], rg_pats: int
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64], npt.NDArray[np.int64]]:
@@ -730,7 +749,7 @@ def write_parquet_patterns(
                 "EMCFILE_PARQUET_CHUNK_BYTES must be a positive multiple of 4"
             )
     else:
-        chunk_bytes = max(4 << 20, ((total_bytes // 512) + 3) & ~3)
+        chunk_bytes = 4 << 20
 
     bytes_per_pat = max(4, total_bytes // max(1, num_data))
     rg_pats = max(1, min(max(1, num_data), chunk_bytes // bytes_per_pat))
@@ -1087,16 +1106,9 @@ def read_single_frame_parquet(
         if k_o == 0 and k_m == 0:
             return po, pm, cm.view(np.int32)
 
-        mm_obj = cache.get("mm") if cache is not None else None
-        fp_local = None
-        mm_local = None
+        assert path is not None
+        mm_obj, fp_local, mm_local = _get_or_open_mmap(path, cache)
         try:
-            if mm_obj is None:
-                assert path is not None
-                fp_local = path.open("rb")
-                mm_local = mmap.mmap(fp_local.fileno(), 0, access=mmap.ACCESS_READ)
-                mm_obj = mm_local
-
             ones_i64 = (
                 ones_idx.view(np.int64)
                 if ones_idx.dtype == np.uint64
@@ -1348,15 +1360,8 @@ def read_parquet_patterns(
         n_groups = len(unique_rgs_i64)
         n_workers = max(1, min(workers, n_groups))
 
-        mm_obj = cache.get("mm") if cache is not None else None
-        fp_local = None
-        mm_local = None
+        mm_obj, fp_local, mm_local = _get_or_open_mmap(path, cache)
         try:
-            if mm_obj is None:
-                fp_local = path.open("rb")
-                mm_local = mmap.mmap(fp_local.fileno(), 0, access=mmap.ACCESS_READ)
-                mm_obj = mm_local
-
             _parquet_rs.decode_rg_batch(
                 mm_obj,
                 col_info,
@@ -1493,14 +1498,8 @@ def read_parquet_column(
     if col_info is not None and column in col_idx_map and use_rs:
         c_idx = col_idx_map[column]
         n_workers = max(1, min(workers, n_rgs))
-        mm_obj = cache.get("mm") if cache is not None else None
-        fp_local = None
-        mm_local = None
+        mm_obj, fp_local, mm_local = _get_or_open_mmap(path, cache)
         try:
-            if mm_obj is None:
-                fp_local = path.open("rb")
-                mm_local = mmap.mmap(fp_local.fileno(), 0, access=mmap.ACCESS_READ)
-                mm_obj = mm_local
             _parquet_rs.decode_col(
                 mm_obj,
                 col_info,

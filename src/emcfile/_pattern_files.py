@@ -790,6 +790,10 @@ class PatternsSOneH5V1(PatternsSOneFile):
         self.init_idx()
         return self._patterns[index]
 
+    def sparse_pattern(self, index: int) -> SPARSE_PATTERN:
+        self.init_idx()
+        return self._patterns.sparse_pattern(index)
+
 
 class PatternsSOneList(PatternsSOneFile):
     """
