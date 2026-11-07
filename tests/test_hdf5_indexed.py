@@ -105,15 +105,17 @@ def test_plan_unique_chunks_and_destination_order():
 @pytest.mark.parametrize("mask", [0, 1, 2, 3])
 @pytest.mark.usefixtures("hdf5_fast")
 def test_chunk_filter_masks(mask):
-    import zstandard
+    from emcfile._h5_accel import get_h5_rs
 
+    rs = get_h5_rs()
+    assert rs is not None
     values = np.array([0, 1, 65536, 2**32 - 1], "u4")
     raw = (
         values.tobytes()
         if mask & 1
         else values.view("u1").reshape(-1, 4).T.copy().tobytes()
     )
-    payload = raw if mask & 2 else zstandard.ZstdCompressor().compress(raw)
+    payload = raw if mask & 2 else rs.compress_raw_zstd(raw, 1)
     np.testing.assert_array_equal(_decode_chunk(mask, payload, 4), values)
     for selection in (slice(1, 3), slice(0, 1), slice(3, 4), slice(0, 0)):
         actual = _decode_chunk(mask, payload, 4, selection=selection)
@@ -123,7 +125,6 @@ def test_chunk_filter_masks(mask):
 
 
 def test_chunk_errors():
-    pytest.importorskip("zstandard")
     with pytest.raises(ValueError, match="filter mask"):
         _decode_chunk(4, b"", 4)
     with pytest.raises(ValueError, match="length"):

@@ -25,6 +25,7 @@ from typing_extensions import deprecated
 
 from ._delta import encode_pattern_local_delta_parallel
 from ._formatting import pretty_size
+from ._h5_accel import invalidate_cache_for_path
 from ._h5_direct_write import PrefilteredDatasetWriter
 from ._h5_direct_write import available as direct_zstd_available
 from ._h5_filters import hdf5plugin
@@ -925,8 +926,11 @@ def _write_h5_v2(
         raise ValueError(
             "EMCFILE_H5_DIRECT_CHUNK_BYTES must be a positive multiple of 4"
         )
+    base_chunk_elems = chunk_bytes // 4
+    max_payload = max(1, num_ones, num_multi)
     workers = env_workers("EMCFILE_H5_WRITE_WORKERS", 4)
     kwargs = _h5_filter_kwargs(compression, compression_opts, shuffle)
+    invalidate_cache_for_path(path.fn)
     with path.open_group("a", "a") as (_, fp):
         assert isinstance(fp, (h5py.Group, h5py.File))
         names = ["ones", "multi", "place_ones", "place_multi", "count_multi"]
@@ -942,21 +946,12 @@ def _write_h5_v2(
         for name, (size, dtype) in shapes.items():
             dataset_kwargs = dict(kwargs)
             if (direct_zstd or (compression == "zstd" and shuffle)) and size > 0:
-                if (
-                    env_chunk_bytes is None
-                    and name in ("place_multi", "count_multi")
-                    and num_ones > 0
-                ):
-                    ds_chunk_bytes = max(
-                        64 << 10,
-                        min(
-                            chunk_bytes, (chunk_bytes * size + num_ones - 1) // num_ones
-                        ),
-                    )
-                    ds_chunk_elems = max(1, min(size, ds_chunk_bytes // 4))
+                if env_chunk_bytes is not None or name in ("ones", "multi"):
+                    target_elems = base_chunk_elems
                 else:
-                    ds_chunk_elems = max(1, min(size, chunk_bytes // 4))
-                dataset_kwargs["chunks"] = (ds_chunk_elems,)
+                    scaled = int(base_chunk_elems * size // max_payload)
+                    target_elems = max(min(size, 16384), min(base_chunk_elems, scaled))
+                dataset_kwargs["chunks"] = (max(1, min(size, target_elems)),)
             datasets[name] = fp.create_dataset(
                 name, (size,), dtype=dtype, **dataset_kwargs
             )
@@ -985,66 +980,86 @@ def _write_h5_v2(
         offsets = {name: 0 for name in names}
         try:
             for data in datas:
-                patterns_per_batch = max(
-                    1, buffer_size // max(1, data.nbytes // max(1, data.num_data))
-                )
-                for start in range(0, data.num_data, patterns_per_batch):
-                    batch = data[start : min(start + patterns_per_batch, data.num_data)]
+                if (
+                    writers is not None
+                    and len(datas) == 1
+                    and isinstance(data, PatternsSOne)
+                ):
+                    batches = [data]
+                else:
+                    patterns_per_batch = max(
+                        1, buffer_size // max(1, data.nbytes // max(1, data.num_data))
+                    )
+                    batches = [
+                        data[start : min(start + patterns_per_batch, data.num_data)]
+                        for start in range(0, data.num_data, patterns_per_batch)
+                    ]
+                for batch in batches:
                     assert isinstance(batch, PatternsSOne)
-                    if writers is None:
-                        arrays = {
-                            "ones": np.asarray(batch.ones),
-                            "multi": np.asarray(batch.multi),
-                            "place_ones": encode_pattern_local_delta_parallel(
-                                batch.place_ones,
-                                batch.ones,
-                                workers,
-                                check_sorted=check_sorted,
-                                accelerated=False,
-                            )
-                            if position_encoding == "delta"
-                            else np.asarray(batch.place_ones),
-                            "place_multi": encode_pattern_local_delta_parallel(
-                                batch.place_multi,
-                                batch.multi,
-                                workers,
-                                check_sorted=check_sorted,
-                                accelerated=False,
-                            )
-                            if position_encoding == "delta"
-                            else np.asarray(batch.place_multi),
-                            "count_multi": np.asarray(batch.count_multi),
-                        }
-                        for name, array in arrays.items():
-                            datasets[name][
-                                offsets[name] : offsets[name] + array.size
-                            ] = array
-                            offsets[name] += array.size
-                    else:
-                        writers["ones"].write(np.asarray(batch.ones))
-                        writers["ones"].drain()
-                        writers["multi"].write(np.asarray(batch.multi))
-                        writers["multi"].drain()
+                    if (
+                        writers is not None
+                        and position_encoding == "delta"
+                        and hasattr(writers["place_ones"], "write_delta")
+                    ):
+                        for name in ("ones", "multi"):
+                            writers[name].write(np.asarray(getattr(batch, name)))
+                            writers[name].drain()
                         writers["place_ones"].write_delta(
-                            np.asarray(batch.place_ones),
+                            batch.place_ones,
                             batch.ones_idx,
+                            batch.ones,
                             check_sorted=check_sorted,
                         )
                         writers["place_ones"].drain()
                         writers["place_multi"].write_delta(
-                            np.asarray(batch.place_multi),
+                            batch.place_multi,
                             batch.multi_idx,
+                            batch.multi,
                             check_sorted=check_sorted,
                         )
                         writers["place_multi"].drain()
                         writers["count_multi"].write(np.asarray(batch.count_multi))
                         writers["count_multi"].drain()
+                        continue
+                    arrays = {
+                        "ones": np.asarray(batch.ones),
+                        "multi": np.asarray(batch.multi),
+                        "place_ones": encode_pattern_local_delta_parallel(
+                            batch.place_ones,
+                            batch.ones,
+                            workers,
+                            check_sorted=check_sorted,
+                            accelerated=direct_zstd,
+                        )
+                        if position_encoding == "delta"
+                        else np.asarray(batch.place_ones),
+                        "place_multi": encode_pattern_local_delta_parallel(
+                            batch.place_multi,
+                            batch.multi,
+                            workers,
+                            check_sorted=check_sorted,
+                            accelerated=direct_zstd,
+                        )
+                        if position_encoding == "delta"
+                        else np.asarray(batch.place_multi),
+                        "count_multi": np.asarray(batch.count_multi),
+                    }
+                    for name, array in arrays.items():
+                        if writers is None:
+                            datasets[name][
+                                offsets[name] : offsets[name] + array.size
+                            ] = array
+                            offsets[name] += array.size
+                        else:
+                            writers[name].write(array)
+                            writers[name].drain()
         finally:
             if writers is not None:
                 for writer in writers.values():
                     writer.close()
             if pool is not None:
                 pool.shutdown(cancel_futures=True)
+    invalidate_cache_for_path(path.fn)
 
 
 def write_patterns(
@@ -1061,7 +1076,7 @@ def write_patterns(
     check_sorted: bool = False,
     hdf5_version: str | None = None,
 ) -> None:
-    """Write pattern sources in order to one EMC binary or HDF5 dataset.
+    """Write pattern sources in order to one EMC binary, HDF5, or Parquet dataset.
 
     Parameters
     ----------
@@ -1069,7 +1084,8 @@ def write_patterns(
         In-memory arrays or file-backed sources with equal pixel counts.
     path : str, pathlib.Path, H5Path, or io.BytesIO
         ``.emc`` or ``.bin`` for binary output; ``.h5`` or
-        ``"file.h5::/group"`` for HDF5. A byte stream receives EMC binary.
+        ``"file.h5::/group"`` for HDF5; ``.parquet`` or ``.pq`` for Parquet.
+        A byte stream receives EMC binary.
     h5version : {"1", "2"}, default "2"
         HDF5 layout version. Version 1 accepts only one source.
     overwrite : bool, default False
@@ -1079,15 +1095,15 @@ def write_patterns(
         Approximate source batch size in bytes for HDF5 v2 writes. This
         is a batching target, not a cap on total memory usage.
     compression : str or int, optional
-        HDF5 compressor, such as ``"gzip"``, ``"lzf"``, or ``"zstd"``.
-        Zstd requires ``hdf5plugin`` from the ``hdf5-fast`` extra.
+        HDF5 or Parquet compressor, such as ``"gzip"``, ``"lzf"``, or ``"zstd"``.
+        Zstd requires ``hdf5plugin`` / ``emcfile-fast`` from the ``fast`` extra.
     compression_opts : optional
         Compressor-specific options. For Zstd, the compression level
         defaults to 1 when omitted.
     shuffle : bool, default False
-        Enable the HDF5 byte-shuffle filter.
+        Enable the byte-shuffle filter.
     position_encoding : {"absolute", "delta"}, default "absolute"
-        HDF5 v2 pixel-position encoding. Delta encoding restarts within
+        HDF5 v2 / Parquet pixel-position encoding. Delta encoding restarts within
         each pattern and requires sorted positions. Counts are unchanged.
     check_sorted : bool, default False
         Validate position ordering before writing delta-encoded data.
@@ -1107,7 +1123,7 @@ def write_patterns(
     Notes
     -----
     Compression, shuffle, position encoding, ordering validation, and
-    buffer size apply to HDF5 v2 output. Binary and HDF5 v1 output do not
+    buffer size apply to HDF5 v2 and Parquet output. Binary and HDF5 v1 output do not
     use these options. Compatible delta/shuffle/Zstd writes can use the
     optional accelerated writer automatically.
 
@@ -1134,6 +1150,20 @@ def write_patterns(
     if isinstance(f, Path):
         if f.suffix in [".emc", ".bin"]:
             return _write_bin(datas, f, overwrite)
+        if f.suffix.lower() in [".parquet", ".pq"]:
+            from ._parquet import write_parquet_patterns
+
+            return write_parquet_patterns(
+                datas,
+                f,
+                overwrite=overwrite,
+                buffer_size=buffer_size,
+                compression=compression,
+                compression_opts=compression_opts,
+                shuffle=shuffle,
+                position_encoding=position_encoding,
+                check_sorted=check_sorted,
+            )
     elif isinstance(f, H5Path):
         if h5version == "1":
             if len(datas) > 1:

@@ -41,7 +41,6 @@ from ._hdf5 import (
     write_obj_h5,
 )
 from ._pattern_collector import EMCPatternCollector, PatternsSOneCollector
-from ._vds import create_vds
 from ._pattern_factory import patterns
 from ._pattern_files import (
     EMCBinaryPatternFile,
@@ -49,13 +48,16 @@ from ._pattern_files import (
     FileBackedEMCPatterns,
     HDF5PatternFile,
     LegacyHDF5PatternFile,
+    ParquetPatternFile,
     PatternsSOneEMC,
     PatternsSOneFile,
     PatternsSOneH5,
     PatternsSOneList,
+    PatternsSOneParquet,
     file_patterns,
     open_patterns,
 )
+from ._vds import create_vds
 
 __all__ = [
     "EMCPatternArray",
@@ -66,6 +68,7 @@ __all__ = [
     "FileBackedEMCPatterns",
     "HDF5PatternFile",
     "LegacyHDF5PatternFile",
+    "ParquetPatternFile",
     "SparsePattern",
     "DetectorRenderer",
     "detector_renderer",
@@ -106,6 +109,7 @@ __all__ = [
     "PatternsSOneFile",
     "PatternsSOneEMC",
     "PatternsSOneH5",
+    "PatternsSOneParquet",
     "PatternsSOneCollector",
     "PatternsSOneList",
     "file_patterns",

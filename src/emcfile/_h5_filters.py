@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-
-FAST_EXTRA_MESSAGE = "HDF5 Zstd support requires the optional 'hdf5-fast' dependencies. Install with: pip install 'emcfile[hdf5-fast]'"
+FAST_EXTRA_MESSAGE = (
+    "HDF5 Zstd support requires the optional 'fast' dependencies. "
+    "Install with: pip install 'emcfile[fast]'"
+)
 
 
 def hdf5plugin() -> Any:
@@ -18,7 +20,9 @@ def hdf5plugin() -> Any:
 
 def needs_zstd_filter(dataset: Any) -> bool:
     plist = dataset.id.get_create_plist()
-    return any(plist.get_filter(index)[0] == 32015 for index in range(plist.get_nfilters()))
+    return any(
+        plist.get_filter(index)[0] == 32015 for index in range(plist.get_nfilters())
+    )
 
 
 def ensure_filter_for(dataset: Any) -> None:

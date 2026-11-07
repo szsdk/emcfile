@@ -1,0 +1,16 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "emcfile-fast"
+version = "0.2.0"
+description = "Rust SIMD+Zstd acceleration for emcfile (HDF5 and Parquet)"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.20",
+]
+
+[tool.maturin]
+module-name = "emcfile_fast"
+bindings = "pyo3"

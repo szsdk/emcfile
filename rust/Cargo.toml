@@ -1,0 +1,21 @@
+[package]
+name = "emcfile_fast"
+version = "0.2.0"
+edition = "2021"
+
+[lib]
+name = "emcfile_fast"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.30.1", features = ["extension-module"] }
+numpy = "0.30.0"
+rayon = "1.12.0"
+zstd-safe = { version = "8.2.0", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

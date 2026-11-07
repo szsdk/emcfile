@@ -192,7 +192,7 @@ rendered data.
 
 | Data | Supported formats |
 | --- | --- |
-| Photon patterns | EMC binary (`.emc`), HDF5 (`.h5`) |
+| Photon patterns | EMC binary (`.emc`), HDF5 (`.h5`), Parquet (`.parquet`, `.pq`) |
 | Detector geometry | ASCII (`.dat`), HDF5 (`.h5`) |
 | NumPy arrays | NumPy (`.npy`), raw binary, HDF5 |
 
@@ -267,7 +267,7 @@ first-use Numba compilation adds latency. Power users can set
 Python; set either reader budget to `0` to disable that reader's direct path.
 
 For a reproducible warm-cache comparison on your own file, run
-`uv run --extra hdf5-fast python benchmarks/hdf5_single_frame.py patterns.h5`,
+`uv run --extra fast python benchmarks/hdf5_single_frame.py patterns.h5`,
 then repeat with `EMCFILE_H5_INDEXED_WORKERS=0`. The benchmark reports random,
 sequential, and repeated scalar reads, single-frame slices, indexed batches,
 and full reads for both persistent and reopen-per-access readers. Opening and
@@ -324,8 +324,8 @@ uv run pre-commit run --all-files
 ```
 
 CI runs Ruff and the test suite on Python 3.10 through 3.14, with both core
-dependencies and the `hdf5-fast` extra. Tests requiring optional HDF5 codecs
-skip in the core environment. As a library, this repository does not commit
+dependencies and the `fast` extra. Tests requiring optional HDF5 codecs or
+Parquet support skip in the core environment. As a library, this repository does not commit
 `uv.lock`; CI resolves dependencies from `pyproject.toml` on each clean checkout.
 The lockfile generated locally by uv remains ignored. CI uploads JUnit and
 coverage reports for each test job.
@@ -334,7 +334,7 @@ one pull request.
 To run the complete suite locally:
 
 ```bash
-uv sync --group dev --extra hdf5-fast
+uv sync --group dev --extra fast
 uv run --no-sync pytest tests --cov=emcfile --cov-report=term-missing
 ```
 
@@ -355,10 +355,11 @@ Validate artifact uploads on GitHub Actions until `act` supports this API.
 # Installation
 
 The base package supports raw EMC plus uncompressed, gzip, and LZF HDF5.
-For standard-HDF5 Zstd and the automatic HDF5 fast paths, install:
+For standard-HDF5 Zstd, Parquet (`.parquet`/`.pq`), and the Rust-accelerated
+fast paths, install:
 
 ```bash
-pip install 'emcfile[hdf5-fast]'
+pip install 'emcfile[fast]'
 ```
 
 Zstd uses the portable `hdf5plugin` filter; direct read/write acceleration is
