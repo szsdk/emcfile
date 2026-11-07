@@ -29,20 +29,14 @@ parquet-pyo3 = [
 ]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
 
-[tool.hatch.build.targets.wheel.hooks.custom]
-path = "hatch_build.py"
-
-[tool.hatch.build.targets.sdist]
-include = [
-    "/src",
-    "/rust",
-    "/hatch_build.py",
-    "/readme.md",
-    "/LICENSE.txt",
-]
+[tool.maturin]
+python-source = "src"
+module-name = "emcfile._parquet_rs"
+manifest-path = "rust/Cargo.toml"
+rustflags = ["-C", "target-cpu=native"]
 
 [dependency-groups]
 dev = [

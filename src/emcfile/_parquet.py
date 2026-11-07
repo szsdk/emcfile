@@ -24,33 +24,6 @@ def _load_parquet_rs() -> Any:
 
         return mod
     except ImportError:
-        import shutil
-        import subprocess
-
-        pkg_dir = Path(__file__).resolve().parent
-        rust_manifest = pkg_dir.parent.parent / "rust" / "Cargo.toml"
-        if rust_manifest.is_file() and shutil.which("cargo") is not None:
-            env = os.environ.copy()
-            link_arg = (
-                "-Wl,-undefined,dynamic_lookup"
-                if sys.platform == "darwin"
-                else "-Wl,--unresolved-symbols=ignore-in-object-files"
-            )
-            env.setdefault("RUSTFLAGS", f"-C target-cpu=native -C link-arg={link_arg}")
-            subprocess.run(
-                ["cargo", "build", "--release", "--manifest-path", str(rust_manifest)],
-                env=env,
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            ext = ".dylib" if sys.platform == "darwin" else ".so"
-            built = rust_manifest.parent / "target" / "release" / f"lib_parquet_rs{ext}"
-            if built.is_file():
-                shutil.copy2(built, pkg_dir / "_parquet_rs.so")
-                from . import _parquet_rs as mod  # type: ignore[attr-defined]
-
-                return mod
         return None
 
 
