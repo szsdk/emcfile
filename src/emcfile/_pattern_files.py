@@ -1031,6 +1031,19 @@ class PatternsSOneList(PatternsSOneFile):
                     return grouped
                 return grouped[np.argsort(source_order)]
 
+    def sparse_pattern(self, index: int) -> SPARSE_PATTERN:
+        pidx = int(index)
+        if pidx < 0:
+            pidx += self.num_data
+        if pidx < 0 or pidx >= self.num_data:
+            raise IndexError(f"{index}")
+        lidx = int(np.digitize(pidx, self._indptr[1:]))
+        local_idx = int(pidx - self._indptr[lidx])
+        source = self.pattern_list[lidx]
+        if hasattr(source, "sparse_pattern"):
+            return cast(SPARSE_PATTERN, cast(Any, source).sparse_pattern(local_idx))
+        return cast(PatternsSOne, source[local_idx : local_idx + 1]).sparse_pattern(0)
+
     def write(
         self,
         path: PATH_TYPE | io.BytesIO,

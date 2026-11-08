@@ -263,7 +263,7 @@ class PatternsSOne:
         Parameters
         ----------
         idx : int
-            Zero-based pattern index; use ``0 <= idx < num_patterns``.
+            Zero-based pattern index; negative indices count from the end.
 
         Returns
         -------
@@ -271,11 +271,15 @@ class PatternsSOne:
             Pixel count and views into this array's event buffers. Modifying
             those views modifies the original data.
         """
+        orig_idx = int(idx)
+        norm_idx = orig_idx + self.num_data if orig_idx < 0 else orig_idx
+        if norm_idx < 0 or norm_idx >= self.num_data:
+            raise IndexError(f"{orig_idx}")
         return SPARSE_PATTERN(
             self.num_pix,
-            self.place_ones[self.ones_idx[idx] : self.ones_idx[idx + 1]],
-            self.place_multi[self.multi_idx[idx] : self.multi_idx[idx + 1]],
-            self.count_multi[self.multi_idx[idx] : self.multi_idx[idx + 1]],
+            self.place_ones[self.ones_idx[norm_idx] : self.ones_idx[norm_idx + 1]],
+            self.place_multi[self.multi_idx[norm_idx] : self.multi_idx[norm_idx + 1]],
+            self.count_multi[self.multi_idx[norm_idx] : self.multi_idx[norm_idx + 1]],
         )
 
     @property

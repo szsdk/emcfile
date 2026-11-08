@@ -42,6 +42,7 @@ def _from_dense_array(arr: npt.NDArray[np.integer[T1]]) -> PatternsSOne:
 
 def _from_coo_array(coo: coo_matrix | coo_array) -> PatternsSOne:
     coo = coo.copy()
+    coo.sum_duplicates()
     idx = coo.data == 1
     c = coo_matrix((np.ones(idx.sum(), "i4"), (coo.row[idx], coo.col[idx])), coo.shape)
     coo.data[idx] = 0
@@ -51,11 +52,11 @@ def _from_coo_array(coo: coo_matrix | coo_array) -> PatternsSOne:
     assert coo.shape is not None
     return PatternsSOne(
         int(cast(int, coo.shape[1])),
-        np.diff(c_csr.indptr),
-        np.diff(coo_csr.indptr),
-        cast(np.ndarray, c_csr.indices),
-        cast(np.ndarray, coo_csr.indices),
-        cast(np.ndarray, coo_csr.data),
+        np.diff(c_csr.indptr).astype(np.uint32),
+        np.diff(coo_csr.indptr).astype(np.uint32),
+        cast(np.ndarray, c_csr.indices).astype(np.uint32),
+        cast(np.ndarray, coo_csr.indices).astype(np.uint32),
+        cast(np.ndarray, coo_csr.data).astype(np.int32),
     )
 
 

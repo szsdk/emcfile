@@ -172,6 +172,18 @@ def test_patterns(source, expected):
     assert patterns == expected
 
 
+def test_patterns_from_coo_sums_duplicate_coordinates():
+    rows = np.array([0, 0, 0, 1, 1, 1], dtype=np.int32)
+    cols = np.array([0, 0, 2, 1, 1, 1], dtype=np.int32)
+    data = np.array([1, 1, 1, 1, 1, 1], dtype=np.int32)
+    coo = coo_array((data, (rows, cols)), shape=(2, 4))
+    expected = ef.patterns(np.array([[2, 0, 1, 0], [0, 3, 0, 0]], dtype=np.int32))
+    actual = ef.patterns(coo)
+    assert actual.check()
+    assert actual == expected
+    np.testing.assert_array_equal(actual.todense(), expected.todense())
+
+
 def test_shape(large_patterns):
     assert len(large_patterns) == large_patterns.num_patterns
     assert large_patterns.shape == (
@@ -630,6 +642,12 @@ def test_pattern_file_getitem(path_fixture, request):
     np.testing.assert_equal(patterns[3], expected[3])
     np.testing.assert_equal(patterns[-1], expected[-1])
     assert patterns[-5:-1] == expected[-5:-1]
+    assert patterns[::-1] == expected[::-1]
+    assert patterns[: expected.num_patterns + 99] == expected
+    assert (
+        patterns[expected.num_patterns + 10 : expected.num_patterns + 99]
+        == expected[0:0]
+    )
     assert patterns[5:2] == expected[5:2]
     assert patterns[0:0:2] == expected[0:0:2]
     assert patterns[::2] == expected[::2]
@@ -657,6 +675,11 @@ def test_pattern_file_sparse_pattern(path_fixture, request):
     patterns = ef.open_patterns(path)
     sparse_patterns = [patterns.sparse_pattern(i) for i in range(10)]
     assert expected == ef.patterns(sparse_patterns)
+    assert ef.patterns([patterns.sparse_pattern(-1)]) == ef.patterns(path)[-1:]
+    with pytest.raises(IndexError):
+        patterns.sparse_pattern(patterns.num_patterns)
+    with pytest.raises(IndexError):
+        patterns.sparse_pattern(-patterns.num_patterns - 1)
 
 
 @pytest.mark.parametrize("path_fixture", ["emc_path", "hdf5_path"])
