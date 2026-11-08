@@ -69,31 +69,6 @@ fn push_zigzag(out: &mut Vec<u8>, n: i64) {
 }
 
 #[inline]
-fn read_zigzag(buf: &[u8], mut pos: usize) -> (i64, usize) {
-    let b0 = buf[pos] as u64;
-    if b0 < 0x80 {
-        return (((b0 >> 1) as i64) ^ -((b0 & 1) as i64), pos + 1);
-    }
-    let b1 = buf[pos + 1] as u64;
-    if b1 < 0x80 {
-        let n = (b0 & 0x7F) | (b1 << 7);
-        return (((n >> 1) as i64) ^ -((n & 1) as i64), pos + 2);
-    }
-    let mut n = (b0 & 0x7F) | ((b1 & 0x7F) << 7);
-    let mut shift = 14u32;
-    pos += 2;
-    loop {
-        let b = buf[pos] as u64;
-        pos += 1;
-        n |= (b & 0x7F) << shift;
-        if b < 0x80 {
-            return (((n >> 1) as i64) ^ -((n & 1) as i64), pos);
-        }
-        shift += 7;
-    }
-}
-
-#[inline]
 fn try_read_uvarint(buf: &[u8], mut pos: usize) -> Option<(u64, usize)> {
     let n_len = buf.len();
     if pos >= n_len {
@@ -442,9 +417,18 @@ fn count_col_pages_inner(
     let mut sp_start = 0usize;
 
     while page_ps < rg_pe && pos < col_end {
-        let (u_len_i, p1) = read_zigzag(mm_u8, pos + 3);
-        let (c_len_i, p2) = read_zigzag(mm_u8, p1 + 1);
-        let (page_nr_i, p3) = read_zigzag(mm_u8, p2 + 2);
+        let Some((u_len_i, p1)) = try_read_zigzag(mm_u8, pos.saturating_add(3)) else {
+            return -1;
+        };
+        let Some((c_len_i, p2)) = try_read_zigzag(mm_u8, p1.saturating_add(1)) else {
+            return -1;
+        };
+        let Some((page_nr_i, p3)) = try_read_zigzag(mm_u8, p2.saturating_add(2)) else {
+            return -1;
+        };
+        if u_len_i < 0 || c_len_i < 0 || page_nr_i <= 0 {
+            return -1;
+        }
         let u_len = u_len_i as usize;
         let c_len = c_len_i as usize;
         let page_nr = page_nr_i as usize;
@@ -493,11 +477,14 @@ fn count_col_pages_inner(
                 } else {
                     let c_start = pos + hdr_len;
                     let page_slice: &[u8] = if !is_zstd {
-                        if c_len != u_len || c_start + u_len > mm_u8.len() {
+                        if c_len != u_len || c_start.saturating_add(u_len) > mm_u8.len() {
                             return -1;
                         }
                         &mm_u8[c_start..c_start + u_len]
                     } else {
+                        if c_start.saturating_add(c_len) > mm_u8.len() {
+                            return -1;
+                        }
                         if page_buf.len() < u_len {
                             page_buf.resize(u_len.max(256 * 1024), 0);
                         }
@@ -510,11 +497,17 @@ fn count_col_pages_inner(
                     };
                     let mut b_off = 0usize;
                     for p_idx in page_ps..page_pe {
+                        if b_off.saturating_add(4) > page_slice.len() {
+                            return -1;
+                        }
                         let bl =
                             u32::from_le_bytes(page_slice[b_off..b_off + 4].try_into().unwrap())
                                 as usize;
                         let k = (bl / 4) as i64;
-                        b_off += 4 + bl;
+                        b_off = b_off.saturating_add(4).saturating_add(bl);
+                        if b_off > page_slice.len() {
+                            return -1;
+                        }
                         let mut s_i = sp_start;
                         while s_i < n_spans && (p_firsts[s_i] as usize) <= p_idx {
                             let sp_f = p_firsts[s_i] as usize;
@@ -586,9 +579,18 @@ fn decode_col_pages_inner(
     let mut sp_start = 0usize;
 
     while page_ps < rg_pe && pos < col_end {
-        let (u_len_i, p1) = read_zigzag(mm_u8, pos + 3);
-        let (c_len_i, p2) = read_zigzag(mm_u8, p1 + 1);
-        let (page_nr_i, p3) = read_zigzag(mm_u8, p2 + 2);
+        let Some((u_len_i, p1)) = try_read_zigzag(mm_u8, pos.saturating_add(3)) else {
+            return -1;
+        };
+        let Some((c_len_i, p2)) = try_read_zigzag(mm_u8, p1.saturating_add(1)) else {
+            return -1;
+        };
+        let Some((page_nr_i, p3)) = try_read_zigzag(mm_u8, p2.saturating_add(2)) else {
+            return -1;
+        };
+        if u_len_i < 0 || c_len_i < 0 || page_nr_i <= 0 {
+            return -1;
+        }
         let u_len = u_len_i as usize;
         let c_len = c_len_i as usize;
         let page_nr = page_nr_i as usize;
@@ -636,11 +638,14 @@ fn decode_col_pages_inner(
                 } else {
                     let c_start = pos + hdr_len;
                     let page_slice: &[u8] = if !is_zstd {
-                        if c_len != u_len || c_start + u_len > mm_u8.len() {
+                        if c_len != u_len || c_start.saturating_add(u_len) > mm_u8.len() {
                             return -1;
                         }
                         &mm_u8[c_start..c_start + u_len]
                     } else {
+                        if c_start.saturating_add(c_len) > mm_u8.len() {
+                            return -1;
+                        }
                         if page_buf.len() < u_len {
                             page_buf.resize(u_len.max(256 * 1024), 0);
                         }
@@ -653,12 +658,21 @@ fn decode_col_pages_inner(
                     };
                     let mut b_off = 0usize;
                     for p_idx in page_ps..page_pe {
+                        if b_off.saturating_add(4) > page_slice.len() {
+                            return -1;
+                        }
                         let bl =
                             u32::from_le_bytes(page_slice[b_off..b_off + 4].try_into().unwrap())
                                 as usize;
+                        if bl % 4 != 0 {
+                            return -1;
+                        }
                         let k = bl / 4;
                         let b_s = b_off + 4;
-                        b_off = b_s + bl;
+                        b_off = b_s.saturating_add(bl);
+                        if b_off > page_slice.len() {
+                            return -1;
+                        }
 
                         let mut s_i = sp_start;
                         while s_i < n_spans && (p_firsts[s_i] as usize) <= p_idx {
@@ -670,6 +684,9 @@ fn decode_col_pages_inner(
                                 }
                                 if k > 0 {
                                     let out_idx = cur_dst[s_i];
+                                    if out_idx.saturating_add(k) > out_u32.len() {
+                                        return -1;
+                                    }
                                     decode_pattern_u32(
                                         page_slice,
                                         b_s,
@@ -717,9 +734,18 @@ fn decode_single_col_frame(
     let mut page_ps = rg_ps;
 
     while page_ps < rg_pe && pos < col_end {
-        let (u_len_i, p1) = read_zigzag(mm_u8, pos + 3);
-        let (c_len_i, p2) = read_zigzag(mm_u8, p1 + 1);
-        let (page_nr_i, p3) = read_zigzag(mm_u8, p2 + 2);
+        let Some((u_len_i, p1)) = try_read_zigzag(mm_u8, pos.saturating_add(3)) else {
+            return Err(-1);
+        };
+        let Some((c_len_i, p2)) = try_read_zigzag(mm_u8, p1.saturating_add(1)) else {
+            return Err(-1);
+        };
+        let Some((page_nr_i, p3)) = try_read_zigzag(mm_u8, p2.saturating_add(2)) else {
+            return Err(-1);
+        };
+        if u_len_i < 0 || c_len_i < 0 || page_nr_i <= 0 {
+            return Err(-1);
+        }
         let u_len = u_len_i as usize;
         let c_len = c_len_i as usize;
         let page_nr = page_nr_i as usize;
@@ -733,11 +759,14 @@ fn decode_single_col_frame(
             }
             let c_start = pos + hdr_len;
             let page_slice: &[u8] = if !is_zstd {
-                if c_len != u_len || c_start + u_len > mm_u8.len() {
+                if c_len != u_len || c_start.saturating_add(u_len) > mm_u8.len() {
                     return Err(-1);
                 }
                 &mm_u8[c_start..c_start + u_len]
             } else {
+                if c_start.saturating_add(c_len) > mm_u8.len() {
+                    return Err(-1);
+                }
                 if page_buf.len() < u_len {
                     page_buf.resize(u_len.max(256 * 1024), 0);
                 }
@@ -748,11 +777,20 @@ fn decode_single_col_frame(
             };
             let mut b_off = 0usize;
             for _ in page_ps..frame {
+                if b_off.saturating_add(4) > page_slice.len() {
+                    return Err(-1);
+                }
                 let bl =
                     u32::from_le_bytes(page_slice[b_off..b_off + 4].try_into().unwrap()) as usize;
-                b_off += 4 + bl;
+                b_off = b_off.saturating_add(4).saturating_add(bl);
+            }
+            if b_off.saturating_add(4) > page_slice.len() {
+                return Err(-1);
             }
             let bl = u32::from_le_bytes(page_slice[b_off..b_off + 4].try_into().unwrap()) as usize;
+            if bl % 4 != 0 || b_off.saturating_add(4).saturating_add(bl) > page_slice.len() {
+                return Err(-1);
+            }
             let k = bl / 4;
             if k == 0 {
                 return Ok(Vec::new());
@@ -1102,7 +1140,9 @@ pub fn write_batch_zstd<'py>(
                             let slot = rg % ring_size;
                             let out_vec = unsafe { &*(bufs_addr as *const Vec<u8>).add(slot) };
                             if !write_all_fd(fd, &out_vec[..len]) {
+                                let _g = pipe_mtx.lock().unwrap();
                                 abort_err.store(-4, Ordering::Relaxed);
+                                drop(_g);
                                 cv_worker.notify_all();
                                 return;
                             }
@@ -1159,7 +1199,9 @@ pub fn write_batch_zstd<'py>(
                                 meta_rg,
                             );
                             if res < 0 {
+                                let _g = pipe_mtx.lock().unwrap();
                                 abort_err.store(res, Ordering::Relaxed);
+                                drop(_g);
                                 cv_writer.notify_all();
                                 cv_worker.notify_all();
                                 return;
@@ -1345,14 +1387,26 @@ fn read_col_counts_rg(
     let mut page_ps = rg_ps;
 
     while page_ps < rg_pe && pos < col_end {
-        let (u_len_i, p1) = read_zigzag(mm_u8, pos + 3);
-        let (c_len_i, p2) = read_zigzag(mm_u8, p1 + 1);
-        let (page_nr_i, p3) = read_zigzag(mm_u8, p2 + 2);
+        let Some((u_len_i, p1)) = try_read_zigzag(mm_u8, pos + 3) else {
+            return -1;
+        };
+        let Some((c_len_i, p2)) = try_read_zigzag(mm_u8, p1 + 1) else {
+            return -1;
+        };
+        let Some((page_nr_i, p3)) = try_read_zigzag(mm_u8, p2 + 2) else {
+            return -1;
+        };
+        if u_len_i < 0 || c_len_i < 0 || page_nr_i <= 0 {
+            return -1;
+        }
         let u_len = u_len_i as usize;
         let c_len = c_len_i as usize;
         let page_nr = page_nr_i as usize;
         let hdr_len = (p3 + 10) - pos;
         let page_pe = page_ps + page_nr;
+        if page_pe > rg_pe {
+            return -1;
+        }
         let page_elems = (u_len / 4).saturating_sub(page_nr);
 
         if page_elems == 0 {
@@ -1367,6 +1421,9 @@ fn read_col_counts_rg(
                 }
                 &mm_u8[c_start..c_start + u_len]
             } else {
+                if c_start + c_len > mm_u8.len() {
+                    return -1;
+                }
                 if page_buf.len() < u_len {
                     page_buf.resize(u_len.max(256 * 1024), 0);
                 }
@@ -1377,6 +1434,9 @@ fn read_col_counts_rg(
             };
             let mut b_off = 0usize;
             for p_idx in page_ps..page_pe {
+                if b_off + 4 > page_slice.len() {
+                    return -1;
+                }
                 let bl =
                     u32::from_le_bytes(page_slice[b_off..b_off + 4].try_into().unwrap()) as usize;
                 out_counts[p_idx - rg_ps] = (bl / 4) as u32;

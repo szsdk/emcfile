@@ -76,7 +76,9 @@ class H5AccelEntry:
         self.ones_idx: npt.NDArray[np.uint64] | None = None
         self.multi_idx: npt.NDArray[np.uint64] | None = None
         self.eligible: bool | None = None
-        self.validated_offsets: tuple[int, int] | None = None
+        self.validated_offsets: (
+            tuple[npt.NDArray[np.uint64], npt.NDArray[np.uint64]] | None
+        ) = None
         self.mm: mmap.mmap | None = None
         self.tables: (
             tuple[npt.NDArray[np.int64], npt.NDArray[np.int64], npt.NDArray[np.int64]]

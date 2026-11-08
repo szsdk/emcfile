@@ -161,22 +161,27 @@ def test_parquet_indexed_and_full_scan_public_api(
         assert source[:] == expected
         for selection in (
             np.array([27, 2, 2, 0, 7, 1]),
+            np.array([-1, 0, -3, 2]),
             np.array([], dtype=int),
             np.arange(1, 28, 3),
             slice(2, 23),
+            slice(-6, -1),
+            slice(5, 2),
+            slice(0, 0, 2),
             slice(0, 28, 3),
             np.arange(28) % 3 == 0,
             (slice(2, 15), slice(4, 20)),
         ):
             assert source[selection] == expected[selection]
-        for frame in (0, 3, 15, 27):
+        for frame in (0, 3, 15, 27, -1, -5):
             np.testing.assert_array_equal(source[frame], expected[frame])
-            actual_sparse = source.sparse_pattern(frame)
-            expected_sparse = expected.sparse_pattern(frame)
-            for name in ("place_ones", "place_multi", "count_multi"):
-                np.testing.assert_array_equal(
-                    getattr(actual_sparse, name), getattr(expected_sparse, name)
-                )
+            if frame >= 0:
+                actual_sparse = source.sparse_pattern(frame)
+                expected_sparse = expected.sparse_pattern(frame)
+                for name in ("place_ones", "place_multi", "count_multi"):
+                    np.testing.assert_array_equal(
+                        getattr(actual_sparse, name), getattr(expected_sparse, name)
+                    )
     finally:
         if persistent:
             source.close()

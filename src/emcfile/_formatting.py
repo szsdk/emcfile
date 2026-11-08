@@ -32,7 +32,7 @@ def pretty_size(num_bytes: float) -> str:
     '500.0 B'
     """
     unit_index = 0
-    while num_bytes >= 1024:
+    while num_bytes >= 1024 and unit_index < len(_units) - 1:
         num_bytes /= 1024
         unit_index += 1
     if unit_index == 0:

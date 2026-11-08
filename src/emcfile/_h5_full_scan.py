@@ -129,11 +129,12 @@ def validate_offsets(
     sizes: tuple[int, int, int],
     entry: H5AccelEntry | None = None,
 ) -> None:
-    """Validate pattern offset arrays, caching validation per ``(id(ones), id(multi))``."""
-    pair_ids = (id(ones_offsets), id(multi_offsets))
+    """Validate pattern offset arrays, caching validation per object identity."""
     if (
         entry is not None
-        and entry.validated_offsets == pair_ids
+        and entry.validated_offsets is not None
+        and entry.validated_offsets[0] is ones_offsets
+        and entry.validated_offsets[1] is multi_offsets
         and ones_offsets.ndim == 1
         and multi_offsets.ndim == 1
         and ones_offsets.size > 0
@@ -157,7 +158,7 @@ def validate_offsets(
         ):
             raise ValueError("Pattern counts do not match HDF5 v2 payload size")
     if entry is not None:
-        entry.validated_offsets = pair_ids
+        entry.validated_offsets = (ones_offsets, multi_offsets)
 
 
 def _read(

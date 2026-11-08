@@ -12,7 +12,7 @@ def effective_workers(requested: int, *, allow_zero: bool = False) -> int:
     if requested == 0:
         return 0
     try:
-        available = len(os.sched_getaffinity(0))
+        available = len(getattr(os, "sched_getaffinity")(0))
     except (AttributeError, OSError):
         available = os.cpu_count() or 1
     return min(requested, max(1, available))

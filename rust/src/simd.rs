@@ -450,7 +450,7 @@ pub fn cumsum_u32_inplace(slice: &mut [u32]) {
             running = _mm_shuffle_epi32(v0, 0xFF);
 
             v1 = _mm_add_epi32(v1, _mm_slli_si128(v1, 4));
-            v1 = _mm_add_epi32(v1, _mm_slli_si128(u1_or(v1), 8));
+            v1 = _mm_add_epi32(v1, _mm_slli_si128(v1, 8));
             v1 = _mm_add_epi32(v1, running);
             _mm_storeu_si128(ptr.add(i + 4) as *mut __m128i, v1);
             running = _mm_shuffle_epi32(v1, 0xFF);
@@ -476,12 +476,6 @@ pub fn cumsum_u32_inplace(slice: &mut [u32]) {
             slice[i] = acc;
         }
     }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
-unsafe fn u1_or(v: __m128i) -> __m128i {
-    v
 }
 
 #[inline]

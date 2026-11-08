@@ -421,6 +421,12 @@ def test_concatenate(small_patterns, large_patterns):
     assert large_patterns[:50] == concatenated
     concatenated = np.concatenate(pattern_arrays, casting="destroy")
     assert large_patterns[:50] == concatenated
+    assert concatenated.check()
+    np.testing.assert_array_equal(concatenated[0], large_patterns[0])
+    assert concatenated[10:25] == large_patterns[10:25]
+    assert ef.patterns([concatenated.sparse_pattern(15)]) == ef.patterns(
+        [large_patterns.sparse_pattern(15)]
+    )
 
     pattern_arrays = [ef.patterns(np.full((10000, 1000), 2)) for _ in range(2)]
     process = Process()
@@ -622,7 +628,13 @@ def test_pattern_file_getitem(path_fixture, request):
     patterns = ef.open_patterns(path)
     assert patterns.sparsity() == expected.sparsity()
     np.testing.assert_equal(patterns[3], expected[3])
+    np.testing.assert_equal(patterns[-1], expected[-1])
+    assert patterns[-5:-1] == expected[-5:-1]
+    assert patterns[5:2] == expected[5:2]
+    assert patterns[0:0:2] == expected[0:0:2]
     assert patterns[::2] == expected[::2]
+    neg_indices = np.array([-1, 0, -3, 2])
+    assert patterns[neg_indices] == expected[neg_indices]
     with temporary_random_seed(12):
         mask = np.random.rand(expected.num_patterns) > 0.5
     assert patterns[mask] == expected[mask]
@@ -630,6 +642,12 @@ def test_pattern_file_getitem(path_fixture, request):
     assert patterns[indices] == expected[indices]
     empty_selection = patterns[np.array([], dtype=np.int32)]
     assert empty_selection.num_patterns == 0
+    with pytest.raises(IndexError):
+        patterns[expected.num_patterns]
+    with pytest.raises(IndexError):
+        patterns[-expected.num_patterns - 1]
+    with pytest.raises(IndexError):
+        patterns[np.array([expected.num_patterns])]
 
 
 @pytest.mark.parametrize("path_fixture", ["emc_path", "hdf5_path", "legacy_hdf5_path"])
@@ -659,6 +677,40 @@ def test_index(large_patterns, large_dense):
     selected.sort_indices()
     assert selected.has_sorted_indices() is True
     assert np.all(np.asarray(selected.todense()) == large_dense[:, indices])
+
+
+def test_has_sorted_indices_with_empty_leading_and_trailing_patterns():
+    leading_empty_unsorted = ef.PatternsSOne(
+        8,
+        np.array([0, 2], dtype=np.uint32),
+        np.array([0, 0], dtype=np.uint32),
+        np.array([5, 2], dtype=np.uint32),
+        np.array([], dtype=np.uint32),
+        np.array([], dtype=np.int32),
+    )
+    assert leading_empty_unsorted.has_sorted_indices() is False
+    leading_empty_unsorted.sort_indices()
+    assert leading_empty_unsorted.has_sorted_indices() is True
+
+    trailing_empty_sorted = ef.PatternsSOne(
+        8,
+        np.array([2, 0], dtype=np.uint32),
+        np.array([0, 0], dtype=np.uint32),
+        np.array([2, 5], dtype=np.uint32),
+        np.array([], dtype=np.uint32),
+        np.array([], dtype=np.int32),
+    )
+    assert trailing_empty_sorted.has_sorted_indices() is True
+
+    trailing_empty_unsorted = ef.PatternsSOne(
+        8,
+        np.array([2, 0], dtype=np.uint32),
+        np.array([0, 0], dtype=np.uint32),
+        np.array([5, 2], dtype=np.uint32),
+        np.array([], dtype=np.uint32),
+        np.array([], dtype=np.int32),
+    )
+    assert trailing_empty_unsorted.has_sorted_indices() is False
 
 
 @pytest.mark.parametrize("n", range(3))

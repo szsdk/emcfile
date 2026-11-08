@@ -236,13 +236,13 @@ class PatternsSOne:
             raise ValueError(
                 f"The `multi`{len(self.multi)} has different length with `ones`({self.num_data})"
             )
-        ones_total = self.ones.sum()
+        ones_total = int(self.ones.sum(dtype=np.uint64))
         if ones_total != len(self.place_ones):
             raise ValueError(
                 f"The expected length of `place_ones`({len(self.place_ones)}) should be {ones_total}."
             )
 
-        multi_total = self.multi.sum()
+        multi_total = int(self.multi.sum(dtype=np.uint64))
         if multi_total != len(self.place_multi):
             raise ValueError(
                 f"The expected length of `place_multi`({len(self.place_multi)}) should be {multi_total}."
@@ -250,7 +250,7 @@ class PatternsSOne:
 
         if multi_total != len(self.count_multi):
             raise ValueError(
-                f"The expected length of `place_multi`({len(self.count_multi)}) should be {multi_total}."
+                f"The expected length of `count_multi`({len(self.count_multi)}) should be {multi_total}."
             )
         return True
 
@@ -339,14 +339,17 @@ class PatternsSOne:
             return False
         if self.num_pix != d.num_pix:
             return False
-        for i in PatternsSOne.ATTRS:
+        for i in PatternsSOne.ATTRS + ["ones_idx", "multi_idx"]:
             if cast(bool, np.any(getattr(self, i) != getattr(d, i))):
                 return False
         return True
 
     def _get_pattern(self, idx: int) -> npt.NDArray[np.int32]:
+        orig_idx = idx
+        if idx < 0:
+            idx += self.num_data
         if idx >= self.num_data or idx < 0:
-            raise IndexError(f"{idx}")
+            raise IndexError(f"{orig_idx}")
         pattern = np.zeros(self.num_pix, "int32")
         pattern[self.place_ones[self.ones_idx[idx] : self.ones_idx[idx + 1]]] = 1
         r = slice(*self.multi_idx[idx : idx + 2])
@@ -690,7 +693,7 @@ class PatternsSOne:
             and int(offsets[-1]) <= limit
         ):
             if place.dtype == np.uint32:
-                indices = place.view(np.int32)
+                indices: np.ndarray = place.view(np.int32)
             elif place.dtype == np.int32:
                 indices = place
             else:
@@ -766,13 +769,18 @@ class PatternsSOne:
         One-photon and multi-photon positions are checked separately for
         each pattern; duplicate positions within a stream are not sorted.
         """
-        a = np.subtract(self.place_multi[1:], self.place_multi[:-1], dtype=int)
-        a[self.multi_idx[1:-1] - 1] = 1
-        if np.any(a <= 0):
-            return False
-        a = np.subtract(self.place_ones[1:], self.place_ones[:-1], dtype=int)
-        a[self.ones_idx[1:-1] - 1] = 1
-        return not np.any(a <= 0)
+        for values, offsets in (
+            (self.place_multi, self.multi_idx),
+            (self.place_ones, self.ones_idx),
+        ):
+            if values.size > 1:
+                not_increasing = values[1:] <= values[:-1]
+                starts = offsets[np.flatnonzero(np.diff(offsets))]
+                valid_starts = starts[(starts > 0) & (starts < values.size)]
+                not_increasing[valid_starts.astype(np.intp) - 1] = False
+                if np.any(not_increasing):
+                    return False
+        return True
 
     @deprecated("Use has_sorted_indices() instead.")
     def check_indices_ordered(self) -> bool:
@@ -1257,6 +1265,7 @@ def _concatenate_emc_pattern_arrays(
                     a = getattr(ans, g)
                     a.resize(a.shape[0] + b.shape[0], refcheck=False)
                     a[a.shape[0] - b.shape[0] :] = b[:]
+            ans._update_offsets()
             return ans
         raise ValueError(f"Unsupported casting mode: {casting}")
     elif axis == 1:

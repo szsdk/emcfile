@@ -50,6 +50,53 @@ I4 = np.dtype("i4").itemsize
 INDEX_ARRAY = npt.NDArray[np.integer[Any]]
 
 
+def _normalize_row_index_ranges(
+    index: int | np.integer[Any] | TRANGE, num_data: int
+) -> tuple[bool, INDEX_ARRAY]:
+    match index:
+        case int() | np.integer():
+            idx = int(index)
+            if idx < 0:
+                idx += num_data
+            if idx < 0 or idx >= num_data:
+                raise IndexError("Pattern index out of range")
+            return True, np.array([[idx, idx + 1]], dtype=np.int64)
+        case np.ndarray() if np.issubdtype(index.dtype, bool):
+            if index.ndim != 1 or index.size != num_data:
+                raise IndexError("Boolean row mask must match the number of patterns")
+            return False, contiguous_ranges(np.where(index)[0])
+        case np.ndarray() if np.issubdtype(index.dtype, np.integer):
+            if index.ndim != 1:
+                raise IndexError("row indices must be one-dimensional")
+            if index.size == 0:
+                return False, np.empty((0, 2), dtype=np.uint64)
+            if np.any(index >= num_data) or (
+                np.issubdtype(index.dtype, np.signedinteger)
+                and np.any(index < -num_data)
+            ):
+                raise IndexError("row index out of range")
+            ids = index.astype(np.intp, copy=True)
+            ids[ids < 0] += num_data
+            return False, contiguous_ranges(ids)
+        case slice():
+            start, stop, step = index.indices(num_data)
+            if step == 1:
+                return (
+                    False,
+                    np.array([(start, stop)], dtype=np.int64)
+                    if stop > start
+                    else np.empty((0, 2), dtype=np.int64),
+                )
+            return (
+                False,
+                np.array(
+                    [(i, i + 1) for i in range(start, stop, step)], dtype=np.int64
+                ).reshape(-1, 2),
+            )
+        case _:
+            raise IndexError(f"Unsupported pattern index: {type(index).__name__}")
+
+
 def read_indexed_array(
     file_obj: BufferedReader | BytesIO,
     index_ranges: INDEX_ARRAY,
@@ -251,41 +298,27 @@ class PatternsSOneFile:
         self,
         index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
     ) -> npt.NDArray[np.int32] | PatternsSOne:
-        match index:
-            case (ax0, ax1) if isinstance(index, tuple):
-                return self[ax0][:, ax1]
-            case int() | np.integer():
-                index_ranges = np.array([[index, index + 1]])
-            case np.ndarray() if np.issubdtype(index.dtype, bool):
-                index_ranges = contiguous_ranges(np.where(index)[0])
-            case np.ndarray():
-                index_ranges = contiguous_ranges(index)
-            case slice():
-                start = 0 if index.start is None else index.start
-                stop = self.num_data if index.stop is None else index.stop
-                if index.step is None or index.step == 1:
-                    index_ranges = np.array([(start, stop)])
-                else:
-                    index_ranges = np.array(
-                        [(i, i + 1) for i in range(start, stop, index.step)]
-                    )
+        if isinstance(index, tuple) and len(index) == 2:
+            ax0, ax1 = index
+            return self[ax0][:, ax1]
 
+        is_scalar, index_ranges = _normalize_row_index_ranges(
+            cast(int | np.integer[Any] | TRANGE, index), self.num_data
+        )
         place_ones, place_multi, count_multi = self._read_patterns(index_ranges)
-        match index:
-            case int() | np.integer():
-                ans = np.zeros(self.num_pix, np.int32)
-                ans[place_ones] = 1
-                ans[place_multi] = count_multi
-                return ans
-            case _:
-                return PatternsSOne(
-                    self.num_pix,
-                    self.ones[index],
-                    self.multi[index],
-                    place_ones,
-                    place_multi,
-                    count_multi,
-                )
+        if is_scalar:
+            ans = np.zeros(self.num_pix, np.int32)
+            ans[place_ones] = 1
+            ans[place_multi] = count_multi
+            return ans
+        return PatternsSOne(
+            self.num_pix,
+            self.ones[index],
+            self.multi[index],
+            place_ones,
+            place_multi,
+            count_multi,
+        )
 
     def sparse_pattern(self, index: int) -> SPARSE_PATTERN:
         """Read one pattern as sparse event arrays with absolute positions.
@@ -1099,38 +1132,19 @@ class PatternsSOneParquet(PatternsSOneFile):
     ) -> npt.NDArray[np.int32] | PatternsSOne:
         from ._parquet import read_parquet_patterns_with_counts
 
-        match index:
-            case (ax0, ax1) if isinstance(index, tuple):
-                return self[ax0][:, ax1]
-            case int() | np.integer():
-                idx = int(index)
-                if idx < 0:
-                    idx += self.num_data
-                if idx < 0 or idx >= self.num_data:
-                    raise IndexError("Pattern index out of range")
-                place_ones, place_multi, count_multi = self._read_patterns(
-                    np.array([[idx, idx + 1]])
-                )
-                ans = np.zeros(self.num_pix, np.int32)
-                ans[place_ones] = 1
-                ans[place_multi] = count_multi
-                return ans
-            case np.ndarray() if np.issubdtype(index.dtype, bool):
-                index_ranges = contiguous_ranges(np.where(index)[0])
-            case np.ndarray():
-                index_ranges = contiguous_ranges(index)
-            case slice():
-                start, stop, step = index.indices(self.num_data)
-                if step == 1:
-                    index_ranges = (
-                        np.array([(start, stop)])
-                        if stop > start
-                        else np.empty((0, 2), dtype=int)
-                    )
-                else:
-                    index_ranges = np.array(
-                        [(i, i + 1) for i in range(start, stop, step)]
-                    ).reshape(-1, 2)
+        if isinstance(index, tuple) and len(index) == 2:
+            ax0, ax1 = index
+            return self[ax0][:, ax1]
+
+        is_scalar, index_ranges = _normalize_row_index_ranges(
+            cast(int | np.integer[Any] | TRANGE, index), self.num_data
+        )
+        if is_scalar:
+            place_ones, place_multi, count_multi = self._read_patterns(index_ranges)
+            ans = np.zeros(self.num_pix, np.int32)
+            ans[place_ones] = 1
+            ans[place_multi] = count_multi
+            return ans
 
         sel_ones, sel_multi, place_ones, place_multi, count_multi = (
             read_parquet_patterns_with_counts(

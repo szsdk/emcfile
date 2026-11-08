@@ -44,6 +44,20 @@ fn get_single_cache() -> &'static [Mutex<CachedChunk>; 3] {
 }
 
 #[inline]
+unsafe fn copy_unaligned_u32(raw_u8: &[u8], start: usize, dst: &mut [u32]) {
+    let count = dst.len();
+    if count > 0 {
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                raw_u8.as_ptr().add(start * 4),
+                dst.as_mut_ptr() as *mut u8,
+                count * 4,
+            );
+        }
+    }
+}
+
+#[inline]
 fn upper_bound_u64(arr: &[u64], target: u64) -> usize {
     let mut lo = 0usize;
     let mut hi = arr.len();
@@ -188,13 +202,9 @@ pub fn decode_raw_chunk<'py>(
 
         if count > 0 {
             if (mask & 1) != 0 {
-                let src_u32 = unsafe {
-                    std::slice::from_raw_parts(
-                        (raw_slice.as_ptr() as *const u32).add(start),
-                        count,
-                    )
-                };
-                out_slice.copy_from_slice(src_u32);
+                unsafe {
+                    copy_unaligned_u32(raw_slice, start, out_slice);
+                }
             } else {
                 unshuffle_span_u32(raw_slice, elements, start, out_slice);
             }
@@ -481,7 +491,6 @@ pub fn decode_dataset_mmap<'py>(
         }
         let start = c_idx * chunk_len;
         let stop = (start + chunk_len).min(total_len);
-        let count = stop - start;
         let out_u32 = unsafe { std::slice::from_raw_parts_mut(out_addr as *mut u32, total_len) };
 
         THREAD_ZSTD.with(|cell| {
@@ -489,11 +498,14 @@ pub fn decode_dataset_mmap<'py>(
             let zctx = &mut *ctx;
 
             let raw_slice: &[u8] = if (mask & 2) != 0 {
-                if c_sz != u_bytes {
+                if c_sz != u_bytes || b_off.saturating_add(u_bytes) > mm_u8.len() {
                     return Err(-1);
                 }
                 &mm_u8[b_off..b_off + u_bytes]
             } else {
+                if b_off.saturating_add(c_sz) > mm_u8.len() {
+                    return Err(-1);
+                }
                 zctx.ensure_scratch(u_bytes);
                 match zctx
                     .dctx
@@ -506,10 +518,9 @@ pub fn decode_dataset_mmap<'py>(
 
             if !is_delta {
                 if (mask & 1) != 0 {
-                    let src_u32 = unsafe {
-                        std::slice::from_raw_parts(raw_slice.as_ptr() as *const u32, count)
-                    };
-                    out_u32[start..stop].copy_from_slice(src_u32);
+                    unsafe {
+                        copy_unaligned_u32(raw_slice, 0, &mut out_u32[start..stop]);
+                    }
                 } else {
                     unshuffle_span_u32(raw_slice, chunk_len, 0, &mut out_u32[start..stop]);
                 }
@@ -529,16 +540,15 @@ pub fn decode_dataset_mmap<'py>(
                         let seg_e = pe.min(stop);
                         if seg_s < seg_e {
                             let local_s = seg_s - start;
-                            let seg_len = seg_e - seg_s;
                             let full_pat = ps >= start && pe <= stop;
                             if (mask & 1) != 0 {
-                                let src_u32 = unsafe {
-                                    std::slice::from_raw_parts(
-                                        (raw_slice.as_ptr() as *const u32).add(local_s),
-                                        seg_len,
-                                    )
-                                };
-                                out_u32[seg_s..seg_e].copy_from_slice(src_u32);
+                                unsafe {
+                                    copy_unaligned_u32(
+                                        raw_slice,
+                                        local_s,
+                                        &mut out_u32[seg_s..seg_e],
+                                    );
+                                }
                                 if full_pat {
                                     cumsum_u32_inplace(&mut out_u32[ps..pe]);
                                 }
@@ -709,11 +719,14 @@ pub fn decode_indexed_mmap<'py>(
                     let zctx = &mut *ctx;
 
                     let raw_slice: &[u8] = if (mask & 2) != 0 {
-                        if c_sz != u_bytes {
+                        if c_sz != u_bytes || b_off.saturating_add(u_bytes) > mm_u8.len() {
                             return Err(-1);
                         }
                         &mm_u8[b_off..b_off + u_bytes]
                     } else {
+                        if b_off.saturating_add(c_sz) > mm_u8.len() {
+                            return Err(-1);
+                        }
                         zctx.ensure_scratch(u_bytes);
                         match zctx
                             .dctx
@@ -726,13 +739,13 @@ pub fn decode_indexed_mmap<'py>(
 
                     for &(d_off, l_off, s_len) in spans {
                         if (mask & 1) != 0 {
-                            let src_u32 = unsafe {
-                                std::slice::from_raw_parts(
-                                    (raw_slice.as_ptr() as *const u32).add(l_off),
-                                    s_len,
-                                )
-                            };
-                            out_u32[d_off..d_off + s_len].copy_from_slice(src_u32);
+                            unsafe {
+                                copy_unaligned_u32(
+                                    raw_slice,
+                                    l_off,
+                                    &mut out_u32[d_off..d_off + s_len],
+                                );
+                            }
                         } else {
                             unshuffle_span_u32(
                                 raw_slice,
@@ -832,13 +845,9 @@ pub fn decode_chunk_span_cached<'py>(
             }
             if count > 0 {
                 if (mask & 1) != 0 {
-                    let src_u32 = unsafe {
-                        std::slice::from_raw_parts(
-                            (payload.as_ptr() as *const u32).add(sel_start),
-                            count,
-                        )
-                    };
-                    out_slice.copy_from_slice(src_u32);
+                    unsafe {
+                        copy_unaligned_u32(payload, sel_start, out_slice);
+                    }
                 } else {
                     unshuffle_span_u32(payload, chunk_len, sel_start, out_slice);
                 }
@@ -869,10 +878,9 @@ pub fn decode_chunk_span_cached<'py>(
         if count > 0 {
             let raw = &cache_entry.buf[..u_bytes];
             if (mask & 1) != 0 {
-                let src_u32 = unsafe {
-                    std::slice::from_raw_parts((raw.as_ptr() as *const u32).add(sel_start), count)
-                };
-                out_slice.copy_from_slice(src_u32);
+                unsafe {
+                    copy_unaligned_u32(raw, sel_start, out_slice);
+                }
             } else {
                 unshuffle_span_u32(raw, chunk_len, sel_start, out_slice);
             }
@@ -923,18 +931,14 @@ fn decode_single_col_from_mmap(
             }
             let do_fused = is_delta && single_chunk && (mask & 1) == 0;
             if (mask & 2) != 0 {
-                if c_sz != u_bytes {
+                if c_sz != u_bytes || b_off.saturating_add(u_bytes) > mm_u8.len() {
                     return -1;
                 }
                 let payload = &mm_u8[b_off..b_off + u_bytes];
                 if (mask & 1) != 0 {
-                    let src_u32 = unsafe {
-                        std::slice::from_raw_parts(
-                            (payload.as_ptr() as *const u32).add(start),
-                            len,
-                        )
-                    };
-                    out_slice[dst..dst + len].copy_from_slice(src_u32);
+                    unsafe {
+                        copy_unaligned_u32(payload, start, &mut out_slice[dst..dst + len]);
+                    }
                 } else {
                     unshuffle_span_u32_opt_cumsum(
                         payload,
@@ -948,6 +952,9 @@ fn decode_single_col_from_mmap(
                     }
                 }
             } else {
+                if b_off.saturating_add(c_sz) > mm_u8.len() {
+                    return -1;
+                }
                 let key = (file_id, (c_idx * chunk_len) as i64, c_sz as i64, chunk_len);
                 let mut cache_entry = get_single_cache()[slot_idx].lock().unwrap();
                 if cache_entry.key != key || cache_entry.buf.len() < u_bytes {
@@ -969,10 +976,9 @@ fn decode_single_col_from_mmap(
                 }
                 let raw = &cache_entry.buf[..u_bytes];
                 if (mask & 1) != 0 {
-                    let src_u32 = unsafe {
-                        std::slice::from_raw_parts((raw.as_ptr() as *const u32).add(start), len)
-                    };
-                    out_slice[dst..dst + len].copy_from_slice(src_u32);
+                    unsafe {
+                        copy_unaligned_u32(raw, start, &mut out_slice[dst..dst + len]);
+                    }
                 } else {
                     unshuffle_span_u32_opt_cumsum(
                         raw,

@@ -453,8 +453,12 @@ def read_parquet_patterns_with_counts(
     if ones_idx is not None or multi_idx is not None:
         if ones_idx is None or multi_idx is None:
             raise ValueError("Pattern counts do not match Parquet v2 payload size")
-        idx_pair = (id(ones_idx), id(multi_idx))
-        already_validated = cache is not None and cache.get("valid_idx") == idx_pair
+        valid_pair = None if cache is None else cache.get("valid_idx")
+        already_validated = (
+            valid_pair is not None
+            and valid_pair[0] is ones_idx
+            and valid_pair[1] is multi_idx
+        )
         if not already_validated:
             if (
                 ones_idx.ndim != 1
@@ -468,7 +472,7 @@ def read_parquet_patterns_with_counts(
             ):
                 raise ValueError("Pattern counts do not match Parquet v2 payload size")
             if cache is not None:
-                cache["valid_idx"] = idx_pair
+                cache["valid_idx"] = (ones_idx, multi_idx)
 
     if num_data == 0 or len(ranges) == 0:
         return (
