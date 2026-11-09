@@ -70,9 +70,26 @@ def test_v2_codec_roundtrip(tmp_path: Path, compression, options, shuffle, encod
         shuffle=shuffle,
     )
     assert ef.open_patterns(path)[:] == expected
-    with h5py.File(path) as file:
+    with h5py.File(path, "r") as file:
+        assert str(file.attrs["version"]) == "2"
+        assert int(file.attrs["num_pix"]) == expected.num_pix
+        assert int(file.attrs["num_data"]) == expected.num_data
         assert file.attrs["position_encoding"] == encoding
+        np.testing.assert_array_equal(file["ones"][:], expected.ones)
+        np.testing.assert_array_equal(file["multi"][:], expected.multi)
         np.testing.assert_array_equal(file["count_multi"][:], expected.count_multi)
+        if encoding == "absolute":
+            np.testing.assert_array_equal(file["place_ones"][:], expected.place_ones)
+            np.testing.assert_array_equal(file["place_multi"][:], expected.place_multi)
+        else:
+            np.testing.assert_array_equal(
+                decode_pattern_local_delta(file["place_ones"][:], expected.ones),
+                expected.place_ones,
+            )
+            np.testing.assert_array_equal(
+                decode_pattern_local_delta(file["place_multi"][:], expected.multi),
+                expected.place_multi,
+            )
 
 
 def test_direct_layout_is_standard_and_full_scan_falls_back_cleanly(

@@ -33,6 +33,7 @@ dev = [
     "coverage>=5.0.3",
     "marimo",
     "mypy>=0.991",
+    "polars>=1.0.0",
     "pytest>=7.2.0",
     "pytest-cov>=4.0.0",
     "pytest-html",

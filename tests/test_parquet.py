@@ -127,6 +127,93 @@ def test_parquet_codec_roundtrip(
     np.testing.assert_array_equal(source.count_multi, expected.count_multi)
 
 
+@pytest.mark.parametrize(
+    "compression,options,shuffle,encoding",
+    [
+        (None, None, False, "absolute"),
+        ("zstd", 1, False, "absolute"),
+        ("zstd", 3, True, "delta"),
+    ],
+)
+def test_parquet_readable_by_polars(
+    tmp_path: Path,
+    monkeypatch,
+    compression,
+    options,
+    shuffle: bool,
+    encoding: str,
+):
+    pl = pytest.importorskip("polars")
+    monkeypatch.setenv("EMCFILE_PARQUET_CHUNK_BYTES", "24")
+    expected = _patterns(3)
+    path = tmp_path / f"polars-{encoding}-{compression}-{shuffle}.parquet"
+    expected.write(
+        path,
+        position_encoding=encoding,
+        compression=compression,
+        compression_opts=options,
+        shuffle=shuffle,
+    )
+
+    schema = pl.read_parquet_schema(path)
+    assert schema == {
+        "place_ones": pl.Binary,
+        "place_multi": pl.Binary,
+        "count_multi": pl.Binary,
+    }
+
+    df = pl.read_parquet(path)
+    assert df.shape == (expected.num_data, 3)
+    assert df.columns == ["place_ones", "place_multi", "count_multi"]
+
+    for i in range(expected.num_data):
+        row = df.row(i)
+        assert len(row[0]) == int(expected.ones[i]) * 4
+        assert len(row[1]) == int(expected.multi[i]) * 4
+        assert len(row[2]) == int(expected.multi[i]) * 4
+        if encoding == "absolute" and not shuffle:
+            sp = expected.sparse_pattern(i)
+            np.testing.assert_array_equal(
+                np.frombuffer(row[0], dtype=np.uint32), sp.place_ones
+            )
+            np.testing.assert_array_equal(
+                np.frombuffer(row[1], dtype=np.uint32), sp.place_multi
+            )
+            np.testing.assert_array_equal(
+                np.frombuffer(row[2], dtype=np.int32), sp.count_multi
+            )
+        elif encoding == "delta" and shuffle:
+            sp = expected.sparse_pattern(i)
+            po_raw = (
+                np.frombuffer(row[0], dtype=np.uint8)
+                .reshape(4, -1)
+                .T.copy()
+                .view(np.uint32)
+                .ravel()
+            )
+            pm_raw = (
+                np.frombuffer(row[1], dtype=np.uint8)
+                .reshape(4, -1)
+                .T.copy()
+                .view(np.uint32)
+                .ravel()
+            )
+            cm_raw = (
+                np.frombuffer(row[2], dtype=np.uint8)
+                .reshape(4, -1)
+                .T.copy()
+                .view(np.int32)
+                .ravel()
+            )
+            np.testing.assert_array_equal(
+                np.cumsum(po_raw, dtype=np.uint32), sp.place_ones
+            )
+            np.testing.assert_array_equal(
+                np.cumsum(pm_raw, dtype=np.uint32), sp.place_multi
+            )
+            np.testing.assert_array_equal(cm_raw, sp.count_multi)
+
+
 def test_parquet_sortedness_check_is_opt_in(tmp_path: Path):
     invalid = ef.PatternsSOne(
         8,
