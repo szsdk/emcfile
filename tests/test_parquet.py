@@ -427,9 +427,7 @@ def test_parquet_concurrent_writes_no_deadlock(tmp_path: Path, monkeypatch):
 def _pq_fork_child(src_path: str, dst_path: str, conn) -> None:
     try:
         got = ef.open_patterns(src_path)[:]
-        got.write(
-            dst_path, position_encoding="delta", compression="zstd", shuffle=True
-        )
+        got.write(dst_path, position_encoding="delta", compression="zstd", shuffle=True)
         reopened = ef.open_patterns(dst_path)[:]
         conn.send((got == reopened, len(reopened)))
     except BaseException as exc:  # pragma: no cover - diagnostic path
@@ -576,3 +574,32 @@ def test_parquet_atomic_overwrite_while_mmap_open(tmp_path: Path):
             assert ef.open_patterns(path)[:] == p_small
 
 
+def test_parquet_footer_lru_skips_reparse_and_single_worker_pipeline(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("EMCFILE_PARQUET_CHUNK_BYTES", "64")
+    monkeypatch.setenv("EMCFILE_PARQUET_WRITE_WORKERS", "1")
+    expected = _patterns(16)
+    path = tmp_path / "pipeline_lru.parquet"
+    expected.write(
+        path,
+        position_encoding="delta",
+        compression="zstd",
+        compression_opts=1,
+        shuffle=True,
+    )
+    pq_mod._invalidate_parquet_cache(path)
+    np.testing.assert_array_equal(ef.open_patterns(path)[0], expected[0])
+
+    rs = pq_mod._require_parquet_rs()
+    orig_parse = rs.parse_parquet_footer
+
+    def fail_if_reparsed(_data):
+        pytest.fail("warm _file_info_lru hit must not re-parse footer")
+
+    monkeypatch.setattr(rs, "parse_parquet_footer", fail_if_reparsed)
+    try:
+        np.testing.assert_array_equal(ef.open_patterns(path)[5], expected[5])
+    finally:
+        monkeypatch.setattr(rs, "parse_parquet_footer", orig_parse)
+    assert ef.open_patterns(path)[:] == expected

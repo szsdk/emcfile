@@ -141,16 +141,22 @@ def _get_file_info(
         raise ValueError(f"Invalid or truncated Parquet file: {path}")
     with resolved.open("rb") as fp:
         head_sig = fp.read(min(64, st.st_size))
-        fp.seek(-8, os.SEEK_END)
-        tail8 = fp.read(8)
+        tail_read_len = min(40, st.st_size)
+        if st.st_size <= len(head_sig):
+            tail_raw = head_sig[-tail_read_len:]
+        else:
+            fp.seek(st.st_size - tail_read_len)
+            tail_raw = fp.read(tail_read_len)
+        if len(tail_raw) < tail_read_len:
+            raise ValueError(f"Invalid or truncated Parquet file: {path}")
+        tail8 = tail_raw[-8:]
         if tail8[4:8] != _PARQUET_MAGIC:
             raise ValueError(f"Invalid Parquet magic bytes in {path}")
         fl = int.from_bytes(tail8[:4], "little")
         if fl <= 0 or fl > st.st_size - 12:
             raise ValueError(f"Invalid Parquet footer length in {path}")
-        fp.seek(st.st_size - fl - 8)
-        footer_bytes = fp.read(fl)
-        tail_sig = footer_bytes[-min(32, fl) :] + tail8
+        sig_len = min(32, fl)
+        tail_sig = tail_raw[-(sig_len + 8) :]
         cache_key = (
             str(resolved),
             st.st_mtime_ns,
@@ -165,6 +171,10 @@ def _get_file_info(
                     cache["file_info"] = cached
                 return cached
 
+        fp.seek(st.st_size - fl - 8)
+        footer_bytes = fp.read(fl)
+        if len(footer_bytes) != fl:
+            raise ValueError(f"Invalid or truncated Parquet footer in {path}")
         parsed = rs.parse_parquet_footer(footer_bytes)
         if parsed is None:
             raise ValueError(f"Unsupported or corrupt Parquet v2 layout in {path}")
@@ -504,11 +514,7 @@ def read_parquet_patterns_with_counts(
     ):
         raise IndexError("Pattern range is out of bounds")
 
-    if (
-        ones_idx is None
-        and multi_idx is None
-        and (num_data == 0 or len(ranges) == 0)
-    ):
+    if ones_idx is None and multi_idx is None and (num_data == 0 or len(ranges) == 0):
         return (
             np.empty(0, dtype=np.uint32),
             np.empty(0, dtype=np.uint32),

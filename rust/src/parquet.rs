@@ -1,4 +1,5 @@
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 
 use numpy::{
     PyArray1, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3,
@@ -1395,29 +1396,85 @@ pub fn write_batch_zstd<'py>(
             }
             0
         } else {
-            let window_size = (n_workers * 2).max(2).min(b_rgs);
-            let mut ring_bufs: Vec<Vec<u8>> = (0..window_size).map(|_| Vec::new()).collect();
-            let mut ring_lens: Vec<usize> = vec![0usize; window_size];
-            let pool = get_pool(n_workers.min(window_size));
+            let pool = get_pool(n_workers.min(b_rgs));
+            let actual_workers = n_workers.min(pool.current_num_threads()).min(b_rgs);
+            if actual_workers <= 1 {
+                let mut out_vec = Vec::new();
+                for rg in 0..b_rgs {
+                    let meta_rg = &mut meta_vec[rg * 9..(rg + 1) * 9];
+                    let written = match encode_rg_into_vec(
+                        rg,
+                        num_data,
+                        rg_pats,
+                        page_pats,
+                        use_zstd,
+                        level,
+                        po_src,
+                        pm_src,
+                        cm_src,
+                        ones_idx,
+                        multi_idx,
+                        is_delta,
+                        is_shuffled,
+                        check_sorted,
+                        &mut out_vec,
+                        meta_rg,
+                    ) {
+                        Ok(n) => n,
+                        Err(e) => return e,
+                    };
+                    if !target.write_all(&out_vec[..written]) {
+                        return -4;
+                    }
+                }
+                return 0;
+            }
 
-            let mut w_start = 0usize;
-            while w_start < b_rgs {
-                let w_len = (b_rgs - w_start).min(window_size);
-                let abort_err = AtomicI32::new(0);
-                let meta_win = &mut meta_vec[w_start * 9..(w_start + w_len) * 9];
+            struct PipeState {
+                written_upto: usize,
+                ready: Vec<Option<(usize, [i64; 9])>>,
+            }
 
-                pool.install(|| {
-                    ring_bufs[..w_len]
-                        .par_iter_mut()
-                        .zip(ring_lens[..w_len].par_iter_mut())
-                        .zip(meta_win.par_chunks_exact_mut(9))
-                        .enumerate()
-                        .for_each(|(slot, ((out_vec, out_len), meta_rg))| {
-                            if abort_err.load(Ordering::Relaxed) != 0 {
+            let ring_size = (actual_workers * 3).max(4).min(b_rgs);
+            let ring_bufs: Vec<Mutex<Vec<u8>>> =
+                (0..ring_size).map(|_| Mutex::new(Vec::new())).collect();
+            let pipe_mtx = Mutex::new(PipeState {
+                written_upto: 0,
+                ready: vec![None; b_rgs],
+            });
+            let cv_writer = Condvar::new();
+            let cv_worker = Condvar::new();
+            let next_rg = AtomicUsize::new(0);
+            let abort_err = AtomicI32::new(0);
+
+            pool.in_place_scope(|s| {
+                for _ in 0..actual_workers {
+                    s.spawn(|_| loop {
+                        if abort_err.load(Ordering::Acquire) != 0 {
+                            return;
+                        }
+                        let rg = next_rg.fetch_add(1, Ordering::Relaxed);
+                        if rg >= b_rgs {
+                            break;
+                        }
+                        if rg >= ring_size {
+                            let mut st = pipe_mtx.lock().unwrap_or_else(|e| e.into_inner());
+                            while st.written_upto + ring_size <= rg
+                                && abort_err.load(Ordering::Acquire) == 0
+                            {
+                                st = cv_worker.wait(st).unwrap_or_else(|e| e.into_inner());
+                            }
+                            if abort_err.load(Ordering::Acquire) != 0 {
                                 return;
                             }
-                            let rg = w_start + slot;
-                            match encode_rg_into_vec(
+                        }
+
+                        let mut meta_rg = [0i64; 9];
+                        let encode_res = {
+                            let mut out_vec = ring_bufs[rg % ring_size]
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            encode_rg_into_vec(
                                 rg,
                                 num_data,
                                 rg_pats,
@@ -1432,27 +1489,71 @@ pub fn write_batch_zstd<'py>(
                                 is_delta,
                                 is_shuffled,
                                 check_sorted,
-                                out_vec,
-                                meta_rg,
-                            ) {
-                                Ok(n) => *out_len = n,
-                                Err(e) => abort_err.store(e, Ordering::Relaxed),
-                            }
-                        });
-                });
+                                &mut out_vec,
+                                &mut meta_rg,
+                            )
+                        };
 
-                let err = abort_err.load(Ordering::Relaxed);
-                if err != 0 {
-                    return err;
+                        match encode_res {
+                            Ok(written) => {
+                                let mut st = pipe_mtx.lock().unwrap_or_else(|e| e.into_inner());
+                                st.ready[rg] = Some((written, meta_rg));
+                                drop(st);
+                                cv_writer.notify_one();
+                            }
+                            Err(e) => {
+                                let _ = abort_err.compare_exchange(
+                                    0,
+                                    e,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                );
+                                let _st = pipe_mtx.lock().unwrap_or_else(|e| e.into_inner());
+                                cv_writer.notify_all();
+                                cv_worker.notify_all();
+                                return;
+                            }
+                        }
+                    });
                 }
-                for slot in 0..w_len {
-                    if !target.write_all(&ring_bufs[slot][..ring_lens[slot]]) {
-                        return -4;
+
+                for rg in 0..b_rgs {
+                    let (written, meta_rg) = {
+                        let mut st = pipe_mtx.lock().unwrap_or_else(|e| e.into_inner());
+                        while st.ready[rg].is_none() && abort_err.load(Ordering::Acquire) == 0 {
+                            st = cv_writer.wait(st).unwrap_or_else(|e| e.into_inner());
+                        }
+                        if abort_err.load(Ordering::Acquire) != 0 {
+                            return;
+                        }
+                        st.ready[rg].unwrap()
+                    };
+                    meta_vec[rg * 9..(rg + 1) * 9].copy_from_slice(&meta_rg);
+                    let write_ok = {
+                        let out_vec = ring_bufs[rg % ring_size]
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        target.write_all(&out_vec[..written])
+                    };
+                    if !write_ok {
+                        let _ = abort_err.compare_exchange(
+                            0,
+                            -4,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        );
+                        let _st = pipe_mtx.lock().unwrap_or_else(|e| e.into_inner());
+                        cv_worker.notify_all();
+                        return;
                     }
+                    let mut st = pipe_mtx.lock().unwrap_or_else(|e| e.into_inner());
+                    st.written_upto = rg + 1;
+                    drop(st);
+                    cv_worker.notify_all();
                 }
-                w_start += w_len;
-            }
-            0
+            });
+
+            abort_err.load(Ordering::Acquire)
         }
     });
 
