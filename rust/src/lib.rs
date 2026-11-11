@@ -1,6 +1,7 @@
 #[cfg(target_endian = "big")]
 compile_error!("emcfile_fast requires a little-endian target");
 
+pub mod detector;
 pub mod h5;
 pub mod parquet;
 pub mod simd;
@@ -275,6 +276,7 @@ impl RawFileTarget {
 fn emcfile_fast(m: &Bound<'_, PyModule>) -> PyResult<()> {
     h5::register(m)?;
     parquet::register(m)?;
+    detector::register(m)?;
     let py = m.py();
     let h5_mod = PyModule::new(py, "h5")?;
     h5::register(&h5_mod)?;
@@ -282,5 +284,8 @@ fn emcfile_fast(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let pq_mod = PyModule::new(py, "parquet")?;
     parquet::register(&pq_mod)?;
     m.add_submodule(&pq_mod)?;
+    let det_mod = PyModule::new(py, "detector")?;
+    detector::register(&det_mod)?;
+    m.add_submodule(&det_mod)?;
     Ok(())
 }

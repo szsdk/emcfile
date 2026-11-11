@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
 from enum import IntEnum
@@ -38,6 +39,29 @@ __all__ = [
 ]
 
 _log = logging.getLogger(__name__)
+
+_DET_RS_LOADED = False
+_DET_RS_MOD: Any = None
+
+
+def _get_det_rs() -> Any:
+    global _DET_RS_LOADED, _DET_RS_MOD
+    if os.environ.get("EMCFILE_DISABLE_DET_ACCEL", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return None
+    if not _DET_RS_LOADED:
+        try:
+            from emcfile_fast import detector as _det_rs
+
+            _DET_RS_MOD = _det_rs
+        except ImportError:
+            _DET_RS_MOD = None
+        _DET_RS_LOADED = True
+    return _DET_RS_MOD
+
 
 T1 = TypeVar("T1", np.float32, np.float64)
 T2 = TypeVar("T2", np.uint8, np.int32, np.int64)
@@ -475,7 +499,9 @@ def _write_h5det_datasets(fptr: h5py.Group | h5py.File, det: Detector) -> None:
     fptr["qz"] = det.coor[:, 2].ravel().astype("f8")
     fptr["corr"] = det.factor.ravel().astype("f8")
     flat_mask = det.mask.ravel()
-    if flat_mask.size == 0 or (int(flat_mask.min()) >= 0 and int(flat_mask.max()) <= 255):
+    if flat_mask.size == 0 or (
+        int(flat_mask.min()) >= 0 and int(flat_mask.max()) <= 255
+    ):
         fptr["mask"] = flat_mask.astype("u1")
     else:
         fptr["mask"] = flat_mask.astype("i4")
@@ -1007,23 +1033,79 @@ class DetRender:
 
     def __init__(self, det: Detector):
         self._det = det
+        self._rs_plan: Any = None
+        det_rs = _get_det_rs()
+        if (
+            det_rs is not None
+            and det.num_pix > 0
+            and det.coor.ndim == 2
+            and det.coor.shape == (det.num_pix, 3)
+        ):
+            coor_c = np.ascontiguousarray(det.coor, dtype=np.float64)
+            mask_c = (
+                det.mask
+                if det.mask.flags.c_contiguous
+                and np.issubdtype(det.mask.dtype, np.integer)
+                else np.ascontiguousarray(det.mask, dtype=np.int32)
+            )
+            try:
+                (
+                    self.direction,
+                    self.cxy,
+                    self.xy,
+                    width,
+                    height,
+                    self._mask,
+                    count_data,
+                    self._rs_plan,
+                ) = det_rs.prepare_detector_renderer(
+                    coor_c, mask_c, float(det.detd), float(det.ewald_rad)
+                )
+                self.frame_shape = np.array([width, height], dtype=self.xy.dtype)
+                self._count: ma.MaskedArray = ma.MaskedArray(
+                    count_data, mask=self._mask, copy=False, shrink=False
+                )  # type: ignore[assignment]
+                self._render_width = int(width)
+                self._render_height = int(height)
+                self._render_W = self._render_width
+                self._render_H = self._render_height
+                return
+            except ValueError:
+                self._rs_plan = None
+
         self.direction = -int(np.sign(det.coor[:, 2].sum()))
         # TODO decide the direction with `get_ewald_vec`
         self.cxy = self.to_cxy(self._det.coor)
         self.xy = np.round(self.cxy - self.cxy.min(axis=0)).astype(np.int32)
         self.frame_shape = self.xy.max(axis=0) + 1
-        self._mask = np.zeros(self.frame_shape, dtype="u1")
+        width = int(self.frame_shape[0])
+        height = int(self.frame_shape[1])
+        self._mask = np.zeros((height, width), dtype="u1")
         pix_idx = _match_pixel_type(self._det.mask, PixelType.BAD)
-        self._mask[self.xy[pix_idx, 0], self.xy[pix_idx, 1]] = 1
-        self._mask = self._mask.T.copy()
-        self._count: ma.MaskedArray = ma.masked_array(
-            np.zeros((self.frame_shape[1], self.frame_shape[0]), dtype="f8"),
-            mask=self._mask,
-        )  # type: ignore
-        np.add.at(
-            self._count, (self.xy[:, 1], self.xy[:, 0]), np.ones(self.xy.shape[0])
+        self._mask[self.xy[pix_idx, 1], self.xy[pix_idx, 0]] = 1
+        flat_idx = self.xy[:, 1].astype(np.intp) * width + self.xy[:, 0].astype(np.intp)
+        count_data = (
+            np.bincount(flat_idx, minlength=height * width)
+            .astype(np.float64)
+            .reshape(height, width)
         )
+        self._count = ma.masked_array(
+            count_data,
+            mask=self._mask,
+        )  # type: ignore[assignment]
         self._count /= self._count.mean()
+        self._render_width = width
+        self._render_height = height
+        self._render_W = width
+        self._render_H = height
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state["_rs_plan"] = None
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
 
     @property
     def detector(self) -> Detector:
@@ -1051,15 +1133,17 @@ class DetRender:
         )
 
     def _prepare_renderer(self) -> None:
-        width, height = self.frame_shape
+        width, height = int(self.frame_shape[0]), int(self.frame_shape[1])
         self._render_width = width
         self._render_height = height
         # Preserve private compatibility for downstream render integrations.
         self._render_W = width
         self._render_H = height
 
-        flat_indices = self.xy[:, 1] * width + self.xy[:, 0]
-        self._render_flat = flat_indices.astype(np.int64, copy=False)
+        flat_indices = self.xy[:, 1].astype(np.int64) * width + self.xy[:, 0].astype(
+            np.int64
+        )
+        self._render_flat = flat_indices
 
         self._count_flat = np.asarray(self._count.filled(0), dtype=np.float64).ravel()
         self._nonzero_flat = self._count_flat != 0
@@ -1072,6 +1156,41 @@ class DetRender:
         ``(n_images, H, W)``. The right way to visualize a single rendered image is
         ``plt.imshow(img, origin="lower", extent=self.frame_extent())``.
         """
+        if self._rs_plan is not None and _get_det_rs() is not None:
+            arr = (
+                raw_img
+                if isinstance(raw_img, np.ndarray)
+                else np.asarray(raw_img, dtype=np.float64)
+            )
+            if arr.ndim not in (1, 2):
+                raise ValueError(
+                    "raw_img must be a one-dimensional image or a two-dimensional batch"
+                )
+            if arr.shape[-1] != self._det.num_pix:
+                raise ValueError(
+                    f"raw_img has {arr.shape[-1]} pixels; "
+                    f"the detector requires {self._det.num_pix}"
+                )
+            if arr.ndim == 1:
+                res_1d = self._rs_plan.render_dense_1d(arr)
+                if res_1d is None:
+                    res_1d = self._rs_plan.render_dense_1d(
+                        np.ascontiguousarray(arr, dtype=np.float64)
+                    )
+                assert res_1d is not None
+                rendered_2d, mask_2d = res_1d
+                return ma.MaskedArray(
+                    rendered_2d, mask=mask_2d, copy=False, shrink=False
+                )
+            res_2d = self._rs_plan.render_dense_2d(arr)
+            if res_2d is None:
+                res_2d = self._rs_plan.render_dense_2d(
+                    np.ascontiguousarray(arr, dtype=np.float64)
+                )
+            assert res_2d is not None
+            rendered_3d, mask_3d = res_2d
+            return ma.MaskedArray(rendered_3d, mask=mask_3d, copy=False, shrink=False)
+
         if not hasattr(self, "_render_flat"):
             self._prepare_renderer()
 

@@ -369,3 +369,108 @@ def test_2d_detector_rendering_resampling_and_combined_bitmasks(tmp_path, det):
     with pytest.raises(ValueError, match="same length"):
         ef.detector(det_2d, mask=np.zeros(3, dtype=np.int32), check_consistency=False)
 
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        np.int32,
+        np.uint32,
+        np.int64,
+        np.uint64,
+        np.int16,
+        np.uint16,
+        np.int8,
+        np.uint8,
+        np.float32,
+        np.float64,
+    ],
+)
+def test_renderer_dense_dtypes_and_fallback_parity(monkeypatch, det, dtype):
+    rng = np.random.default_rng(42)
+    raw_1d = rng.integers(0, 50, size=det.num_pix).astype(dtype)
+    raw_2d = rng.integers(0, 50, size=(4, det.num_pix)).astype(dtype)
+
+    ren_fast = ef.detector_renderer(det)
+    out_fast_1d = ren_fast.render(raw_1d)
+    out_fast_2d = ren_fast.render(raw_2d)
+
+    monkeypatch.setenv("EMCFILE_DISABLE_DET_ACCEL", "1")
+    ren_py = ef.detector_renderer(det)
+    out_py_1d = ren_py.render(raw_1d)
+    out_py_2d = ren_py.render(raw_2d)
+
+    np.testing.assert_allclose(ren_fast.cxy, ren_py.cxy, rtol=1e-14, atol=1e-14)
+    np.testing.assert_array_equal(ren_fast.xy, ren_py.xy)
+    np.testing.assert_array_equal(ren_fast._mask, ren_py._mask)
+    np.testing.assert_allclose(
+        ren_fast._count.data, ren_py._count.data, rtol=1e-14, atol=1e-14
+    )
+
+    np.testing.assert_array_equal(out_fast_1d.mask, out_py_1d.mask)
+    np.testing.assert_allclose(
+        out_fast_1d.data, out_py_1d.data, rtol=1e-14, atol=1e-14, equal_nan=True
+    )
+    np.testing.assert_array_equal(out_fast_2d.mask, out_py_2d.mask)
+    np.testing.assert_allclose(
+        out_fast_2d.data, out_py_2d.data, rtol=1e-14, atol=1e-14, equal_nan=True
+    )
+
+
+def test_renderer_strided_deepcopy_and_grid_layouts(monkeypatch, det):
+    import pickle
+
+    rng = np.random.default_rng(7)
+    base_2d = rng.integers(0, 100, size=(6, det.num_pix * 2), dtype=np.int32)
+    strided_1d = base_2d[1, ::2]
+    strided_2d = np.asfortranarray(base_2d[::2, ::2])
+    assert not strided_1d.flags.c_contiguous
+    assert not strided_2d.flags.c_contiguous
+
+    ren = ef.detector_renderer(det)
+    res_1d = ren.render(strided_1d)
+    res_2d = ren.render(strided_2d)
+    np.testing.assert_allclose(
+        res_1d.data,
+        ren.render(np.ascontiguousarray(strided_1d)).data,
+        rtol=1e-14,
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        res_2d.data,
+        ren.render(np.ascontiguousarray(strided_2d)).data,
+        rtol=1e-14,
+        equal_nan=True,
+    )
+
+    for cloned in (deepcopy(ren), pickle.loads(pickle.dumps(ren))):
+        cloned_res = cloned.render(strided_2d)
+        np.testing.assert_array_equal(cloned_res.mask, res_2d.mask)
+        np.testing.assert_allclose(
+            cloned_res.data, res_2d.data, rtol=1e-14, equal_nan=True
+        )
+
+    # Verify both column-major (simple_detector) and row-major (exact identity) grids
+    det_col = ef.detector(
+        coordinates=(32, 32), detector_distance=500, check_consistency=False
+    )
+    coords_row = (
+        det_col.coordinates.reshape(32, 32, 3).transpose(1, 0, 2).reshape(-1, 3).copy()
+    )
+    det_row = ef.detector(
+        coordinates=coords_row,
+        mask=np.zeros(32 * 32, dtype=np.uint8),
+        correction_factors=det_col.correction_factors.copy(),
+        detector_distance=det_col.detector_distance,
+        ewald_radius=det_col.ewald_radius,
+        check_consistency=False,
+    )
+    batch = rng.integers(0, 20, size=(3, 32 * 32), dtype=np.int32)
+    for grid_det in (det_col, det_row):
+        r_fast = ef.detector_renderer(grid_det).render(batch)
+        monkeypatch.setenv("EMCFILE_DISABLE_DET_ACCEL", "1")
+        r_py = ef.detector_renderer(grid_det).render(batch)
+        monkeypatch.delenv("EMCFILE_DISABLE_DET_ACCEL", raising=False)
+        np.testing.assert_array_equal(r_fast.mask, r_py.mask)
+        np.testing.assert_allclose(
+            r_fast.data, r_py.data, rtol=1e-14, atol=1e-14, equal_nan=True
+        )
