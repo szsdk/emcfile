@@ -16,6 +16,7 @@ import numpy as np
 import numpy.typing as npt
 
 from ._h5_workers import env_workers
+from ._hdf5 import atomic_write_path
 
 if TYPE_CHECKING:
     from ._emc_patterns import PatternsSOne, PatternsSOneBase
@@ -35,6 +36,16 @@ _file_info_lru: dict[
     tuple[str, int, int, bytes, bytes],
     tuple[dict[str, Any], npt.NDArray[np.int64]],
 ] = {}
+
+
+def _reset_parquet_fork_state() -> None:
+    global _file_info_lock, _file_info_lru
+    _file_info_lock = threading.Lock()
+    _file_info_lru = {}
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_parquet_fork_state)
 
 
 def _get_parquet_rs() -> Any:
@@ -85,6 +96,17 @@ def is_parquet_file(path: Path) -> bool:
         return False
 
 
+def _invalidate_parquet_cache(path: Path) -> None:
+    try:
+        resolved = str(path.resolve())
+    except OSError:
+        resolved = str(path)
+    with _file_info_lock:
+        stale = [k for k in _file_info_lru if k[0] == resolved]
+        for k in stale:
+            _file_info_lru.pop(k, None)
+
+
 def _normalize_parquet_compression(
     compression: None | int | str,
     compression_opts: Any,
@@ -95,13 +117,13 @@ def _normalize_parquet_compression(
         name = compression.strip().lower()
         if name in {"zstd", "zstandard"}:
             level = 3 if compression_opts is None else int(compression_opts)
-            if level <= 0:
-                level = 1
+            if level == 0:
+                level = 3
             return "ZSTD", level
     if compression == 32015:
         level = 3 if compression_opts is None else int(compression_opts)
-        if level <= 0:
-            level = 1
+        if level == 0:
+            level = 3
         return "ZSTD", level
     raise ValueError(f"Unsupported Parquet compression {compression!r}")
 
@@ -162,16 +184,44 @@ def _get_or_open_mmap(
         mm_cached = cache.get("mm")
         if mm_cached is not None:
             return mm_cached, None, None
-        fd = os.open(path, os.O_RDONLY)
-        try:
-            mm_new = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
-        finally:
-            os.close(fd)
+        with path.open("rb") as fp_tmp:
+            mm_new = mmap.mmap(fp_tmp.fileno(), 0, access=mmap.ACCESS_READ)
         cache["mm"] = mm_new
         return mm_new, None, None
     fp_local = path.open("rb")
     mm_local = mmap.mmap(fp_local.fileno(), 0, access=mmap.ACCESS_READ)
     return mm_local, fp_local, mm_local
+
+
+def _coerce_u32_positions(values: Any) -> npt.NDArray[np.uint32]:
+    arr = np.asarray(values)
+    if not np.issubdtype(arr.dtype, np.integer):
+        raise ValueError(f"position values must be integers, got {arr.dtype}")
+    if arr.dtype == np.dtype("<u4"):
+        return np.ascontiguousarray(arr)
+    if arr.size > 0:
+        if np.issubdtype(arr.dtype, np.signedinteger) and int(arr.min()) < 0:
+            raise ValueError("position values must fit in uint32")
+        if arr.dtype.itemsize > 4 and int(arr.max()) > np.iinfo(np.uint32).max:
+            raise ValueError("position values must fit in uint32")
+    return np.ascontiguousarray(arr, dtype=np.uint32)
+
+
+def _coerce_i32_counts_as_u32(values: Any) -> npt.NDArray[np.uint32]:
+    arr = np.asarray(values)
+    if not np.issubdtype(arr.dtype, np.integer):
+        raise ValueError(f"count_multi values must be integers, got {arr.dtype}")
+    if arr.dtype == np.dtype("<i4"):
+        return np.ascontiguousarray(arr).view(np.uint32)
+    if arr.size > 0:
+        info = np.iinfo(np.int32)
+        if np.issubdtype(arr.dtype, np.unsignedinteger):
+            if int(arr.max()) > info.max:
+                raise ValueError("count_multi values must fit in int32")
+        elif arr.dtype.itemsize > 4:
+            if int(arr.min()) < info.min or int(arr.max()) > info.max:
+                raise ValueError("count_multi values must fit in int32")
+    return np.ascontiguousarray(arr, dtype=np.int32).view(np.uint32)
 
 
 def _iter_rg_batches(
@@ -291,7 +341,8 @@ def write_parquet_patterns(
     else:
         batches_iter = _iter_rg_batches(datas, rg_pats, max_rgs_per_batch)
 
-    with path.open("wb") as fp:
+    _invalidate_parquet_cache(path)
+    with atomic_write_path(path) as tmp_path, tmp_path.open("wb") as fp:
         fp.write(_PARQUET_MAGIC)
         fp.flush()
         batch_pats_list: list[int] = []
@@ -302,14 +353,14 @@ def write_parquet_patterns(
             if b_pats == 0:
                 continue
             b_rgs = (b_pats + rg_pats - 1) // rg_pats
-            po_src = np.ascontiguousarray(batch.place_ones, dtype=np.uint32)
-            pm_src = np.ascontiguousarray(batch.place_multi, dtype=np.uint32)
-            cm_src = np.ascontiguousarray(batch.count_multi).view(np.uint32)
+            po_src = _coerce_u32_positions(batch.place_ones)
+            pm_src = _coerce_u32_positions(batch.place_multi)
+            cm_src = _coerce_i32_counts_as_u32(batch.count_multi)
             ones_idx = np.ascontiguousarray(batch.ones_idx, dtype=np.uint64)
             multi_idx = np.ascontiguousarray(batch.multi_idx, dtype=np.uint64)
 
             meta_batch = rs.write_batch_zstd(
-                fp.fileno(),
+                fp,
                 po_src,
                 pm_src,
                 cm_src,
@@ -323,18 +374,21 @@ def write_parquet_patterns(
                 shuffle,
                 check_sorted,
                 min(workers, b_rgs),
+                pq_codec == "ZSTD",
             )
             batch_pats_list.append(b_pats)
             meta_batches_list.append(meta_batch)
 
         rs.write_parquet_footer(
-            fp.fileno(),
+            fp,
             num_data,
             rg_pats,
             batch_pats_list,
             meta_batches_list,
             list(meta_kv.items()),
+            page_pats,
         )
+    _invalidate_parquet_cache(path)
 
 
 def read_parquet_metadata(
@@ -342,7 +396,7 @@ def read_parquet_metadata(
 ) -> dict[str, Any]:
     """Read header metadata from a Parquet v2 pattern file."""
     meta_dict, _ = _get_file_info(path, cache=cache)
-    return meta_dict
+    return dict(meta_dict)
 
 
 def read_parquet_ones_multi(
@@ -450,14 +504,35 @@ def read_parquet_patterns_with_counts(
     ):
         raise IndexError("Pattern range is out of bounds")
 
+    if (
+        ones_idx is None
+        and multi_idx is None
+        and (num_data == 0 or len(ranges) == 0)
+    ):
+        return (
+            np.empty(0, dtype=np.uint32),
+            np.empty(0, dtype=np.uint32),
+            np.empty(0, dtype=np.uint32),
+            np.empty(0, dtype=np.uint32),
+            np.empty(0, dtype=np.int32),
+        )
+
+    meta_dict, col_info = _get_file_info(path, cache=cache)
+
     if ones_idx is not None or multi_idx is not None:
         if ones_idx is None or multi_idx is None:
             raise ValueError("Pattern counts do not match Parquet v2 payload size")
+        expected_ones = int(meta_dict["num_ones"])
+        expected_multi = int(meta_dict["num_multi"])
         valid_pair = None if cache is None else cache.get("valid_idx")
         already_validated = (
             valid_pair is not None
             and valid_pair[0] is ones_idx
             and valid_pair[1] is multi_idx
+            and not ones_idx.flags.writeable
+            and not multi_idx.flags.writeable
+            and int(ones_idx[-1]) == expected_ones
+            and int(multi_idx[-1]) == expected_multi
         )
         if not already_validated:
             if (
@@ -465,8 +540,10 @@ def read_parquet_patterns_with_counts(
                 or multi_idx.ndim != 1
                 or ones_idx.size != num_data + 1
                 or multi_idx.size != num_data + 1
-                or ones_idx[0] != 0
-                or multi_idx[0] != 0
+                or int(ones_idx[0]) != 0
+                or int(multi_idx[0]) != 0
+                or int(ones_idx[-1]) != expected_ones
+                or int(multi_idx[-1]) != expected_multi
                 or np.any(ones_idx[1:] < ones_idx[:-1])
                 or np.any(multi_idx[1:] < multi_idx[:-1])
             ):
@@ -490,8 +567,6 @@ def read_parquet_patterns_with_counts(
         and int(ranges[0, 0]) == 0
         and int(ranges[0, 1]) == num_data
     )
-
-    _, col_info = _get_file_info(path, cache=cache)
 
     if single:
         single_workers = env_workers(

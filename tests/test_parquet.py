@@ -405,3 +405,174 @@ def test_parquet_errors(tmp_path: Path):
             shuffle=source.shuffle,
             payload_codec=source.payload_codec,
         )
+
+
+def test_parquet_concurrent_writes_no_deadlock(tmp_path: Path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setenv("EMCFILE_H5_WORKERS", "2")
+    monkeypatch.setenv("EMCFILE_PARQUET_CHUNK_BYTES", "64")
+    expected = _patterns(24)
+
+    def _write_and_verify(idx: int) -> bool:
+        out = tmp_path / f"concurrent_{idx}.parquet"
+        expected.write(out, position_encoding="delta", compression="zstd", shuffle=True)
+        return ef.open_patterns(out)[:] == expected
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(_write_and_verify, range(12)))
+    assert all(results)
+
+
+def _pq_fork_child(src_path: str, dst_path: str, conn) -> None:
+    try:
+        got = ef.open_patterns(src_path)[:]
+        got.write(
+            dst_path, position_encoding="delta", compression="zstd", shuffle=True
+        )
+        reopened = ef.open_patterns(dst_path)[:]
+        conn.send((got == reopened, len(reopened)))
+    except BaseException as exc:  # pragma: no cover - diagnostic path
+        conn.send((False, repr(exc)))
+    finally:
+        conn.close()
+
+
+def test_parquet_fork_safety(tmp_path: Path, monkeypatch):
+    import multiprocessing as mp
+
+    if "fork" not in mp.get_all_start_methods():
+        pytest.skip("fork start method unavailable on this platform")
+
+    monkeypatch.setenv("EMCFILE_H5_WORKERS", "2")
+    expected = _patterns(24)
+    src = tmp_path / "parent.parquet"
+    dst = tmp_path / "child.parquet"
+    expected.write(src, position_encoding="delta", compression="zstd", shuffle=True)
+    assert ef.open_patterns(src)[:] == expected
+
+    ctx = mp.get_context("fork")
+    parent_conn, child_conn = ctx.Pipe(duplex=False)
+    proc = ctx.Process(target=_pq_fork_child, args=(str(src), str(dst), child_conn))
+    proc.start()
+    child_conn.close()
+    proc.join(timeout=15)
+    if proc.is_alive():  # pragma: no cover
+        proc.kill()
+        pytest.fail("Forked Parquet worker hung (Rayon threadpool / mmap deadlock)")
+    assert proc.exitcode == 0
+    ok, payload = parent_conn.recv()
+    parent_conn.close()
+    assert ok, payload
+    assert payload == len(expected)
+    assert ef.open_patterns(dst)[:] == expected
+
+
+def test_parquet_validates_corrupt_offsets_and_rust_bounds(tmp_path: Path):
+    import emcfile_fast
+
+    expected = _patterns(4)
+    path = tmp_path / "bounds.parquet"
+    expected.write(path, position_encoding="delta", compression="zstd", shuffle=True)
+    source = ef.open_patterns(path)
+    source.init_idx()
+
+    bad_ones_idx = source.ones_idx.copy()
+    bad_ones_idx[-1] += 5
+    with pytest.raises(ValueError, match="Pattern counts do not match"):
+        pq_mod.read_parquet_patterns_with_counts(
+            path,
+            np.array([[0, source.num_data]], dtype=np.int64),
+            bad_ones_idx,
+            source.multi_idx,
+            num_data=source.num_data,
+            rg_pats=source.rg_pats,
+            position_encoding=source.position_encoding,
+            shuffle=source.shuffle,
+            payload_codec=source.payload_codec,
+        )
+
+    with pytest.raises(ValueError, match="exceed src length"):
+        emcfile_fast.parquet.encode_rg_u8(
+            np.array([1, 2], dtype=np.uint32),
+            np.array([0, 99], dtype=np.uint64),
+            0,
+            1,
+            True,
+            True,
+            False,
+        )
+    with pytest.raises(ValueError, match="out of bounds"):
+        emcfile_fast.parquet.encode_rg_u8(
+            np.array([1, 2], dtype=np.uint32),
+            np.array([0, 2], dtype=np.uint64),
+            0,
+            5,
+            True,
+            True,
+            False,
+        )
+
+
+def test_parquet_negative_zstd_level_and_multipage_stats(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("EMCFILE_PARQUET_CHUNK_BYTES", "128")
+    monkeypatch.setenv("EMCFILE_PARQUET_PAGE_BYTES", "16")
+    expected = _patterns(12)
+    path = tmp_path / "fast_neg_zstd.parquet"
+    expected.write(
+        path,
+        position_encoding="delta",
+        compression="zstd",
+        compression_opts=-3,
+        shuffle=True,
+    )
+    meta = pq_mod.read_parquet_metadata(path)
+    assert meta["compression"] == "zstd"
+    meta["compression"] = "mutated"
+    assert pq_mod.read_parquet_metadata(path)["compression"] == "zstd"
+
+    assert ef.open_patterns(path)[:] == expected
+
+    try:
+        import polars as pl
+    except ImportError:
+        pass
+    else:
+        df = pl.read_parquet(path)
+        assert len(df) == len(expected)
+
+
+def test_parquet_atomic_overwrite_while_mmap_open(tmp_path: Path):
+    import sys
+
+    p_large = _patterns(20)
+    p_mid = _patterns(9)
+    p_small = _patterns(3)
+    path = tmp_path / "live_overwrite.parquet"
+    p_large.write(path, position_encoding="delta", compression="zstd", shuffle=True)
+    assert ef.open_patterns(path)[:] == p_large
+
+    p_mid.write(
+        path,
+        overwrite=True,
+        position_encoding="delta",
+        compression="zstd",
+        shuffle=True,
+    )
+    assert ef.open_patterns(path)[:] == p_mid
+
+    if sys.platform != "win32":
+        src = ef.open_patterns(path)
+        with src.open() as reader:
+            first_before = reader[0].copy()
+            p_small.write(
+                path,
+                overwrite=True,
+                position_encoding="delta",
+                compression="zstd",
+                shuffle=True,
+            )
+            np.testing.assert_array_equal(reader[0], first_before)
+            assert ef.open_patterns(path)[:] == p_small
+
+
