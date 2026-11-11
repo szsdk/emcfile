@@ -399,10 +399,8 @@ impl RustRendererPlan {
         // SAFETY: `rendered` was freshly allocated with exclusive access here.
         let out_slice = unsafe { rendered.as_slice_mut()? };
 
-        py.detach(|| {
-            self.accumulate_sparse_zeroed(ones_s, multi_s, count_s, out_slice)
-        })
-        .map_err(PyValueError::new_err)?;
+        py.detach(|| self.accumulate_sparse_zeroed(ones_s, multi_s, count_s, out_slice))
+            .map_err(PyValueError::new_err)?;
 
         let mask = if self.has_any_masked {
             PyArray1::from_slice(py, &self.mask_bool).reshape([self.height, self.width])?
@@ -1006,8 +1004,463 @@ fn finish_prepared_renderer<'py>(
     ))
 }
 
+#[inline]
+fn solve_3x3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> Option<[f64; 3]> {
+    for col in 0..3 {
+        let mut pivot_row = col;
+        let mut max_abs = a[col][col].abs();
+        for (row, values) in a.iter().enumerate().skip(col + 1) {
+            let v = values[col].abs();
+            if v > max_abs {
+                max_abs = v;
+                pivot_row = row;
+            }
+        }
+        if !max_abs.is_finite() || max_abs <= f64::MIN_POSITIVE {
+            return None;
+        }
+        if pivot_row != col {
+            a.swap(col, pivot_row);
+            b.swap(col, pivot_row);
+        }
+        let inv_piv = 1.0 / a[col][col];
+        for row in (col + 1)..3 {
+            let factor = a[row][col] * inv_piv;
+            let pivot = a[col];
+            for (value, pivot_value) in a[row].iter_mut().zip(pivot).skip(col) {
+                *value -= factor * pivot_value;
+            }
+            b[row] -= factor * b[col];
+        }
+    }
+    let mut x = [0.0_f64; 3];
+    for i in (0..3).rev() {
+        let mut s = b[i];
+        for j in (i + 1)..3 {
+            s -= a[i][j] * x[j];
+        }
+        x[i] = s / a[i][i];
+        if !x[i].is_finite() {
+            return None;
+        }
+    }
+    Some(x)
+}
+
+#[inline]
+fn radius_std_strided(coor: &[f64], n: usize, step: usize, r: [f64; 3]) -> f64 {
+    let mut cnt = 0_usize;
+    let mut mean = 0.0_f64;
+    let mut m2 = 0.0_f64;
+    let mut i = 0_usize;
+    while i < n {
+        let dx = coor[3 * i] - r[0];
+        let dy = coor[3 * i + 1] - r[1];
+        let dz = coor[3 * i + 2] - r[2];
+        let d = (dx * dx + dy * dy + dz * dz).sqrt();
+        cnt += 1;
+        let delta = d - mean;
+        mean += delta / (cnt as f64);
+        let delta2 = d - mean;
+        m2 += delta * delta2;
+        i += step;
+    }
+    if cnt == 0 {
+        return 0.0;
+    }
+    (m2 / (cnt as f64)).max(0.0).sqrt()
+}
+
+fn kasa_sphere_init(coor: &[f64], n: usize, step: usize) -> Option<[f64; 3]> {
+    let mut mx = 0.0_f64;
+    let mut my = 0.0_f64;
+    let mut mz = 0.0_f64;
+    let mut cnt = 0_usize;
+    let mut i = 0_usize;
+    while i < n {
+        mx += coor[3 * i];
+        my += coor[3 * i + 1];
+        mz += coor[3 * i + 2];
+        cnt += 1;
+        i += step;
+    }
+    if cnt < 4 {
+        return None;
+    }
+    let inv_n = 1.0 / (cnt as f64);
+    mx *= inv_n;
+    my *= inv_n;
+    mz *= inv_n;
+
+    let mut q_mean = 0.0_f64;
+    i = 0;
+    while i < n {
+        let ux = coor[3 * i] - mx;
+        let uy = coor[3 * i + 1] - my;
+        let uz = coor[3 * i + 2] - mz;
+        q_mean += ux * ux + uy * uy + uz * uz;
+        i += step;
+    }
+    q_mean *= inv_n;
+
+    let mut a = [[0.0_f64; 3]; 3];
+    let mut b = [0.0_f64; 3];
+    i = 0;
+    while i < n {
+        let ux = coor[3 * i] - mx;
+        let uy = coor[3 * i + 1] - my;
+        let uz = coor[3 * i + 2] - mz;
+        let q = (ux * ux + uy * uy + uz * uz) - q_mean;
+        let u = [ux, uy, uz];
+        for r_idx in 0..3 {
+            b[r_idx] += 0.5 * q * u[r_idx];
+            for c_idx in 0..3 {
+                a[r_idx][c_idx] += u[r_idx] * u[c_idx];
+            }
+        }
+        i += step;
+    }
+    let dc = solve_3x3(a, b)?;
+    Some([mx + dc[0], my + dc[1], mz + dc[2]])
+}
+
+fn nelder_mead_sphere(
+    coor: &[f64],
+    n: usize,
+    step: usize,
+    x0: [f64; 3],
+    xatol: f64,
+    max_iter: usize,
+) -> ([f64; 3], f64) {
+    let mut s = [x0; 4];
+    for k in 0..3 {
+        let h = if x0[k] != 0.0 { 0.05 * x0[k] } else { 0.00025 };
+        s[k + 1][k] += h;
+    }
+    let mut f = [
+        radius_std_strided(coor, n, step, s[0]),
+        radius_std_strided(coor, n, step, s[1]),
+        radius_std_strided(coor, n, step, s[2]),
+        radius_std_strided(coor, n, step, s[3]),
+    ];
+
+    for _ in 0..max_iter {
+        // Sort 4 vertices by objective value
+        for i in 0..3 {
+            for j in (i + 1)..4 {
+                if f[j] < f[i] {
+                    f.swap(i, j);
+                    s.swap(i, j);
+                }
+            }
+        }
+        let mut max_dx = 0.0_f64;
+        for i in 1..4 {
+            for (value, best_value) in s[i].iter().zip(s[0]) {
+                let d = (value - best_value).abs();
+                if d > max_dx {
+                    max_dx = d;
+                }
+            }
+        }
+        if max_dx <= xatol {
+            break;
+        }
+
+        let cbar = [
+            (s[0][0] + s[1][0] + s[2][0]) / 3.0,
+            (s[0][1] + s[1][1] + s[2][1]) / 3.0,
+            (s[0][2] + s[1][2] + s[2][2]) / 3.0,
+        ];
+        let xr = [
+            2.0 * cbar[0] - s[3][0],
+            2.0 * cbar[1] - s[3][1],
+            2.0 * cbar[2] - s[3][2],
+        ];
+        let fr = radius_std_strided(coor, n, step, xr);
+
+        if fr < f[0] {
+            let xe = [
+                3.0 * cbar[0] - 2.0 * s[3][0],
+                3.0 * cbar[1] - 2.0 * s[3][1],
+                3.0 * cbar[2] - 2.0 * s[3][2],
+            ];
+            let fe = radius_std_strided(coor, n, step, xe);
+            if fe < fr {
+                s[3] = xe;
+                f[3] = fe;
+            } else {
+                s[3] = xr;
+                f[3] = fr;
+            }
+        } else if fr < f[2] {
+            s[3] = xr;
+            f[3] = fr;
+        } else {
+            let xc = if fr < f[3] {
+                [
+                    0.5 * (cbar[0] + xr[0]),
+                    0.5 * (cbar[1] + xr[1]),
+                    0.5 * (cbar[2] + xr[2]),
+                ]
+            } else {
+                [
+                    0.5 * (cbar[0] + s[3][0]),
+                    0.5 * (cbar[1] + s[3][1]),
+                    0.5 * (cbar[2] + s[3][2]),
+                ]
+            };
+            let fc = radius_std_strided(coor, n, step, xc);
+            if fc < fr.min(f[3]) {
+                s[3] = xc;
+                f[3] = fc;
+            } else {
+                for i in 1..4 {
+                    let best = s[0];
+                    for (value, best_value) in s[i].iter_mut().zip(best) {
+                        *value = 0.5 * (best_value + *value);
+                    }
+                    f[i] = radius_std_strided(coor, n, step, s[i]);
+                }
+            }
+        }
+    }
+    // The last iteration may have improved a vertex after the sort.
+    let best = (0..4).min_by(|&i, &j| f[i].total_cmp(&f[j])).unwrap();
+    (s[best], f[best])
+}
+
+/// Gauss-Newton Gauss-Newton / Levenberg-Marquardt refinement minimizing `std(||x - r||)`.
+fn gauss_newton_sphere(coor: &[f64], n: usize, step: usize, mut r: [f64; 3]) -> ([f64; 3], f64) {
+    let mut lambda = 1e-12_f64;
+    let mut cur_std = radius_std_strided(coor, n, step, r);
+
+    for _ in 0..25 {
+        let mut cnt = 0_usize;
+        let mut sum_d = 0.0_f64;
+        let mut sum_u = [0.0_f64; 3];
+        let mut sum_du = [0.0_f64; 3];
+        let mut sum_uu = [[0.0_f64; 3]; 3];
+
+        let mut i = 0_usize;
+        while i < n {
+            let dx = coor[3 * i] - r[0];
+            let dy = coor[3 * i + 1] - r[1];
+            let dz = coor[3 * i + 2] - r[2];
+            let d = (dx * dx + dy * dy + dz * dz).sqrt();
+            if d > 1e-15 {
+                let inv_d = 1.0 / d;
+                let u = [dx * inv_d, dy * inv_d, dz * inv_d];
+                cnt += 1;
+                sum_d += d;
+                sum_du[0] += dx;
+                sum_du[1] += dy;
+                sum_du[2] += dz;
+                for a in 0..3 {
+                    sum_u[a] += u[a];
+                    for b in a..3 {
+                        sum_uu[a][b] += u[a] * u[b];
+                    }
+                }
+            }
+            i += step;
+        }
+        if cnt < 4 {
+            break;
+        }
+        let inv_n = 1.0 / (cnt as f64);
+        let d_mean = sum_d * inv_n;
+        let u_mean = [sum_u[0] * inv_n, sum_u[1] * inv_n, sum_u[2] * inv_n];
+
+        let mut h = [[0.0_f64; 3]; 3];
+        let mut g = [0.0_f64; 3];
+        for a in 0..3 {
+            g[a] = sum_du[a] - (cnt as f64) * d_mean * u_mean[a];
+            for b in a..3 {
+                let val = sum_uu[a][b] - (cnt as f64) * u_mean[a] * u_mean[b];
+                h[a][b] = val;
+                h[b][a] = val;
+            }
+            h[a][a] += lambda * h[a][a].abs().max(1e-12);
+        }
+
+        if cur_std <= 1e-12 * d_mean.abs().max(1.0) {
+            break;
+        }
+
+        let Some(delta) = solve_3x3(h, g) else {
+            lambda *= 10.0;
+            continue;
+        };
+        let step_norm = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+        let r_norm = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt();
+        let cand = [r[0] + delta[0], r[1] + delta[1], r[2] + delta[2]];
+        let cand_std = radius_std_strided(coor, n, step, cand);
+        if cand_std <= cur_std {
+            r = cand;
+            cur_std = cand_std;
+            lambda = (lambda * 0.25).max(1e-15);
+            if step_norm <= 1e-9 * (1.0 + r_norm) {
+                break;
+            }
+        } else {
+            lambda *= 10.0;
+            if lambda > 1e8 {
+                break;
+            }
+        }
+    }
+    (r, cur_std)
+}
+
+fn fit_ewald_sphere_center_core(coor: &[f64], n: usize) -> Result<[f64; 4], &'static str> {
+    if coor.iter().any(|value| !value.is_finite()) {
+        return Err("coordinates must contain only finite values");
+    }
+    if n < 3 {
+        return Err("The input coor is degenerated to a line.");
+    }
+
+    let mut found_ca = 0_usize;
+    let mut n0 = [0.0_f64; 3];
+    let mut found = false;
+
+    'outer: for ca in 0..n {
+        let ax = coor[3 * ca];
+        let ay = coor[3 * ca + 1];
+        let az = coor[3 * ca + 2];
+        for cb in (ca + 1)..n {
+            let dbx = coor[3 * cb] - ax;
+            let dby = coor[3 * cb + 1] - ay;
+            let dbz = coor[3 * cb + 2] - az;
+            let nb = (dbx * dbx + dby * dby + dbz * dbz).sqrt();
+            if !nb.is_finite() || nb <= 0.0 {
+                continue;
+            }
+            let inv_nb = 1.0 / nb;
+            let ubx = dbx * inv_nb;
+            let uby = dby * inv_nb;
+            let ubz = dbz * inv_nb;
+
+            for cc in (cb + 1)..n {
+                let dcx = coor[3 * cc] - ax;
+                let dcy = coor[3 * cc + 1] - ay;
+                let dcz = coor[3 * cc + 2] - az;
+                let nc = (dcx * dcx + dcy * dcy + dcz * dcz).sqrt();
+                if !nc.is_finite() || nc <= 0.0 {
+                    continue;
+                }
+                let inv_nc = 1.0 / nc;
+                let ucx = dcx * inv_nc;
+                let ucy = dcy * inv_nc;
+                let ucz = dcz * inv_nc;
+
+                let cx = uby * ucz - ubz * ucy;
+                let cy = ubz * ucx - ubx * ucz;
+                let cz = ubx * ucy - uby * ucx;
+                let n_norm_sq = cx * cx + cy * cy + cz * cz;
+                if n_norm_sq > 1e-2 {
+                    found_ca = ca;
+                    n0 = [cx, cy, cz];
+                    found = true;
+                    break 'outer;
+                }
+            }
+        }
+    }
+
+    if !found {
+        return Err("The input coor is degenerated to a line.");
+    }
+
+    // Check 2D coplanarity: `np.all(np.abs(np.dot(coor_shift, n0)) < 1e-3)`
+    let ax = coor[3 * found_ca];
+    let ay = coor[3 * found_ca + 1];
+    let az = coor[3 * found_ca + 2];
+    let mut is_2d = true;
+    for i in 0..n {
+        if i == found_ca {
+            continue;
+        }
+        let dx = coor[3 * i] - ax;
+        let dy = coor[3 * i + 1] - ay;
+        let dz = coor[3 * i + 2] - az;
+        let len = (dx * dx + dy * dy + dz * dz).sqrt();
+        if !len.is_finite() || len <= 0.0 {
+            is_2d = false;
+            break;
+        }
+        let dot = (dx * n0[0] + dy * n0[1] + dz * n0[2]) / len;
+        if !dot.is_finite() || dot.abs() >= 1e-3 {
+            is_2d = false;
+            break;
+        }
+    }
+    if is_2d {
+        return Ok([n0[0], n0[1], n0[2], 0.0]);
+    }
+
+    // Keep the Python path's sampling and planar thresholds. Optimize the
+    // sample first so only the final refinement scans the full detector.
+    let sub_step = if n < 32 { 1 } else { n / 32 };
+    let (mut best_r, mut best_std) =
+        nelder_mead_sphere(coor, n, sub_step, [0.0, 0.0, -1.0], 1e-8, 600);
+
+    // An algebraic sphere fit provides a second starting point when the
+    // simplex from [0, 0, -1] stalls. Singular samples use the simplex alone.
+    if let Some(r_kasa) = kasa_sphere_init(coor, n, sub_step) {
+        let (r_gn, std_gn) = gauss_newton_sphere(coor, n, sub_step, r_kasa);
+        if std_gn < best_std {
+            best_r = r_gn;
+            best_std = std_gn;
+        }
+    }
+
+    let (r_gn_sub, std_gn_sub) = gauss_newton_sphere(coor, n, sub_step, best_r);
+    if std_gn_sub < best_std {
+        best_r = r_gn_sub;
+    }
+
+    let (mut final_r, final_std) = gauss_newton_sphere(coor, n, 1, best_r);
+    if n <= 1024 {
+        let (r_nm, std_nm) = nelder_mead_sphere(coor, n, 1, final_r, 1e-8, 400);
+        if std_nm < final_std {
+            final_r = r_nm;
+        }
+    }
+
+    Ok([final_r[0], final_r[1], final_r[2], 1.0])
+}
+
+/// Single-threaded Rust implementation of `fit_ewald_sphere_center`.
+#[pyfunction]
+pub fn fit_ewald_sphere_center_rs<'py>(
+    py: Python<'py>,
+    coordinates: PyReadonlyArray2<'py, f64>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    if !coordinates.is_c_contiguous() {
+        return Err(PyValueError::new_err("coordinates must be C-contiguous"));
+    }
+    let shape = coordinates.shape();
+    if shape.len() != 2 || shape[1] != 3 {
+        return Err(PyValueError::new_err(
+            "coordinates must have shape (num_points, 3)",
+        ));
+    }
+    let n = shape[0];
+    let coor_s = coordinates
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("coordinates must be C-contiguous"))?;
+
+    let vec4 = py
+        .detach(|| fit_ewald_sphere_center_core(coor_s, n))
+        .map_err(PyValueError::new_err)?;
+    Ok(PyArray1::from_slice(py, &vec4))
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustRendererPlan>()?;
     m.add_function(wrap_pyfunction!(prepare_detector_renderer, m)?)?;
+    m.add_function(wrap_pyfunction!(fit_ewald_sphere_center_rs, m)?)?;
     Ok(())
 }

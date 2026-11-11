@@ -550,3 +550,127 @@ def test_renderer_direct_sparse_patterns(tmp_path, monkeypatch, det):
         ren_main.render(wrong_sp)
     with pytest.raises(ValueError, match="pixels"):
         ren_main.render(pats_sub)
+
+
+def test_fit_ewald_sphere_center_parity_and_edge_cases(monkeypatch, det):
+    fast = pytest.importorskip("emcfile_fast")
+    if not hasattr(fast.detector, "fit_ewald_sphere_center_rs"):
+        pytest.skip("emcfile-fast does not provide sphere fitting")
+    monkeypatch.delenv("EMCFILE_DISABLE_DET_ACCEL", raising=False)
+    # 3D sphere center parity
+    v_fast = ef.fit_ewald_sphere_center(det.coordinates)
+    monkeypatch.setenv("EMCFILE_DISABLE_DET_ACCEL", "1")
+    v_py = ef.fit_ewald_sphere_center(det.coordinates)
+    monkeypatch.delenv("EMCFILE_DISABLE_DET_ACCEL", raising=False)
+    np.testing.assert_allclose(v_fast, v_py, rtol=1e-5, atol=1e-5)
+
+    # 2D coplanar detector parity
+    det_2d = ef.project_detector_to_2d(det)
+    v2_fast = ef.fit_ewald_sphere_center(det_2d.coordinates)
+    monkeypatch.setenv("EMCFILE_DISABLE_DET_ACCEL", "1")
+    v2_py = ef.fit_ewald_sphere_center(det_2d.coordinates)
+    monkeypatch.delenv("EMCFILE_DISABLE_DET_ACCEL", raising=False)
+    np.testing.assert_allclose(v2_fast, v2_py, rtol=1e-12, atol=1e-12)
+    assert v2_fast[3] == 0.0
+
+    # Degenerate collinear coordinates raise ValueError
+    line_coords = np.column_stack(
+        [np.arange(10, dtype=np.float64), np.zeros(10), np.zeros(10)]
+    )
+    with pytest.raises(ValueError, match="degenerated to a line"):
+        ef.fit_ewald_sphere_center(line_coords)
+    with pytest.raises(ValueError, match="degenerated to a line"):
+        ef.fit_ewald_sphere_center(line_coords[:2])
+
+
+@pytest.mark.parametrize("size", [4, 31, 32, 1025])
+@pytest.mark.parametrize("scale", [1e-9, 1.0, 1e6])
+def test_fit_sphere_known_center(size, scale, monkeypatch):
+    fast = pytest.importorskip("emcfile_fast")
+    if not hasattr(fast.detector, "fit_ewald_sphere_center_rs"):
+        pytest.skip("emcfile-fast does not provide sphere fitting")
+    monkeypatch.delenv("EMCFILE_DISABLE_DET_ACCEL", raising=False)
+    rng = np.random.default_rng(17)
+    center = np.array([0.3, -0.2, -1.0]) * scale
+    directions = rng.normal(size=(size, 3))
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+    coordinates = center + scale * directions
+    original = coordinates.copy()
+    result = ef.fit_ewald_sphere_center(coordinates)
+    np.testing.assert_allclose(result[:3] / scale, center / scale, atol=1e-7)
+    assert result[3] == 1.0
+    np.testing.assert_array_equal(coordinates, original)
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+@pytest.mark.parametrize("layout", ["float32", "strided", "fortran", "integer"])
+def test_fit_sphere_planar_input_layouts(monkeypatch, disabled, layout):
+    monkeypatch.setenv("EMCFILE_DISABLE_DET_ACCEL", str(int(disabled)))
+    coordinates = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]])
+    if layout == "float32":
+        coordinates = coordinates.astype(np.float32)
+    elif layout == "strided":
+        coordinates = np.repeat(coordinates.astype(float), 2, axis=0)[::2]
+    elif layout == "fortran":
+        coordinates = np.asfortranarray(coordinates, dtype=float)
+    original = coordinates.copy()
+    np.testing.assert_array_equal(ef.fit_ewald_sphere_center(coordinates), [0, 0, 1, 0])
+    np.testing.assert_array_equal(coordinates, original)
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+@pytest.mark.parametrize(
+    "coordinates,match",
+    [
+        (np.zeros(3), "shape"),
+        (np.zeros((3, 2)), "shape"),
+        (np.zeros((0, 3)), "degenerated to a line"),
+        (np.zeros((2, 3)), "degenerated to a line"),
+        (np.full((4, 3), np.nan), "finite"),
+        (np.full((4, 3), np.inf), "finite"),
+    ],
+)
+def test_fit_sphere_invalid_inputs(monkeypatch, disabled, coordinates, match):
+    monkeypatch.setenv("EMCFILE_DISABLE_DET_ACCEL", str(int(disabled)))
+    with pytest.raises(ValueError, match=match):
+        ef.fit_ewald_sphere_center(coordinates)
+
+
+def test_fit_sphere_older_extension_fallback(monkeypatch, det):
+    from types import SimpleNamespace
+
+    from emcfile import _detector
+
+    monkeypatch.setattr(_detector, "_get_det_rs", lambda: SimpleNamespace())
+    result = ef.fit_ewald_sphere_center(det.coordinates)
+    np.testing.assert_allclose(result[:3], [0, 0, -128], atol=1e-5)
+
+
+def test_fit_sphere_noisy_data(monkeypatch):
+    fast = pytest.importorskip("emcfile_fast")
+    if not hasattr(fast.detector, "fit_ewald_sphere_center_rs"):
+        pytest.skip("emcfile-fast does not provide sphere fitting")
+    rng = np.random.default_rng(73)
+    directions = rng.normal(size=(2000, 3))
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+    coordinates = np.array([2.0, -3.0, -20.0]) + 20 * directions
+    coordinates += rng.normal(scale=0.01, size=coordinates.shape)
+    monkeypatch.delenv("EMCFILE_DISABLE_DET_ACCEL", raising=False)
+    actual = ef.fit_ewald_sphere_center(coordinates)
+    monkeypatch.setenv("EMCFILE_DISABLE_DET_ACCEL", "1")
+    expected = ef.fit_ewald_sphere_center(coordinates)
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(actual[:3], [2, -3, -20], atol=0.002)
+
+
+def test_fit_sphere_rust_input_validation():
+    fast = pytest.importorskip("emcfile_fast")
+    fit = getattr(fast.detector, "fit_ewald_sphere_center_rs", None)
+    if fit is None:
+        pytest.skip("emcfile-fast does not provide sphere fitting")
+    with pytest.raises(ValueError, match="finite"):
+        fit(np.full((4, 3), np.nan))
+    with pytest.raises(ValueError, match="shape"):
+        fit(np.zeros((4, 2)))
+    with pytest.raises(ValueError, match="contiguous"):
+        fit(np.ones((8, 3))[::2])

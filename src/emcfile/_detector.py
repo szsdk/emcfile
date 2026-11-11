@@ -926,8 +926,16 @@ def fit_ewald_sphere_center(
     np.ndarray:
         The projection coordinate of the center.
     """
-    # if coor.shape[0] < 4:
-    #     raise ValueError("At least 4 points are required.")
+    coordinates = np.ascontiguousarray(coordinates, dtype=np.float64)
+    if coordinates.ndim != 2 or coordinates.shape[1] != 3:
+        raise ValueError("coordinates must have shape (num_points, 3)")
+    if not np.isfinite(coordinates).all():
+        raise ValueError("coordinates must contain only finite values")
+
+    # Older emcfile-fast installations can still use the Python implementation.
+    fit_rs = getattr(_get_det_rs(), "fit_ewald_sphere_center_rs", None)
+    if fit_rs is not None:
+        return cast(npt.NDArray[np.float64], fit_rs(coordinates))
 
     # 2d detector test
     from scipy.optimize import minimize

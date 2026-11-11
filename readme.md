@@ -195,6 +195,16 @@ images = renderer.render(np.stack([pixel_values, pixel_values]))
 Pixels not covered by the rendered detector remain `NaN` in the underlying
 rendered data.
 
+With `emcfile-fast` installed, detector rendering and
+`fit_ewald_sphere_center(coordinates)` use Rust acceleration. Sphere fitting
+accepts finite coordinates with shape `(num_points, 3)` and converts them to
+contiguous float64 arrays. It returns `[cx, cy, cz, 1]` for a sphere or
+`[nx, ny, nz, 0]` for a planar detector. The SciPy implementation remains
+available when the extension is absent or predates sphere fitting support.
+Set `EMCFILE_DISABLE_DET_ACCEL=1` to use the Python detector paths.
+Run `uv run --extra fast python benchmarks/detector_sphere_fit.py` to compare
+sphere fitting performance on synthetic detector caps.
+
 ## File formats and paths
 
 | Data | Supported formats |
