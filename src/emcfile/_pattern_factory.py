@@ -12,7 +12,6 @@ from typing_extensions import deprecated
 
 from ._emc_patterns import SPARSE_PATTERN, PatternsSOne, _full, _ones, _zeros
 from ._hdf5 import PATH_TYPE, H5Path
-from ._indexing import split_range
 from ._pattern_files import _PatternsSOneBytes, file_patterns
 
 __all__ = ["patterns"]
@@ -22,14 +21,18 @@ T1 = TypeVar("T1", bound=npt.NBitBase)
 
 
 def _from_dense_array(arr: npt.NDArray[np.integer[T1]]) -> PatternsSOne:
+    if arr.ndim == 1:
+        arr = arr[None, :]
+    elif arr.ndim != 2:
+        raise ValueError(f"Dense pattern array must be 1D or 2D, got {arr.ndim}D")
     idx = arr == 1
     ones = idx.sum(axis=1)
     place_ones = idx.nonzero()[1]
     idx = arr > 1
     multi = idx.sum(axis=1)
-    idx = idx.nonzero()
-    place_multi = idx[1]
-    count_multi = arr[idx[0], idx[1]]
+    nz = idx.nonzero()
+    place_multi = nz[1]
+    count_multi = arr[nz[0], nz[1]]
     return PatternsSOne(
         arr.shape[1],
         ones.astype(np.uint32),
@@ -41,8 +44,15 @@ def _from_dense_array(arr: npt.NDArray[np.integer[T1]]) -> PatternsSOne:
 
 
 def _from_coo_array(coo: coo_matrix | coo_array) -> PatternsSOne:
+    if coo.ndim != 2:
+        raise ValueError(f"Sparse pattern input must be 2D, got {coo.ndim}D")
+    if not np.issubdtype(coo.data.dtype, np.integer):
+        raise ValueError(f"{coo.data.dtype} is not supported")
     coo = coo.copy()
     coo.sum_duplicates()
+    neg = coo.data < 0
+    if np.any(neg):
+        coo.data[neg] = 0
     idx = coo.data == 1
     c = coo_matrix((np.ones(idx.sum(), "i4"), (coo.row[idx], coo.col[idx])), coo.shape)
     coo.data[idx] = 0
@@ -73,10 +83,17 @@ def coo_to_SOne_kernel(coo: coo_matrix | coo_array) -> PatternsSOne:
 
 
 def _from_sparse_patterns(src: Sequence[SPARSE_PATTERN]) -> PatternsSOne:
+    if len(src) == 0:
+        raise ValueError("SPARSE_PATTERN sequence must not be empty")
+    num_pix = int(src[0].num_pix)
+    if num_pix < 0:
+        raise ValueError("num_pix must be non-negative")
+    if any(int(s.num_pix) != num_pix for s in src):
+        raise ValueError("Inconsistent number of pixels in SPARSE_PATTERN sequence")
     return PatternsSOne(
-        num_pix=int(src[0].num_pix),
-        ones=np.array([len(s.place_ones) for s in src]).astype(np.uint32),
-        multi=np.array([len(s.place_multi) for s in src]).astype(np.uint32),
+        num_pix=num_pix,
+        ones=np.array([len(s.place_ones) for s in src], dtype=np.uint32),
+        multi=np.array([len(s.place_multi) for s in src], dtype=np.uint32),
         place_ones=np.concatenate([s.place_ones for s in src]).astype(np.uint32),
         place_multi=np.concatenate([s.place_multi for s in src]).astype(np.uint32),
         count_multi=np.concatenate([s.count_multi for s in src]).astype(np.int32),
@@ -156,7 +173,11 @@ def patterns(
             return file_patterns(src)[start:end]
         case PatternsSOne():
             return src[start:end]
+        case bool() | np.bool_():
+            raise TypeError(f"Unsupported pattern source type: {type(src).__name__}")
         case int() | np.integer():
+            if int(src) < 0:
+                raise ValueError("Number of pixels must be non-negative")
             return PatternsSOne(
                 int(src),
                 np.empty((0,), np.uint32),
@@ -165,15 +186,38 @@ def patterns(
                 np.empty((0,), np.uint32),
                 np.empty((0,), np.int32),
             )
-        case ((int() | np.integer(), int() | np.integer()) as shape, 0):
-            return _zeros(cast(tuple[int, int], shape))
-        case ((int() | np.integer(), int() | np.integer()) as shape, 1):
-            return _ones(cast(tuple[int, int], shape))
         case (
             (int() | np.integer(), int() | np.integer()) as shape,
             int() | np.integer() as v,
+        ) if not (
+            isinstance(shape[0], (bool, np.bool_))
+            or isinstance(shape[1], (bool, np.bool_))
+            or isinstance(v, (bool, np.bool_))
         ):
-            return _full(cast(tuple[int, int], shape), int(v))
+            r, c = int(shape[0]), int(shape[1])
+            val = int(v)
+            if r < 0 or c < 0:
+                raise ValueError("Pattern dimensions must be non-negative")
+            if val < 0:
+                raise ValueError("Constant photon count must be non-negative")
+            if val == 0:
+                ans = _zeros((r, c))
+            elif val == 1:
+                ans = _ones((r, c))
+            else:
+                ans = _full((r, c), val)
+            if (start is not None) or (end is not None):
+                ans = ans[start:end]
+            return ans
+        case np.ndarray() if (
+            src.dtype == object
+            and src.ndim == 1
+            and (len(src) == 0 or all(isinstance(i, SPARSE_PATTERN) for i in src))
+        ):
+            ans = _from_sparse_patterns(cast(Sequence[SPARSE_PATTERN], list(src)))
+            if (start is not None) or (end is not None):
+                ans = ans[start:end]
+            return ans
         case np.ndarray():
             if not np.issubdtype(src.dtype, np.integer):
                 raise ValueError(f"{src.dtype} is not supported")
@@ -182,19 +226,22 @@ def patterns(
                 ans = ans[start:end]
             return ans
         case coo_array() | coo_matrix():
-            return _from_coo_array(src)
+            ans = _from_coo_array(src)
+            if (start is not None) or (end is not None):
+                ans = ans[start:end]
+            return ans
         case sparray() | spmatrix():
-            return cast(
-                PatternsSOne,
-                np.concatenate(
-                    [
-                        patterns(np.asarray((src[a:b]).todense()))
-                        for a, b in split_range(
-                            0, src.shape[0], src.shape[0] // 1024 + 1
-                        )
-                    ]
-                ),
+            if src.ndim != 2:
+                raise ValueError(f"Sparse pattern input must be 2D, got {src.ndim}D")
+            sliced = (
+                src[start:end] if (start is not None or end is not None) else src
             )
-        case list() | np.ndarray() if all(isinstance(i, SPARSE_PATTERN) for i in src):
-            return _from_sparse_patterns(cast(Sequence[SPARSE_PATTERN], src))
+            return _from_coo_array(sliced.tocoo())
+        case list() | tuple() if (
+            len(src) == 0 or all(isinstance(i, SPARSE_PATTERN) for i in src)
+        ):
+            ans = _from_sparse_patterns(cast(Sequence[SPARSE_PATTERN], src))
+            if (start is not None) or (end is not None):
+                ans = ans[start:end]
+            return ans
     raise TypeError(f"Unsupported pattern source type: {type(src).__name__}")

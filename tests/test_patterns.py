@@ -858,3 +858,269 @@ def test_pattern_repr(small_patterns):
     representation = repr(small_patterns)
     assert f"Number of patterns: {small_patterns.num_patterns}" in representation
     assert f"Number of pixels: {small_patterns.num_pixels}" in representation
+
+
+def test_patterns_coerces_non_32bit_dtypes_and_roundtrips(tmp_path):
+    p = ef.PatternsSOne(
+        8,
+        np.array([2, 0, 1], dtype=np.int64),
+        np.array([1, 1, 0], dtype=np.int16),
+        np.array([1, 5, 3], dtype=np.int64),
+        np.array([2, 6], dtype=np.uint64),
+        np.array([4, 9], dtype=np.int64),
+    )
+    assert p.ones.dtype == np.uint32
+    assert p.multi.dtype == np.uint32
+    assert p.place_ones.dtype == np.uint32
+    assert p.place_multi.dtype == np.uint32
+    assert p.count_multi.dtype == np.int32
+    assert not p.ones_offsets.flags.writeable
+    assert not p.multi_offsets.flags.writeable
+
+    cat = np.concatenate([p, p], axis=1)
+    assert cat.ones.dtype == np.uint32
+    assert cat.multi.dtype == np.uint32
+    assert cat.place_ones.dtype == np.uint32
+    assert cat.place_multi.dtype == np.uint32
+    assert cat.count_multi.dtype == np.int32
+    np.testing.assert_array_equal(
+        cat.todense(), np.concatenate([p.todense(), p.todense()], axis=1)
+    )
+
+    emc_file = tmp_path / "coerced.emc"
+    p.write(emc_file)
+    assert ef.patterns(emc_file) == p
+
+    buf = io.BytesIO()
+    p.write(buf)
+    buf.seek(0)
+    assert ef.patterns(buf) == p
+
+    with pytest.raises(ValueError, match="non-negative"):
+        ef.PatternsSOne(4, [-1], [0], [], [], [])
+    with pytest.raises(ValueError, match="exceed uint32"):
+        ef.PatternsSOne(4, [1], [0], [1 << 40], [], [])
+    with pytest.raises(ValueError, match="exceed int32"):
+        ef.PatternsSOne(4, [0], [1], [], [0], [1 << 40])
+
+
+def test_2d_mixed_int_indexing_matches_numpy(tmp_path):
+    rng = np.random.default_rng(12345)
+    dense = rng.choice(
+        [0, 0, 0, 1, 2, 5], size=(7, 11), replace=True
+    ).astype(np.int32)
+    mem = ef.patterns(dense)
+
+    emc_file = tmp_path / "idx.emc"
+    h5_v2_file = tmp_path / "idx_v2.h5"
+    h5_v1_file = tmp_path / "idx_v1.h5"
+    mem.write(emc_file)
+    mem.write(h5_v2_file, h5version="2")
+    mem.write(h5_v1_file, h5version="1")
+
+    from emcfile._pattern_files import _PatternsSOneBytes
+
+    raw_bytes = io.BytesIO()
+    mem.write(raw_bytes)
+    raw_bytes.seek(0)
+
+    sources = [
+        mem,
+        ef.open_patterns(emc_file),
+        _PatternsSOneBytes(raw_bytes),
+        ef.open_patterns(h5_v2_file),
+        ef.open_patterns(h5_v1_file),
+        ef.EMCPatternCollection([mem[:3], ef.open_patterns(emc_file)[3:]]),
+    ]
+    try:
+        import emcfile_fast  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        pq_file = tmp_path / "idx.parquet"
+        mem.write(pq_file)
+        sources.append(ef.open_patterns(pq_file))
+
+    row_mask = np.array([True, False, True, False, False, True, False])
+    col_mask = np.array(
+        [False, True, True, False, True, False, False, True, False, True, False]
+    )
+    row_ids = np.array([5, 0, 5, -1], dtype=np.int64)
+    col_ids = np.array([9, 2, 9, -2], dtype=np.int64)
+
+    scalar_cases = [(0, 0), (3, 7), (-1, -1), (np.int64(2), np.int32(-3))]
+    vector_cases = [
+        (2, slice(None)),
+        (-1, slice(1, 9, 2)),
+        (4, slice(5, 5)),
+        (1, col_mask),
+        (3, col_ids),
+        (slice(None), 4),
+        (slice(1, 6, 2), -2),
+        (slice(3, 4), 0),
+        (slice(4, 4), 0),
+        (row_mask, 6),
+        (row_ids, 3),
+    ]
+
+    for src in sources:
+        for r_idx, c_idx in scalar_cases:
+            got = src[r_idx, c_idx]
+            exp = dense[r_idx, c_idx]
+            assert isinstance(got, np.int32)
+            assert got == exp
+
+        for r_idx, c_idx in vector_cases:
+            got_arr = src[r_idx, c_idx]
+            exp_arr = dense[r_idx, c_idx]
+            assert isinstance(got_arr, np.ndarray)
+            assert got_arr.dtype == np.int32
+            assert got_arr.shape == exp_arr.shape
+            np.testing.assert_array_equal(got_arr, exp_arr)
+
+        for bad in [
+            (7, 0),
+            (-8, 0),
+            (0, 11),
+            (0, -12),
+            (slice(None), 11),
+            (slice(None), -12),
+            (True, 0),
+            (0, False),
+            True,
+        ]:
+            with pytest.raises(IndexError):
+                _ = src[bad]
+
+
+def test_sum_edge_cases_negative_axis_keepdims_and_empty(tmp_path):
+    empty_dense = np.zeros((0, 8), dtype=np.int32)
+    empty_mem = ef.patterns(8)
+    empty_emc = tmp_path / "empty.emc"
+    empty_h5_v1 = tmp_path / "empty_v1.h5"
+    empty_h5_v2 = tmp_path / "empty_v2.h5"
+    empty_mem.write(empty_emc)
+    empty_mem.write(empty_h5_v1, h5version="1")
+    empty_mem.write(empty_h5_v2, h5version="2")
+
+    for src in (
+        empty_mem,
+        ef.open_patterns(empty_emc),
+        ef.open_patterns(empty_h5_v1),
+        ef.open_patterns(empty_h5_v2),
+    ):
+        assert src[:].shape == (0, 8)
+        for axis in (None, 0, 1, -1, -2):
+            for keepdims in (False, True):
+                for dt in (None, np.float32, np.int64):
+                    got = src.sum(axis=axis, keepdims=keepdims, dtype=dt)
+                    exp = empty_dense.sum(axis=axis, keepdims=keepdims, dtype=dt)
+                    assert np.asarray(got).shape == np.asarray(exp).shape
+                    assert np.asarray(got).dtype == np.asarray(exp).dtype
+                    np.testing.assert_array_equal(got, exp)
+
+    one_row_dense = np.array([[0, 1, 3, 0]], dtype=np.int32)
+    one_row = ef.patterns(one_row_dense)
+    one_row_file = tmp_path / "one_row.h5"
+    one_row.write(one_row_file)
+    for src in (one_row, ef.open_patterns(one_row_file)):
+        for axis in (None, 0, 1, -1, -2):
+            for keepdims in (False, True):
+                for dt in (None, np.float32):
+                    got = src.sum(axis=axis, keepdims=keepdims, dtype=dt)
+                    exp = one_row_dense.sum(axis=axis, keepdims=keepdims, dtype=dt)
+                    assert np.asarray(got).shape == np.asarray(exp).shape
+                    assert np.asarray(got).dtype == np.asarray(exp).dtype
+                    np.testing.assert_allclose(got, exp)
+
+
+def test_factory_edge_cases_and_consistent_u32_counts(tmp_path):
+    from emcfile._pattern_files import _PatternsSOneBytes
+
+    single_dense_1d = np.array([0, 1, 4, 0], dtype=np.int32)
+    p1 = ef.patterns(single_dense_1d)
+    assert p1.shape == (1, 4)
+    np.testing.assert_array_equal(p1[0], single_dense_1d)
+
+    empty_csr = csr_array((0, 6), dtype=np.int32)
+    assert ef.patterns(empty_csr).shape == (0, 6)
+
+    sp0 = p1.sparse_pattern(0)
+    assert ef.patterns((sp0,)) == p1
+    obj_arr = np.empty(1, dtype=object)
+    obj_arr[0] = sp0
+    assert ef.patterns(obj_arr) == p1
+
+    with pytest.raises(ValueError):
+        ef.patterns([])
+    with pytest.raises(ValueError, match="pixels"):
+        ef.patterns([sp0, ef.SPARSE_PATTERN(99, sp0.place_ones, sp0.place_multi, sp0.count_multi)])
+    with pytest.raises(ValueError, match="non-negative"):
+        ef.patterns(((2, 3), -1))
+    with pytest.raises(TypeError):
+        ef.patterns(True)
+
+    f_emc = tmp_path / "c.emc"
+    f_h5 = tmp_path / "c.h5"
+    p1.write(f_emc)
+    p1.write(f_h5)
+    buf = io.BytesIO()
+    p1.write(buf)
+    buf.seek(0)
+
+    col = ef.EMCPatternCollection([f_emc, f_h5])
+    out_from_col = tmp_path / "from_col.emc"
+    ef.write_patterns([col], out_from_col)
+    assert ef.patterns(out_from_col) == np.concatenate([p1, p1])
+
+    with ef.open_patterns(f_emc).open() as emc_rb, ef.open_patterns(f_h5).open() as h5_rb:
+        for reader in (
+            ef.open_patterns(f_emc),
+            emc_rb,
+            _PatternsSOneBytes(buf),
+            ef.open_patterns(f_h5),
+            h5_rb,
+            col,
+        ):
+            assert reader.ones.dtype == np.uint32
+            assert reader.multi.dtype == np.uint32
+            assert reader.place_ones.dtype == np.uint32
+            assert reader.place_multi.dtype == np.uint32
+            assert reader.count_multi.dtype == np.int32
+
+
+def test_corrupt_emc_and_bracket_paths(tmp_path):
+    trunc = tmp_path / "trunc.emc"
+    trunc.write_bytes(b"\x01\x00\x00\x00")
+    with pytest.raises(ValueError, match="Truncated EMC header"):
+        ef.open_patterns(trunc)
+
+    neg_hdr = np.zeros(256, dtype="<i4")
+    neg_hdr[:2] = [-1, 4]
+    neg_file = tmp_path / "neg.emc"
+    neg_file.write_bytes(neg_hdr.tobytes())
+    with pytest.raises(ValueError, match="Invalid EMC header"):
+        ef.open_patterns(neg_file)
+
+    short_payload = tmp_path / "short_payload.emc"
+    hdr = np.zeros(256, dtype="<i4")
+    hdr[:2] = [2, 4]
+    short_payload.write_bytes(hdr.tobytes() + np.array([2, 0, 0, 0], dtype="<u4").tobytes())
+    with pytest.raises(ValueError, match="Truncated EMC"):
+        _ = ef.open_patterns(short_payload)[:]
+
+    bracket_dir = tmp_path / "run[0]"
+    bracket_dir.mkdir()
+    p = ef.patterns(np.array([[0, 1, 2]], dtype=np.int32))
+    lit_emc = bracket_dir / "data.emc"
+    p.write(lit_emc)
+    assert ef.open_patterns(lit_emc)[:] == p
+
+    h5_bracket_grp = f"{bracket_dir / 'data.h5'}::/grp[0]"
+    p.write(h5_bracket_grp)
+    assert ef.open_patterns(h5_bracket_grp)[:] == p
+
+    with pytest.raises(FileNotFoundError):
+        ef.open_patterns(str(tmp_path / "nonexistent_*.emc"))
+
+

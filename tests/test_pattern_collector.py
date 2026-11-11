@@ -45,3 +45,20 @@ def test_collector(tmp_path):
 
     html = collector._repr_html_()
     assert isinstance(html, str)
+
+
+def test_collector_validates_batch_size_and_empty_write(tmp_path):
+    with pytest.raises(ValueError, match="positive"):
+        ef.EMCPatternCollector(batch_size=0)
+    with pytest.raises(ValueError, match="positive"):
+        ef.EMCPatternCollector(-4)
+    with pytest.raises(TypeError):
+        ef.EMCPatternCollector(batch_size=True)
+
+    c = ef.EMCPatternCollector(batch_size=4)
+    with pytest.raises(ValueError, match="positive"):
+        c.batch_size = 0
+    with pytest.raises(ValueError, match="(?i)at least one pattern source"):
+        c.write(tmp_path / "empty.emc")
+    assert not (tmp_path / "empty.emc").exists()
+

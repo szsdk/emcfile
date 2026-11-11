@@ -53,6 +53,20 @@ class PatternsSOneCollector:
         self._num_pix: int | None = None
 
     @property
+    def max_buffer_size(self) -> int:
+        return self._max_buffer_size
+
+    @max_buffer_size.setter
+    def max_buffer_size(self, value: int) -> None:
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+            value, (int, np.integer)
+        ):
+            raise TypeError("batch_size must be an integer")
+        if int(value) <= 0:
+            raise ValueError("batch_size must be positive")
+        self._max_buffer_size = int(value)
+
+    @property
     def batch_size(self) -> int:
         """Maximum number of patterns converted in one batch."""
         return self.max_buffer_size
@@ -101,6 +115,8 @@ class PatternsSOneCollector:
             If the size of the input image does not match the number of pixels
             of the previously added patterns.
         """
+        if not isinstance(img, np.ndarray):
+            raise TypeError("img must be a NumPy array")
         self._validate_num_pix(img.size)
         self._buffer.append(img.ravel())
         if len(self._buffer) >= self.max_buffer_size:
