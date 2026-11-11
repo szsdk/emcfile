@@ -51,6 +51,7 @@ class H5AccelEntry:
         "eligible",
         "validated_offsets",
         "mm",
+        "pinned",
         "tables",
         "chunk_lens",
         "dataset_sizes",
@@ -62,6 +63,8 @@ class H5AccelEntry:
         key: tuple[str, str, int, int],
         fn_path: Path,
         group_name: str,
+        *,
+        pinned: bool = False,
     ) -> None:
         self.key = key
         self.file_token = next(_TOKEN_COUNTER)
@@ -80,6 +83,7 @@ class H5AccelEntry:
             tuple[npt.NDArray[np.uint64], npt.NDArray[np.uint64]] | None
         ) = None
         self.mm: mmap.mmap | None = None
+        self.pinned = pinned
         self.tables: (
             tuple[npt.NDArray[np.int64], npt.NDArray[np.int64], npt.NDArray[np.int64]]
             | None
@@ -88,19 +92,18 @@ class H5AccelEntry:
         self.dataset_sizes: tuple[int, int, int] | None = None
         self.lock = threading.Lock()
 
-    def ensure_mmap(self) -> mmap.mmap | None:
+    def ensure_mmap(self, *, allow_open: bool = False) -> mmap.mmap | None:
         if self.mm is not None:
             return self.mm
+        if self.pinned and not allow_open:
+            return None
         with self.lock:
             if self.mm is not None:
                 return self.mm
             try:
-                fd = os.open(self.fn_path, os.O_RDONLY)
-                try:
-                    self.mm = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
-                finally:
-                    os.close(fd)
-            except OSError:
+                with self.fn_path.open("rb") as fp:
+                    self.mm = mmap.mmap(fp.fileno(), 0, access=mmap.ACCESS_READ)
+            except (OSError, ValueError):
                 self.mm = None
             return self.mm
 
@@ -115,6 +118,20 @@ class H5AccelEntry:
 
 
 _H5_META_CACHE: OrderedDict[tuple[str, str, int, int], H5AccelEntry] = OrderedDict()
+
+
+def _reset_h5_fork_state() -> None:
+    global _CACHE_LOCK, _H5_META_CACHE
+    old_entries = list(_H5_META_CACHE.values())
+    _CACHE_LOCK = threading.Lock()
+    _H5_META_CACHE = OrderedDict()
+    for entry in old_entries:
+        entry.lock = threading.Lock()
+        entry.mm = None
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_h5_fork_state)
 
 
 def _normalize_group_name(gn: str) -> str:
@@ -150,6 +167,15 @@ def get_cache_entry(fn: str | Path, gn: str = "/") -> H5AccelEntry | None:
             _, evicted = _H5_META_CACHE.popitem(last=False)
             evicted.close()
         return entry
+
+
+def create_private_entry(fn: str | Path, gn: str = "/") -> H5AccelEntry:
+    """Create a private :class:`H5AccelEntry` pinned to the file's current inode."""
+    path = Path(fn).resolve()
+    norm_gn = _normalize_group_name(gn)
+    entry = H5AccelEntry((str(path), norm_gn, 0, 0), path, norm_gn, pinned=True)
+    entry.ensure_mmap(allow_open=True)
+    return entry
 
 
 def invalidate_cache_for_path(fn: str | Path) -> None:

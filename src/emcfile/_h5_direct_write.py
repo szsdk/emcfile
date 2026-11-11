@@ -20,6 +20,38 @@ def available() -> bool:
     return sys.byteorder == "little" and get_h5_rs() is not None
 
 
+def _as_dataset_u32(values: np.ndarray, target_dtype: np.dtype) -> np.ndarray:
+    """Coerce an integer array safely to a 4-byte dataset dtype and view as uint32."""
+    arr = np.asarray(values)
+    le_u4 = np.dtype("<u4")
+    le_i4 = np.dtype("<i4")
+    target_le = np.dtype("<u4" if target_dtype.kind == "u" else "<i4")
+    if not np.issubdtype(arr.dtype, np.integer):
+        raise ValueError(
+            f"direct Zstd dataset writer expects integer values, got {arr.dtype}"
+        )
+    if arr.dtype == target_le:
+        return np.ascontiguousarray(arr).view(le_u4)
+    if arr.size > 0:
+        info = np.iinfo(target_le)
+        if np.issubdtype(arr.dtype, np.signedinteger) and target_le == le_u4:
+            if int(arr.min()) < 0 or (
+                arr.dtype.itemsize > 4 and int(arr.max()) > info.max
+            ):
+                raise ValueError("position values must fit in uint32")
+        elif np.issubdtype(arr.dtype, np.unsignedinteger) and target_le == le_i4:
+            if int(arr.max()) > info.max:
+                raise ValueError(f"values exceed {target_le} maximum")
+        elif arr.dtype.itemsize > 4:
+            if int(arr.min()) < info.min or int(arr.max()) > info.max:
+                raise ValueError(
+                    f"values exceed {target_le} range [{info.min}, {info.max}]"
+                )
+    if arr.dtype in (le_u4, le_i4):
+        return np.ascontiguousarray(arr).view(le_u4)
+    return np.ascontiguousarray(arr, dtype=target_le).view(le_u4)
+
+
 def _compress(
     values: np.ndarray,
     chunk_size: int,
@@ -182,15 +214,15 @@ class PrefilteredDatasetWriter:
         check_sorted: bool = False,
     ) -> None:
         """Fused pattern-local delta + byte-shuffle + Zstd direct chunk write."""
+        values_u32 = _as_dataset_u32(values, self.dataset.dtype)
         rs = get_h5_rs()
-        is_complete_tail = self.offset + values.size == self.dataset.size
+        is_complete_tail = self.offset + values_u32.size == self.dataset.size
         if (
             rs is not None
             and self.buffer is None
             and self.used == 0
-            and (values.size % self.chunk_size == 0 or is_complete_tail)
+            and (values_u32.size % self.chunk_size == 0 or is_complete_tail)
         ):
-            values_u32 = np.ascontiguousarray(values).view("u4")
             offsets_u64 = np.ascontiguousarray(offsets, dtype=np.uint64)
             n_chunks = (values_u32.size + self.chunk_size - 1) // self.chunk_size
             if n_chunks > 0:
@@ -205,7 +237,7 @@ class PrefilteredDatasetWriter:
         from ._delta import encode_pattern_local_delta_parallel
 
         encoded = encode_pattern_local_delta_parallel(
-            values,
+            values_u32,
             counts,
             self.workers,
             check_sorted=check_sorted,
@@ -214,7 +246,7 @@ class PrefilteredDatasetWriter:
         self.write(encoded)
 
     def write(self, values: np.ndarray) -> None:
-        values = np.ascontiguousarray(values).view("u4")
+        values = _as_dataset_u32(values, self.dataset.dtype)
         rs = get_h5_rs()
         if rs is not None and self.buffer is None and self.used == 0:
             is_complete_tail = self.offset + values.size == self.dataset.size

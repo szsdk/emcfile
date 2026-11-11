@@ -135,6 +135,8 @@ def validate_offsets(
         and entry.validated_offsets is not None
         and entry.validated_offsets[0] is ones_offsets
         and entry.validated_offsets[1] is multi_offsets
+        and not ones_offsets.flags.writeable
+        and not multi_offsets.flags.writeable
         and ones_offsets.ndim == 1
         and multi_offsets.ndim == 1
         and ones_offsets.size > 0
