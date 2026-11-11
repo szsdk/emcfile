@@ -3,7 +3,6 @@ import gc
 import io
 import itertools
 import logging
-import tempfile
 import time
 
 import numpy as np
@@ -497,28 +496,28 @@ def test_unsupported_pattern_source():
         (".h5", {"hdf5_version": "2"}),
     ],
 )
-def test_file_roundtrip(suffix, write_options, large_patterns):
-    with tempfile.NamedTemporaryFile(suffix=suffix) as file:
-        start_time = time.time()
-        large_patterns.write(file.name, overwrite=True, **write_options)
-        logging.info(
-            "Writing %d patterns to %s file (%s): %fs",
-            large_patterns.num_patterns,
-            suffix,
-            write_options,
-            time.time() - start_time,
-        )
+def test_file_roundtrip(suffix, write_options, large_patterns, tmp_path):
+    target = tmp_path / f"roundtrip{suffix}"
+    start_time = time.perf_counter()
+    large_patterns.write(target, overwrite=True, **write_options)
+    logging.info(
+        "Writing %d patterns to %s file (%s): %fs",
+        large_patterns.num_patterns,
+        suffix,
+        write_options,
+        time.perf_counter() - start_time,
+    )
 
-        start = large_patterns.num_patterns // 3
-        end = start * 2
-        start_time = time.time()
-        restored = ef.patterns(file.name, start=start, end=end)
-        logging.info(
-            "Reading %d patterns: %fs",
-            restored.num_patterns,
-            time.time() - start_time,
-        )
-        assert restored == large_patterns[start:end]
+    start = large_patterns.num_patterns // 3
+    end = start * 2
+    start_time = time.perf_counter()
+    restored = ef.patterns(target, start=start, end=end)
+    logging.info(
+        "Reading %d patterns: %fs",
+        restored.num_patterns,
+        time.perf_counter() - start_time,
+    )
+    assert restored == large_patterns[start:end]
 
 
 def test_bytesio(small_patterns):
@@ -535,35 +534,33 @@ def generate_write_cases():
 
 
 @pytest.mark.parametrize(("suffix", "pattern_arrays"), tuple(generate_write_cases()))
-def test_write_patterns(suffix, pattern_arrays):
-    with (
-        tempfile.NamedTemporaryFile(suffix=suffix) as f0,
-        tempfile.NamedTemporaryFile(suffix=suffix) as f1,
-    ):
-        t = time.time()
-        combined = np.concatenate(pattern_arrays)
-        combined.write(f1.name, overwrite=True)
-        single_write_time = time.time() - t
-        logging.info(
-            "speed[single]: %.2f GB/s",
-            combined.nbytes * 1e-9 / single_write_time,
-        )
+def test_write_patterns(suffix, pattern_arrays, tmp_path):
+    f0 = tmp_path / f"multi{suffix}"
+    f1 = tmp_path / f"single{suffix}"
+    t = time.perf_counter()
+    combined = np.concatenate(pattern_arrays)
+    combined.write(f1, overwrite=True)
+    single_write_time = max(time.perf_counter() - t, 1e-9)
+    logging.info(
+        "speed[single]: %.2f GB/s",
+        combined.nbytes * 1e-9 / single_write_time,
+    )
 
-        t = time.time()
-        ef.write_patterns(pattern_arrays, f0.name, buffer_size=2**12, overwrite=True)
-        multi_write_time = time.time() - t
-        logging.info(
-            "speed[multiple; #patterns=%d]: %.2f GB/s",
-            len(pattern_arrays),
-            combined.nbytes * 1e-9 / multi_write_time,
-        )
+    t = time.perf_counter()
+    ef.write_patterns(pattern_arrays, f0, buffer_size=2**12, overwrite=True)
+    multi_write_time = max(time.perf_counter() - t, 1e-9)
+    logging.info(
+        "speed[multiple; #patterns=%d]: %.2f GB/s",
+        len(pattern_arrays),
+        combined.nbytes * 1e-9 / multi_write_time,
+    )
 
-        logging.info(
-            "speed ratio [%s]: %.3f",
-            suffix,
-            single_write_time / multi_write_time,
-        )
-        assert ef.patterns(f0.name) == combined
+    logging.info(
+        "speed ratio [%s]: %.3f",
+        suffix,
+        single_write_time / multi_write_time,
+    )
+    assert ef.patterns(f0) == combined
 
 
 def test_matrix_multiplication(large_patterns):

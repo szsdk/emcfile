@@ -116,7 +116,13 @@ def create_vds(output_file: PATH_TYPE, source_files: Sequence[PATH_TYPE], *, ove
             start = 0
             for source, _, _, _, lengths in info:
                 length = lengths[name]
-                filename = os.path.relpath(source.fn, output.fn.parent) if relative_paths else str(source.fn)
+                if relative_paths:
+                    try:
+                        filename = os.path.relpath(source.fn, output.fn.parent)
+                    except ValueError:
+                        filename = str(source.fn)
+                else:
+                    filename = str(source.fn)
                 layout[start : start + length] = h5py.VirtualSource(filename, _dataset_path(source.gn, name), shape=(length,))
                 start += length
             group.create_virtual_dataset(name, layout)
