@@ -16,9 +16,11 @@ import numpy.typing as npt
 from numpy import ma
 from typing_extensions import deprecated
 
+from ._emc_patterns import SPARSE_PATTERN, PatternsSOne
 from ._h5_accel import invalidate_cache_for_path
 from ._hdf5 import PATH_TYPE, H5Path, atomic_write_path, make_path
 from ._html_display import html_card
+from ._pattern_files import PatternsSOneFile
 
 __all__ = [
     "detector_renderer",
@@ -1148,14 +1150,164 @@ class DetRender:
         self._count_flat = np.asarray(self._count.filled(0), dtype=np.float64).ravel()
         self._nonzero_flat = self._count_flat != 0
 
-    def render(self, raw_img: npt.NDArray[Any]) -> ma.MaskedArray:
-        """
-        Render one raw image or many raw images.
+    def _render_sparse_input(
+        self, raw_img: SPARSE_PATTERN | PatternsSOne | PatternsSOneFile
+    ) -> ma.MaskedArray:
+        if isinstance(raw_img, SPARSE_PATTERN):
+            if raw_img.num_pix != self._det.num_pix:
+                raise ValueError(
+                    f"raw_img has {raw_img.num_pix} pixels; "
+                    f"the detector requires {self._det.num_pix}"
+                )
+            if self._rs_plan is not None and _get_det_rs() is not None:
+                p_ones = (
+                    raw_img.place_ones
+                    if raw_img.place_ones.flags.c_contiguous
+                    and raw_img.place_ones.dtype == np.uint32
+                    else np.ascontiguousarray(raw_img.place_ones, dtype=np.uint32)
+                )
+                p_multi = (
+                    raw_img.place_multi
+                    if raw_img.place_multi.flags.c_contiguous
+                    and raw_img.place_multi.dtype == np.uint32
+                    else np.ascontiguousarray(raw_img.place_multi, dtype=np.uint32)
+                )
+                c_multi = (
+                    raw_img.count_multi
+                    if raw_img.count_multi.flags.c_contiguous
+                    and raw_img.count_multi.dtype == np.int32
+                    else np.ascontiguousarray(raw_img.count_multi, dtype=np.int32)
+                )
+                res_1d = self._rs_plan.render_sparse_1d(p_ones, p_multi, c_multi)
+                assert res_1d is not None
+                rendered_2d, mask_2d = res_1d
+                return ma.MaskedArray(
+                    rendered_2d, mask=mask_2d, copy=False, shrink=False
+                )
 
-        1-D input returns shape ``(H, W)``. 2-D input returns shape
-        ``(n_images, H, W)``. The right way to visualize a single rendered image is
+            if not hasattr(self, "_render_flat"):
+                self._prepare_renderer()
+            width, height = self._render_width, self._render_height
+            num_frame_pixels = width * height
+            acc_1d = np.zeros(num_frame_pixels, dtype=np.float64)
+            if raw_img.place_ones.size > 0:
+                acc_1d += np.bincount(
+                    self._render_flat[raw_img.place_ones],
+                    minlength=num_frame_pixels,
+                )
+            if raw_img.place_multi.size > 0:
+                acc_1d += np.bincount(
+                    self._render_flat[raw_img.place_multi],
+                    weights=raw_img.count_multi,
+                    minlength=num_frame_pixels,
+                )
+            np.divide(
+                acc_1d,
+                self._count_flat,
+                out=acc_1d,
+                where=self._nonzero_flat,
+            )
+            acc_1d[~self._nonzero_flat] = np.nan
+            return ma.masked_array(acc_1d.reshape(height, width), mask=self._mask)
+
+        if raw_img.num_pix != self._det.num_pix:
+            raise ValueError(
+                f"raw_img has {raw_img.num_pix} pixels; "
+                f"the detector requires {self._det.num_pix}"
+            )
+        sparse_batch: PatternsSOne = (
+            cast(PatternsSOne, raw_img[:])
+            if isinstance(raw_img, PatternsSOneFile)
+            else raw_img
+        )
+
+        if self._rs_plan is not None and _get_det_rs() is not None:
+            o_idx = (
+                sparse_batch.ones_idx
+                if sparse_batch.ones_idx.flags.c_contiguous
+                and sparse_batch.ones_idx.dtype == np.uint64
+                else np.ascontiguousarray(sparse_batch.ones_idx, dtype=np.uint64)
+            )
+            m_idx = (
+                sparse_batch.multi_idx
+                if sparse_batch.multi_idx.flags.c_contiguous
+                and sparse_batch.multi_idx.dtype == np.uint64
+                else np.ascontiguousarray(sparse_batch.multi_idx, dtype=np.uint64)
+            )
+            p_ones = (
+                sparse_batch.place_ones
+                if sparse_batch.place_ones.flags.c_contiguous
+                and sparse_batch.place_ones.dtype == np.uint32
+                else np.ascontiguousarray(sparse_batch.place_ones, dtype=np.uint32)
+            )
+            p_multi = (
+                sparse_batch.place_multi
+                if sparse_batch.place_multi.flags.c_contiguous
+                and sparse_batch.place_multi.dtype == np.uint32
+                else np.ascontiguousarray(sparse_batch.place_multi, dtype=np.uint32)
+            )
+            c_multi = (
+                sparse_batch.count_multi
+                if sparse_batch.count_multi.flags.c_contiguous
+                and sparse_batch.count_multi.dtype == np.int32
+                else np.ascontiguousarray(sparse_batch.count_multi, dtype=np.int32)
+            )
+            res_2d = self._rs_plan.render_sparse_2d(
+                o_idx, m_idx, p_ones, p_multi, c_multi
+            )
+            assert res_2d is not None
+            rendered_3d, mask_3d = res_2d
+            return ma.MaskedArray(rendered_3d, mask=mask_3d, copy=False, shrink=False)
+
+        if not hasattr(self, "_render_flat"):
+            self._prepare_renderer()
+        width, height = self._render_width, self._render_height
+        num_frame_pixels = width * height
+        n_images = sparse_batch.num_data
+        accumulated = np.zeros((n_images, num_frame_pixels), dtype=np.float64)
+        for i in range(n_images):
+            o_s = int(sparse_batch.ones_idx[i])
+            o_e = int(sparse_batch.ones_idx[i + 1])
+            if o_e > o_s:
+                accumulated[i] += np.bincount(
+                    self._render_flat[sparse_batch.place_ones[o_s:o_e]],
+                    minlength=num_frame_pixels,
+                )
+            m_s = int(sparse_batch.multi_idx[i])
+            m_e = int(sparse_batch.multi_idx[i + 1])
+            if m_e > m_s:
+                accumulated[i] += np.bincount(
+                    self._render_flat[sparse_batch.place_multi[m_s:m_e]],
+                    weights=sparse_batch.count_multi[m_s:m_e],
+                    minlength=num_frame_pixels,
+                )
+        np.divide(
+            accumulated,
+            self._count_flat,
+            out=accumulated,
+            where=self._nonzero_flat,
+        )
+        accumulated[:, ~self._nonzero_flat] = np.nan
+        rendered = accumulated.reshape(n_images, height, width)
+        mask = np.broadcast_to(self._mask, rendered.shape)
+        return ma.masked_array(rendered, mask=mask)
+
+    def render(
+        self,
+        raw_img: npt.NDArray[Any] | SPARSE_PATTERN | PatternsSOne | PatternsSOneFile,
+    ) -> ma.MaskedArray:
+        """
+        Render one raw image or many raw images (dense or sparse).
+
+        1-D input or ``SparsePattern`` returns shape ``(H, W)``. 2-D input,
+        ``EMCPatternArray`` (``PatternsSOne``), or ``FileBackedEMCPatterns``
+        (``PatternsSOneFile``) returns shape ``(n_images, H, W)``. The right
+        way to visualize a single rendered image is
         ``plt.imshow(img, origin="lower", extent=self.frame_extent())``.
         """
+        if isinstance(raw_img, (SPARSE_PATTERN, PatternsSOne, PatternsSOneFile)):
+            return self._render_sparse_input(raw_img)
+
         if self._rs_plan is not None and _get_det_rs() is not None:
             arr = (
                 raw_img

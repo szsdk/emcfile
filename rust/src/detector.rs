@@ -88,6 +88,7 @@ pub struct RustRendererPlan {
     pub(crate) num_dst_tiles: usize,
     pub(crate) is_exact_identity: bool,
     pub(crate) is_identity_like: bool,
+    pub(crate) all_unit_inv: bool,
     pub(crate) flat_u32: Vec<u32>,
     pub(crate) tile_span_offsets: Vec<usize>,
     pub(crate) spans: Vec<MicroTileSpan>,
@@ -105,8 +106,14 @@ impl RustRendererPlan {
         assert_eq!(out.len(), self.frame_len);
 
         if self.is_exact_identity {
-            for ((o, &val), &inv) in out.iter_mut().zip(src.iter()).zip(self.inv_count.iter()) {
-                *o = val.to_f64() * inv;
+            if self.all_unit_inv {
+                for (o, &val) in out.iter_mut().zip(src.iter()) {
+                    *o = val.to_f64();
+                }
+            } else {
+                for ((o, &val), &inv) in out.iter_mut().zip(src.iter()).zip(self.inv_count.iter()) {
+                    *o = val.to_f64() * inv;
+                }
             }
             return;
         }
@@ -120,8 +127,10 @@ impl RustRendererPlan {
                     *out_ptr.add(idx as usize) += val.to_f64();
                 }
             }
-            for (o, &inv) in out.iter_mut().zip(self.inv_count.iter()) {
-                *o *= inv;
+            if !self.all_unit_inv {
+                for (o, &inv) in out.iter_mut().zip(self.inv_count.iter()) {
+                    *o *= inv;
+                }
             }
             return;
         }
@@ -160,11 +169,65 @@ impl RustRendererPlan {
                 }
             }
 
-            let inv_tile = &self.inv_count[d_base..d_end];
-            for ((o, &b), &inv) in out_tile.iter_mut().zip(buf_sub.iter()).zip(inv_tile.iter()) {
-                *o = b * inv;
+            if self.all_unit_inv {
+                out_tile.copy_from_slice(buf_sub);
+            } else {
+                let inv_tile = &self.inv_count[d_base..d_end];
+                for ((o, &b), &inv) in out_tile.iter_mut().zip(buf_sub.iter()).zip(inv_tile.iter())
+                {
+                    *o = b * inv;
+                }
             }
         }
+    }
+
+    /// Accumulates one sparse pattern directly into a zeroed `out[0..self.frame_len]` slice.
+    #[inline]
+    fn accumulate_sparse_zeroed(
+        &self,
+        place_ones: &[u32],
+        place_multi: &[u32],
+        count_multi: &[i32],
+        out: &mut [f64],
+    ) -> Result<(), &'static str> {
+        assert_eq!(out.len(), self.frame_len);
+        if place_multi.len() != count_multi.len() {
+            return Err("place_multi and count_multi must have identical lengths");
+        }
+        let num_pix = self.num_pix;
+        let flat_ptr = self.flat_u32.as_ptr();
+        let out_ptr = out.as_mut_ptr();
+
+        for &pix in place_ones {
+            let p = pix as usize;
+            if p >= num_pix {
+                return Err("place_ones pixel index out of range");
+            }
+            // SAFETY: `p < num_pix == self.flat_u32.len()` and `f < self.frame_len == out.len()`.
+            unsafe {
+                let f = *flat_ptr.add(p) as usize;
+                *out_ptr.add(f) += 1.0;
+            }
+        }
+
+        for (&pix, &cnt) in place_multi.iter().zip(count_multi.iter()) {
+            let p = pix as usize;
+            if p >= num_pix {
+                return Err("place_multi pixel index out of range");
+            }
+            // SAFETY: `p < num_pix == self.flat_u32.len()` and `f < self.frame_len == out.len()`.
+            unsafe {
+                let f = *flat_ptr.add(p) as usize;
+                *out_ptr.add(f) += cnt as f64;
+            }
+        }
+
+        if !self.all_unit_inv {
+            for (o, &inv) in out.iter_mut().zip(self.inv_count.iter()) {
+                *o *= inv;
+            }
+        }
+        Ok(())
     }
 
     fn run_1d<'py, T: ToF64>(
@@ -304,6 +367,152 @@ impl RustRendererPlan {
         try_2d!(i32, f64, f32, u32, i64, u64, i16, u16, i8, u8);
         Ok(None)
     }
+
+    /// Render a single `SPARSE_PATTERN` (`place_ones`, `place_multi`, `count_multi`) directly on a single thread.
+    fn render_sparse_1d<'py>(
+        &self,
+        py: Python<'py>,
+        place_ones: PyReadonlyArray1<'py, u32>,
+        place_multi: PyReadonlyArray1<'py, u32>,
+        count_multi: PyReadonlyArray1<'py, i32>,
+    ) -> PyResult<Option<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<bool>>)>> {
+        if !place_ones.is_c_contiguous()
+            || !place_multi.is_c_contiguous()
+            || !count_multi.is_c_contiguous()
+        {
+            return Ok(None);
+        }
+        let ones_s = match place_ones.as_slice() {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+        let multi_s = match place_multi.as_slice() {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+        let count_s = match count_multi.as_slice() {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+
+        let rendered = PyArray2::<f64>::zeros(py, [self.height, self.width], false);
+        // SAFETY: `rendered` was freshly allocated with exclusive access here.
+        let out_slice = unsafe { rendered.as_slice_mut()? };
+
+        py.detach(|| {
+            self.accumulate_sparse_zeroed(ones_s, multi_s, count_s, out_slice)
+        })
+        .map_err(PyValueError::new_err)?;
+
+        let mask = if self.has_any_masked {
+            PyArray1::from_slice(py, &self.mask_bool).reshape([self.height, self.width])?
+        } else {
+            PyArray2::<bool>::zeros(py, [self.height, self.width], false)
+        };
+        Ok(Some((rendered, mask)))
+    }
+
+    /// Render a `PatternsSOne` batch directly from CSR-style sparse arrays on a single thread.
+    fn render_sparse_2d<'py>(
+        &self,
+        py: Python<'py>,
+        ones_idx: PyReadonlyArray1<'py, u64>,
+        multi_idx: PyReadonlyArray1<'py, u64>,
+        place_ones: PyReadonlyArray1<'py, u32>,
+        place_multi: PyReadonlyArray1<'py, u32>,
+        count_multi: PyReadonlyArray1<'py, i32>,
+    ) -> PyResult<Option<(Bound<'py, PyArray3<f64>>, Bound<'py, PyArray3<bool>>)>> {
+        if !ones_idx.is_c_contiguous()
+            || !multi_idx.is_c_contiguous()
+            || !place_ones.is_c_contiguous()
+            || !place_multi.is_c_contiguous()
+            || !count_multi.is_c_contiguous()
+        {
+            return Ok(None);
+        }
+        let o_idx = match ones_idx.as_slice() {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+        let m_idx = match multi_idx.as_slice() {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+        let ones_s = match place_ones.as_slice() {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+        let multi_s = match place_multi.as_slice() {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+        let count_s = match count_multi.as_slice() {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+
+        if o_idx.is_empty() || o_idx.len() != m_idx.len() {
+            return Err(PyValueError::new_err(
+                "ones_idx and multi_idx must have identical positive lengths",
+            ));
+        }
+        if multi_s.len() != count_s.len() {
+            return Err(PyValueError::new_err(
+                "place_multi and count_multi must have identical lengths",
+            ));
+        }
+        let n_images = o_idx.len() - 1;
+
+        let rendered = PyArray3::<f64>::zeros(py, [n_images, self.height, self.width], false);
+        // SAFETY: `rendered` was freshly allocated with exclusive access here.
+        let out_slice = unsafe { rendered.as_slice_mut()? };
+
+        let mask = if self.has_any_masked {
+            // SAFETY: overwritten completely below when `has_any_masked` is true.
+            unsafe { PyArray3::<bool>::new(py, [n_images, self.height, self.width], false) }
+        } else {
+            PyArray3::<bool>::zeros(py, [n_images, self.height, self.width], false)
+        };
+        // SAFETY: `mask` was freshly allocated with exclusive access here.
+        let mask_out = unsafe { mask.as_slice_mut()? };
+
+        let frame_len = self.frame_len;
+        let has_any_masked = self.has_any_masked;
+        let mask_bool = &self.mask_bool;
+
+        py.detach(|| -> Result<(), &'static str> {
+            if frame_len > 0 {
+                for (img_idx, out_frame) in out_slice.chunks_exact_mut(frame_len).enumerate() {
+                    let o_beg = o_idx[img_idx] as usize;
+                    let o_end = o_idx[img_idx + 1] as usize;
+                    let m_beg = m_idx[img_idx] as usize;
+                    let m_end = m_idx[img_idx + 1] as usize;
+                    if o_beg > o_end
+                        || o_end > ones_s.len()
+                        || m_beg > m_end
+                        || m_end > multi_s.len()
+                    {
+                        return Err("sparse pattern offset out of bounds");
+                    }
+                    self.accumulate_sparse_zeroed(
+                        &ones_s[o_beg..o_end],
+                        &multi_s[m_beg..m_end],
+                        &count_s[m_beg..m_end],
+                        out_frame,
+                    )?;
+                }
+                if has_any_masked {
+                    for mask_frame in mask_out.chunks_exact_mut(frame_len) {
+                        mask_frame.copy_from_slice(mask_bool);
+                    }
+                }
+            }
+            Ok(())
+        })
+        .map_err(PyValueError::new_err)?;
+
+        Ok(Some((rendered, mask)))
+    }
 }
 
 type PreparedRendererTuple<'py> = (
@@ -329,6 +538,7 @@ struct CorePlanData {
     count_data: Vec<f64>,
     is_exact_identity: bool,
     is_identity_like: bool,
+    all_unit_inv: bool,
     flat_u32: Vec<u32>,
     tile_span_offsets: Vec<usize>,
     spans: Vec<MicroTileSpan>,
@@ -595,45 +805,38 @@ fn build_renderer_core<M: MaskBits>(
         }
     }
 
-    let mut unmasked_sum_u64: u64 = 0;
-    let mut unmasked_cnt: usize = 0;
-    for f in 0..frame_len {
-        if !has_any_masked || mask_u8[f] == 0 {
-            unmasked_sum_u64 += raw_counts[f] as u64;
-            unmasked_cnt += 1;
-        }
-    }
+    let all_unit_inv =
+        !has_any_masked && (is_exact_identity || raw_counts.iter().all(|&rc| rc == 1));
 
     let mut count_data = Vec::with_capacity(frame_len);
     let mut inv_count = Vec::with_capacity(frame_len);
-    if unmasked_cnt > 0 {
-        let mean = (unmasked_sum_u64 as f64) / (unmasked_cnt as f64);
-        if mean != 0.0 {
-            let inv_mean = 1.0 / mean;
-            // Precompute small raw_count LUT (`0..16`) to avoid per-pixel `f64` divisions!
-            let mut c_lut = [0.0_f64; 16];
-            let mut inv_lut = [f64::NAN; 16];
-            for r in 1..16 {
-                let c = (r as f64) * inv_mean;
-                c_lut[r] = c;
-                inv_lut[r] = mean / (r as f64);
+    if all_unit_inv {
+        count_data.resize(frame_len, 1.0_f64);
+        inv_count.resize(frame_len, 1.0_f64);
+    } else {
+        let mut unmasked_sum_u64: u64 = 0;
+        let mut unmasked_cnt: usize = 0;
+        for f in 0..frame_len {
+            if !has_any_masked || mask_u8[f] == 0 {
+                unmasked_sum_u64 += raw_counts[f] as u64;
+                unmasked_cnt += 1;
             }
-            if !has_any_masked {
-                for &rc in &raw_counts {
-                    let r = rc as usize;
-                    if r < 16 {
-                        count_data.push(c_lut[r]);
-                        inv_count.push(inv_lut[r]);
-                    } else {
-                        let c = (r as f64) * inv_mean;
-                        count_data.push(c);
-                        inv_count.push(1.0 / c);
-                    }
+        }
+        if unmasked_cnt > 0 {
+            let mean = (unmasked_sum_u64 as f64) / (unmasked_cnt as f64);
+            if mean != 0.0 {
+                let inv_mean = 1.0 / mean;
+                // Precompute small raw_count LUT (`0..16`) to avoid per-pixel `f64` divisions!
+                let mut c_lut = [0.0_f64; 16];
+                let mut inv_lut = [f64::NAN; 16];
+                for r in 1..16 {
+                    let c = (r as f64) * inv_mean;
+                    c_lut[r] = c;
+                    inv_lut[r] = mean / (r as f64);
                 }
-            } else {
-                for f in 0..frame_len {
-                    let r = raw_counts[f] as usize;
-                    if mask_u8[f] == 0 {
+                if !has_any_masked {
+                    for &rc in &raw_counts {
+                        let r = rc as usize;
                         if r < 16 {
                             count_data.push(c_lut[r]);
                             inv_count.push(inv_lut[r]);
@@ -642,26 +845,40 @@ fn build_renderer_core<M: MaskBits>(
                             count_data.push(c);
                             inv_count.push(1.0 / c);
                         }
-                    } else {
-                        count_data.push(r as f64);
-                        inv_count.push(f64::NAN);
                     }
+                } else {
+                    for f in 0..frame_len {
+                        let r = raw_counts[f] as usize;
+                        if mask_u8[f] == 0 {
+                            if r < 16 {
+                                count_data.push(c_lut[r]);
+                                inv_count.push(inv_lut[r]);
+                            } else {
+                                let c = (r as f64) * inv_mean;
+                                count_data.push(c);
+                                inv_count.push(1.0 / c);
+                            }
+                        } else {
+                            count_data.push(r as f64);
+                            inv_count.push(f64::NAN);
+                        }
+                    }
+                }
+            } else {
+                for f in 0..frame_len {
+                    if !has_any_masked || mask_u8[f] == 0 {
+                        count_data.push((raw_counts[f] as f64) / 0.0);
+                    } else {
+                        count_data.push(raw_counts[f] as f64);
+                    }
+                    inv_count.push(f64::NAN);
                 }
             }
         } else {
-            for f in 0..frame_len {
-                if !has_any_masked || mask_u8[f] == 0 {
-                    count_data.push((raw_counts[f] as f64) / 0.0);
-                } else {
-                    count_data.push(raw_counts[f] as f64);
-                }
+            for &rc in &raw_counts {
+                count_data.push(rc as f64);
                 inv_count.push(f64::NAN);
             }
-        }
-    } else {
-        for &rc in &raw_counts {
-            count_data.push(rc as f64);
-            inv_count.push(f64::NAN);
         }
     }
 
@@ -677,6 +894,7 @@ fn build_renderer_core<M: MaskBits>(
         count_data,
         is_exact_identity,
         is_identity_like,
+        all_unit_inv,
         flat_u32,
         tile_span_offsets,
         spans,
@@ -765,6 +983,7 @@ fn finish_prepared_renderer<'py>(
             num_dst_tiles: data.num_dst_tiles,
             is_exact_identity: data.is_exact_identity,
             is_identity_like: data.is_identity_like,
+            all_unit_inv: data.all_unit_inv,
             flat_u32: data.flat_u32,
             tile_span_offsets: data.tile_span_offsets,
             spans: data.spans,

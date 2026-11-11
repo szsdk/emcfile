@@ -474,3 +474,79 @@ def test_renderer_strided_deepcopy_and_grid_layouts(monkeypatch, det):
         np.testing.assert_allclose(
             r_fast.data, r_py.data, rtol=1e-14, atol=1e-14, equal_nan=True
         )
+
+
+def test_renderer_direct_sparse_patterns(tmp_path, monkeypatch, det):
+    rng = np.random.default_rng(123)
+    dense = rng.choice(
+        [0, 1, 2, 5], size=(6, det.num_pix), p=[0.85, 0.10, 0.03, 0.02]
+    ).astype(np.int32)
+    dense[2] = 0  # include an all-zero pattern
+    pats = ef.patterns(dense)
+    sparse_0 = pats.sparse_pattern(0)
+
+    h5_path = tmp_path / "sparse_render.h5"
+    emc_path = tmp_path / "sparse_render.emc"
+    pats.write(h5_path)
+    pats.write(emc_path)
+    f_h5 = ef.open_patterns(h5_path)
+    f_emc = ef.open_patterns(emc_path)
+
+    sparse_det = det[np.arange(0, det.num_pix, 2)]
+    dense_sub = dense[:, : sparse_det.num_pix]
+    pats_sub = ef.patterns(dense_sub)
+
+    for target_det, target_dense, target_pats in (
+        (det, dense, pats),
+        (sparse_det, dense_sub, pats_sub),
+    ):
+        ren_fast = ef.detector_renderer(target_det)
+        ref_1d = ren_fast.render(target_dense[0])
+        ref_2d = ren_fast.render(target_dense)
+
+        sp_1d_fast = ren_fast.render(target_pats.sparse_pattern(0))
+        sp_2d_fast = ren_fast.render(target_pats)
+        np.testing.assert_array_equal(sp_1d_fast.mask, ref_1d.mask)
+        np.testing.assert_allclose(
+            sp_1d_fast.data, ref_1d.data, rtol=1e-14, atol=1e-14, equal_nan=True
+        )
+        np.testing.assert_array_equal(sp_2d_fast.mask, ref_2d.mask)
+        np.testing.assert_allclose(
+            sp_2d_fast.data, ref_2d.data, rtol=1e-14, atol=1e-14, equal_nan=True
+        )
+
+        # Empty pattern array
+        empty_res = ren_fast.render(target_pats[:0])
+        assert empty_res.shape == (0, ren_fast._render_height, ren_fast._render_width)
+
+        monkeypatch.setenv("EMCFILE_DISABLE_DET_ACCEL", "1")
+        ren_py = ef.detector_renderer(target_det)
+        sp_1d_py = ren_py.render(target_pats.sparse_pattern(0))
+        sp_2d_py = ren_py.render(target_pats)
+        monkeypatch.delenv("EMCFILE_DISABLE_DET_ACCEL", raising=False)
+
+        np.testing.assert_array_equal(sp_1d_py.mask, ref_1d.mask)
+        np.testing.assert_allclose(
+            sp_1d_py.data, ref_1d.data, rtol=1e-14, atol=1e-14, equal_nan=True
+        )
+        np.testing.assert_array_equal(sp_2d_py.mask, ref_2d.mask)
+        np.testing.assert_allclose(
+            sp_2d_py.data, ref_2d.data, rtol=1e-14, atol=1e-14, equal_nan=True
+        )
+
+    ren_main = ef.detector_renderer(det)
+    ref_main = ren_main.render(dense)
+    for f_src in (f_h5, f_emc):
+        out_f = ren_main.render(f_src)
+        np.testing.assert_array_equal(out_f.mask, ref_main.mask)
+        np.testing.assert_allclose(
+            out_f.data, ref_main.data, rtol=1e-14, atol=1e-14, equal_nan=True
+        )
+
+    wrong_sp = ef.SPARSE_PATTERN(
+        det.num_pix + 1, sparse_0.place_ones, sparse_0.place_multi, sparse_0.count_multi
+    )
+    with pytest.raises(ValueError, match="pixels"):
+        ren_main.render(wrong_sp)
+    with pytest.raises(ValueError, match="pixels"):
+        ren_main.render(pats_sub)
