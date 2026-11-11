@@ -15,15 +15,23 @@ import numpy.typing as npt
 
 from ._delta import decode_pattern_local_delta
 from ._emc_patterns import (
+    INT_INDEX,
     SPARSE_PATTERN,
     TRANGE,
     PatternsSOne,
     PatternsSOneBase,
     _count_offsets,
+    _index_1d_pattern_columns,
+    _is_int_index,
     write_patterns,
 )
 from ._formatting import pretty_size
-from ._h5_accel import LazyH5Group, get_cache_entry
+from ._h5_accel import (
+    H5AccelEntry,
+    LazyH5Group,
+    create_private_entry,
+    get_cache_entry,
+)
 from ._h5_filters import ensure_group_filters
 from ._hdf5 import PATH_TYPE, H5Path, h5path, make_path
 from ._html_display import html_card
@@ -50,9 +58,32 @@ I4 = np.dtype("i4").itemsize
 INDEX_ARRAY = npt.NDArray[np.integer[Any]]
 
 
+def _dispatch_2d_file_getitem(
+    source: PatternsSOneBase, axes: tuple[Any, Any]
+) -> np.int32 | npt.NDArray[np.int32] | PatternsSOne:
+    ax0, ax1 = axes
+    if isinstance(ax0, (bool, np.bool_)) or isinstance(ax1, (bool, np.bool_)):
+        raise IndexError("Boolean scalar indices are not supported")
+    if _is_int_index(ax0):
+        return _index_1d_pattern_columns(source[int(ax0)], ax1)
+    if _is_int_index(ax1):
+        col = int(ax1)
+        if col < 0:
+            col += source.num_pix
+        if col < 0 or col >= source.num_pix:
+            raise IndexError(
+                f"column index {ax1} is out of bounds for axis 1 "
+                f"with size {source.num_pix}"
+            )
+        return cast(PatternsSOne, source[cast(TRANGE, ax0)])[:, col]
+    return cast(PatternsSOne, source[cast(TRANGE, ax0)])[:, cast(TRANGE, ax1)]
+
+
 def _normalize_row_index_ranges(
     index: int | np.integer[Any] | TRANGE, num_data: int
 ) -> tuple[bool, INDEX_ARRAY]:
+    if isinstance(index, (bool, np.bool_)):
+        raise IndexError("Boolean scalar indices are not supported")
     match index:
         case int() | np.integer():
             idx = int(index)
@@ -107,20 +138,26 @@ def read_indexed_array(
         start, stop = index_ranges[0]
         stop = offsets[stop]
         start = offsets[start]
+        count = int(stop - start)
         file_obj.seek(I4 * (int(start) - current_offset), os.SEEK_CUR)
-        return np.frombuffer(
-            file_obj.read(int(stop - start) * I4),
-            count=int(stop - start),
-            dtype=np.int32,
+        raw = file_obj.read(count * I4)
+        if len(raw) != count * I4:
+            raise ValueError("Truncated EMC pattern file")
+        return np.frombuffer(raw, count=count, dtype="<i4").astype(
+            np.int32, copy=False
         ), int(stop) - int(offsets[-1])
 
     arrays = []
     for start, stop in index_ranges:
         stop = offsets[stop]
         start = offsets[start]
+        count = int(stop - start)
         file_obj.seek(I4 * (int(start) - current_offset), os.SEEK_CUR)
+        raw = file_obj.read(count * I4)
+        if len(raw) != count * I4:
+            raise ValueError("Truncated EMC pattern file")
         arrays.append(
-            np.frombuffer(file_obj.read(int(stop - start) * I4), dtype=np.int32)
+            np.frombuffer(raw, count=count, dtype="<i4").astype(np.int32, copy=False)
         )
         current_offset = int(stop)
     return (
@@ -286,21 +323,28 @@ class PatternsSOneFile:
         return int(self.num_data)
 
     @overload
-    def __getitem__(self, index: int | np.integer) -> npt.NDArray[np.int32]: ...
+    def __getitem__(self, index: tuple[INT_INDEX, INT_INDEX]) -> np.int32: ...
 
     @overload
-    def __getitem__(self, index: TRANGE) -> PatternsSOne: ...
+    def __getitem__(
+        self,
+        index: INT_INDEX | tuple[INT_INDEX, TRANGE] | tuple[TRANGE, INT_INDEX],
+    ) -> npt.NDArray[np.int32]: ...
 
     @overload
-    def __getitem__(self, index: tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
+    def __getitem__(self, index: TRANGE | tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
 
     def __getitem__(
         self,
-        index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
-    ) -> npt.NDArray[np.int32] | PatternsSOne:
+        index: INT_INDEX
+        | TRANGE
+        | tuple[INT_INDEX, INT_INDEX]
+        | tuple[INT_INDEX, TRANGE]
+        | tuple[TRANGE, INT_INDEX]
+        | tuple[TRANGE, TRANGE],
+    ) -> np.int32 | npt.NDArray[np.int32] | PatternsSOne:
         if isinstance(index, tuple) and len(index) == 2:
-            ax0, ax1 = index
-            return self[ax0][:, ax1]
+            return _dispatch_2d_file_getitem(self, index)
 
         is_scalar, index_ranges = _normalize_row_index_ranges(
             cast(int | np.integer[Any] | TRANGE, index), self.num_data
@@ -343,19 +387,51 @@ class PatternsSOneFile:
         dtype: npt.DTypeLike | None = None,
         chunk_size: int | None = None,
     ) -> int | float | npt.NDArray[Any]:
+        if axis is not None:
+            if isinstance(axis, (bool, np.bool_)) or not isinstance(
+                axis, (int, np.integer)
+            ):
+                raise TypeError(
+                    f"axis must be an integer or None, not {type(axis).__name__}"
+                )
+            axis = int(axis)
+            if axis < 0:
+                axis += 2
+            if axis not in (0, 1):
+                raise ValueError(f"Do not support axis={axis}.")
+        if chunk_size is not None and chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        if self.num_data == 0:
+            empty = PatternsSOne(
+                self.num_pix,
+                np.empty(0, dtype=np.uint32),
+                np.empty(0, dtype=np.uint32),
+                np.empty(0, dtype=np.uint32),
+                np.empty(0, dtype=np.uint32),
+                np.empty(0, dtype=np.int32),
+            )
+            return cast(
+                int | float | npt.NDArray[Any],
+                empty.sum(axis=axis, keepdims=keepdims, dtype=dtype),
+            )
         if chunk_size is None:
-            chunk_size = max(8, int(self.nbytes / 100_000_000))  # about 100MB
+            bytes_per_pat = max(1, self.nbytes // max(1, self.num_data))
+            chunk_size = max(8, 100_000_000 // bytes_per_pat)
+        acc_dtype = np.empty(0, dtype=np.int32).sum(dtype=dtype).dtype
         sums = [
-            self[i : min(i + chunk_size, self.num_data)].sum(axis=axis, dtype=dtype)
+            self[i : min(i + chunk_size, self.num_data)].sum(axis=axis, dtype=acc_dtype)
             for i in range(0, self.num_data, chunk_size)
         ]
         if axis == 1:
             ans_1 = np.concatenate(sums)
             return ans_1.reshape(-1, 1) if keepdims else ans_1
         if axis == 0:
-            ans = np.sum(cast(list[npt.NDArray[Any]], sums), axis=0)
+            ans = np.sum(cast(list[npt.NDArray[Any]], sums), axis=0, dtype=acc_dtype)
             return cast(npt.NDArray[Any], ans.reshape(1, -1) if keepdims else ans)
-        return cast(float | int, np.sum(cast(list[int | float], sums)))
+        total = np.sum(np.asarray(sums, dtype=acc_dtype), dtype=acc_dtype)
+        if keepdims:
+            return np.asarray(total, dtype=acc_dtype).reshape((1, 1))
+        return cast(float | int, total)
 
 
 class PatternsSOneEMC(PatternsSOneFile):
@@ -387,26 +463,35 @@ class PatternsSOneEMC(PatternsSOneFile):
     ):
         self._fn = Path(fn).resolve()
         if num_data is not None and num_pix is not None:
-            self.num_data = num_data
-            self.num_pix = num_pix
+            self.num_data = int(num_data)
+            self.num_pix = int(num_pix)
         else:
             with open(self._fn, "rb") as fin:
-                self.num_data = int(np.fromfile(fin, dtype=np.int32, count=1)[0])
-                self.num_pix = int(np.fromfile(fin, dtype=np.int32, count=1)[0])
+                header_raw = fin.read(self.HEADER_BYTES)
+            if len(header_raw) < self.HEADER_BYTES:
+                raise ValueError(f"Truncated EMC header in {self._fn}")
+            header_vals = np.frombuffer(header_raw, dtype="<i4", count=2)
+            self.num_data = int(header_vals[0])
+            self.num_pix = int(header_vals[1])
+        if self.num_data < 0 or self.num_pix < 0:
+            raise ValueError(
+                f"Invalid EMC header dimensions ({self.num_data}, {self.num_pix})"
+            )
         self.ndim = 2
         self._init_idx = False
 
     def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
         with self._fn.open("rb") as fin:
             fin.seek(1024)
-            return (
-                cast(
-                    np.ndarray, np.fromfile(fin, dtype=np.uint32, count=self.num_data)
-                ),
-                cast(
-                    np.ndarray, np.fromfile(fin, dtype=np.uint32, count=self.num_data)
-                ),
+            ones = np.fromfile(fin, dtype="<u4", count=self.num_data).astype(
+                np.uint32, copy=False
             )
+            multi = np.fromfile(fin, dtype="<u4", count=self.num_data).astype(
+                np.uint32, copy=False
+            )
+        if len(ones) != self.num_data or len(multi) != self.num_data:
+            raise ValueError(f"Truncated EMC pattern count arrays in {self._fn}")
+        return ones, multi
 
     def _read_patterns(
         self, index_ranges: INDEX_ARRAY
@@ -426,35 +511,53 @@ class PatternsSOneEMC(PatternsSOneFile):
 
     @property
     def place_ones(self) -> npt.NDArray[np.uint32]:
+        self.init_idx()
+        expected = int(self.ones_idx[-1])
         with self._fn.open("rb") as fin:
             fin.seek(1024)
             fin.seek(I4 * self.num_data * 2, os.SEEK_CUR)
-            return cast(
-                np.ndarray, np.fromfile(fin, dtype=np.uint32, count=self.ones.sum())
+            arr = np.fromfile(fin, dtype="<u4", count=expected).astype(
+                np.uint32, copy=False
             )
+        if len(arr) != expected:
+            raise ValueError(f"Truncated EMC place_ones array in {self._fn}")
+        return arr
 
     @property
     def place_multi(self) -> npt.NDArray[np.uint32]:
         self.init_idx()
+        expected = int(self.multi_idx[-1])
         with self._fn.open("rb") as fin:
             fin.seek(1024)
-            fin.seek(I4 * (self.num_data * 2 + self.ones_idx[-1]), os.SEEK_CUR)
-            return cast(
-                np.ndarray, np.fromfile(fin, dtype=np.uint32, count=self.multi.sum())
+            fin.seek(I4 * (self.num_data * 2 + int(self.ones_idx[-1])), os.SEEK_CUR)
+            arr = np.fromfile(fin, dtype="<u4", count=expected).astype(
+                np.uint32, copy=False
             )
+        if len(arr) != expected:
+            raise ValueError(f"Truncated EMC place_multi array in {self._fn}")
+        return arr
 
     @property
     def count_multi(self) -> npt.NDArray[np.int32]:
         self.init_idx()
+        expected = int(self.multi_idx[-1])
         with self._fn.open("rb") as fin:
             fin.seek(1024)
             fin.seek(
-                I4 * (self.num_data * 2 + self.ones_idx[-1] + self.multi_idx[-1]),
+                I4
+                * (
+                    self.num_data * 2
+                    + int(self.ones_idx[-1])
+                    + int(self.multi_idx[-1])
+                ),
                 os.SEEK_CUR,
             )
-            return cast(
-                np.ndarray, np.fromfile(fin, dtype=np.int32, count=self.multi.sum())
+            arr = np.fromfile(fin, dtype="<i4", count=expected).astype(
+                np.int32, copy=False
             )
+        if len(arr) != expected:
+            raise ValueError(f"Truncated EMC count_multi array in {self._fn}")
+        return arr
 
 
 class _PatternsSOneBytes(PatternsSOneFile):
@@ -463,29 +566,32 @@ class _PatternsSOneBytes(PatternsSOneFile):
     def __init__(self, fn: BytesIO):
         self._fn = fn
         self._fn.seek(0)
-        self.num_data = int(np.frombuffer(self._fn.read(4), dtype=np.int32, count=1)[0])
-        self.num_pix = int(np.frombuffer(self._fn.read(4), dtype=np.int32, count=1)[0])
+        header_raw = self._fn.read(self.HEADER_BYTES)
+        if len(header_raw) < self.HEADER_BYTES:
+            raise ValueError("Truncated EMC header in byte stream")
+        header_vals = np.frombuffer(header_raw, dtype="<i4", count=2)
+        self.num_data = int(header_vals[0])
+        self.num_pix = int(header_vals[1])
+        if self.num_data < 0 or self.num_pix < 0:
+            raise ValueError(
+                f"Invalid EMC header dimensions ({self.num_data}, {self.num_pix})"
+            )
         self.ndim = 2
         self._init_idx = False
 
     def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
         self._fn.seek(1024)
+        expected_bytes = I4 * self.num_data
+        raw_ones = self._fn.read(expected_bytes)
+        raw_multi = self._fn.read(expected_bytes)
+        if len(raw_ones) != expected_bytes or len(raw_multi) != expected_bytes:
+            raise ValueError("Truncated EMC pattern count arrays in byte stream")
         return (
-            cast(
-                np.ndarray,
-                np.frombuffer(
-                    self._fn.read(I4 * self.num_data),
-                    dtype=np.int32,
-                    count=self.num_data,
-                ),
+            np.frombuffer(raw_ones, dtype="<u4", count=self.num_data).astype(
+                np.uint32, copy=False
             ),
-            cast(
-                np.ndarray,
-                np.frombuffer(
-                    self._fn.read(I4 * self.num_data),
-                    dtype=np.int32,
-                    count=self.num_data,
-                ),
+            np.frombuffer(raw_multi, dtype="<u4", count=self.num_data).astype(
+                np.uint32, copy=False
             ),
         )
 
@@ -495,6 +601,48 @@ class _PatternsSOneBytes(PatternsSOneFile):
         self.init_idx()
         self._fn.seek(0)
         return read_patterns(self._fn, index_ranges, self.ones_idx, self.multi_idx)
+
+    @property
+    def place_ones(self) -> npt.NDArray[np.uint32]:
+        self.init_idx()
+        expected = int(self.ones_idx[-1])
+        expected_bytes = I4 * expected
+        self._fn.seek(1024 + I4 * self.num_data * 2)
+        raw = self._fn.read(expected_bytes)
+        if len(raw) != expected_bytes:
+            raise ValueError("Truncated EMC place_ones array in byte stream")
+        return np.frombuffer(raw, dtype="<u4", count=expected).astype(
+            np.uint32, copy=True
+        )
+
+    @property
+    def place_multi(self) -> npt.NDArray[np.uint32]:
+        self.init_idx()
+        expected = int(self.multi_idx[-1])
+        expected_bytes = I4 * expected
+        self._fn.seek(1024 + I4 * (self.num_data * 2 + int(self.ones_idx[-1])))
+        raw = self._fn.read(expected_bytes)
+        if len(raw) != expected_bytes:
+            raise ValueError("Truncated EMC place_multi array in byte stream")
+        return np.frombuffer(raw, dtype="<u4", count=expected).astype(
+            np.uint32, copy=True
+        )
+
+    @property
+    def count_multi(self) -> npt.NDArray[np.int32]:
+        self.init_idx()
+        expected = int(self.multi_idx[-1])
+        expected_bytes = I4 * expected
+        self._fn.seek(
+            1024
+            + I4 * (self.num_data * 2 + int(self.ones_idx[-1]) + int(self.multi_idx[-1]))
+        )
+        raw = self._fn.read(expected_bytes)
+        if len(raw) != expected_bytes:
+            raise ValueError("Truncated EMC count_multi array in byte stream")
+        return np.frombuffer(raw, dtype="<i4", count=expected).astype(
+            np.int32, copy=True
+        )
 
 
 class PatternsSOneEMCReadBuffer(PatternsSOneEMC):
@@ -514,10 +662,15 @@ class PatternsSOneEMCReadBuffer(PatternsSOneEMC):
     def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
         fin = self._file_handle
         fin.seek(1024)
-        return (
-            cast(np.ndarray, np.fromfile(fin, dtype=np.int32, count=self.num_data)),
-            cast(np.ndarray, np.fromfile(fin, dtype=np.int32, count=self.num_data)),
+        ones = np.fromfile(fin, dtype="<u4", count=self.num_data).astype(
+            np.uint32, copy=False
         )
+        multi = np.fromfile(fin, dtype="<u4", count=self.num_data).astype(
+            np.uint32, copy=False
+        )
+        if len(ones) != self.num_data or len(multi) != self.num_data:
+            raise ValueError(f"Truncated EMC pattern count arrays in {self._fn}")
+        return ones, multi
 
     def _read_patterns(
         self, index_ranges: INDEX_ARRAY
@@ -556,6 +709,17 @@ def _selected_counts(
 ) -> npt.NDArray[np.uint32]:
     selected = [counts[start:stop] for start, stop in index_ranges]
     return np.concatenate(selected) if selected else np.array([], dtype=np.uint32)
+
+
+def _as_nonneg_u32(values: np.ndarray) -> npt.NDArray[np.uint32]:
+    if values.dtype == np.uint32:
+        return values
+    if np.issubdtype(values.dtype, np.signedinteger) and values.size > 0:
+        if int(values.min()) < 0:
+            raise ValueError("Negative unsigned count or position in HDF5 dataset")
+    if values.dtype == np.int32:
+        return values.view(np.uint32)
+    return values.astype(np.uint32)
 
 
 class PatternsSOneH5(PatternsSOneFile):
@@ -616,10 +780,13 @@ class PatternsSOneH5(PatternsSOneFile):
         self.ndim = 2
         self._init_idx = False
 
+    def _get_accel_entry(self) -> H5AccelEntry | None:
+        return get_cache_entry(self._fn.fn, self._fn.gn)
+
     def init_idx(self) -> None:
         if self._init_idx:
             return
-        entry = get_cache_entry(self._fn.fn, self._fn.gn)
+        entry = self._get_accel_entry()
         if (
             entry is not None
             and entry.ones is not None
@@ -658,15 +825,16 @@ class PatternsSOneH5(PatternsSOneFile):
         with self._fn.open_group() as (fp, gp):
             assert isinstance(gp, (h5py.Group, h5py.File))
             ensure_group_filters(gp)
-            return cast(h5py.Dataset, gp["ones"])[...], cast(h5py.Dataset, gp["multi"])[
-                ...
-            ]
+            return (
+                _as_nonneg_u32(cast(h5py.Dataset, gp["ones"])[...]),
+                _as_nonneg_u32(cast(h5py.Dataset, gp["multi"])[...]),
+            )
 
     def _read_patterns(
         self, index_ranges: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
-        entry = get_cache_entry(self._fn.fn, self._fn.gn)
+        entry = self._get_accel_entry()
         with LazyH5Group(self._fn, entry) as lazy_gp:
             if (
                 self.position_encoding == "delta"
@@ -729,7 +897,7 @@ class PatternsSOneH5(PatternsSOneFile):
             return (
                 decode_pattern_local_delta(values, self.ones)
                 if self.position_encoding == "delta"
-                else values
+                else _as_nonneg_u32(values)
             )
 
     @property
@@ -741,7 +909,7 @@ class PatternsSOneH5(PatternsSOneFile):
             return (
                 decode_pattern_local_delta(values, self.multi)
                 if self.position_encoding == "delta"
-                else values
+                else _as_nonneg_u32(values)
             )
 
     @property
@@ -754,18 +922,53 @@ class PatternsSOneH5(PatternsSOneFile):
 
 class PatternsSOneH5ReadBuffer(PatternsSOneH5):
     def __init__(self, fn: str | Path | H5Path):
-        super().__init__(fn)
+        self._fn = h5path(fn).resolve()
         self._file_handle: h5py.File | None = None
+        self._private_entry: H5AccelEntry | None = None
+        try:
+            self._file_handle = h5py.File(self._fn.fn, "r")
+            self._private_entry = create_private_entry(self._fn.fn, self._fn.gn)
+            gp = self._file_handle[self._fn.gn]
+            assert isinstance(gp, (h5py.Group, h5py.File))
+            self.num_data = int(cast(int, gp.attrs["num_data"]))
+            self.num_pix = int(cast(int, gp.attrs["num_pix"]))
+            self.h5version = str(gp.attrs.get("version", "2"))
+            self.position_encoding = str(
+                gp.attrs.get("position_encoding", "absolute")
+            )
+            if self.h5version != "2":
+                raise ValueError(
+                    f"Unsupported HDF5 EMC format version {self.h5version!r}"
+                )
+            if self.position_encoding not in {"absolute", "delta"}:
+                raise ValueError(
+                    f"Unsupported HDF5 position encoding {self.position_encoding!r}"
+                )
+            self._private_entry.version = self.h5version
+            self._private_entry.num_data = self.num_data
+            self._private_entry.num_pix = self.num_pix
+            self._private_entry.position_encoding = self.position_encoding
+            self.ndim = 2
+            self._init_idx = False
+        except BaseException:
+            self.close()
+            raise
+
+    def _get_accel_entry(self) -> H5AccelEntry | None:
+        return self._private_entry
 
     def _ensure_file_handle(self) -> h5py.File:
         if self._file_handle is None:
-            self._file_handle = h5py.File(self._fn.fn, "r")
+            raise ValueError("I/O operation on closed HDF5 pattern reader")
         return self._file_handle
 
     def __enter__(self) -> PatternsSOneH5ReadBuffer:
         return self
 
     def close(self) -> None:
+        if self._private_entry is not None:
+            self._private_entry.close()
+            self._private_entry = None
         if self._file_handle is not None:
             self._file_handle.close()
             self._file_handle = None
@@ -778,13 +981,16 @@ class PatternsSOneH5ReadBuffer(PatternsSOneH5):
         gp = fp[self._fn.gn]
         assert isinstance(gp, (h5py.Group, h5py.File))
         ensure_group_filters(gp)
-        return cast(h5py.Dataset, gp["ones"])[...], cast(h5py.Dataset, gp["multi"])[...]
+        return (
+            _as_nonneg_u32(cast(h5py.Dataset, gp["ones"])[...]),
+            _as_nonneg_u32(cast(h5py.Dataset, gp["multi"])[...]),
+        )
 
     def _read_patterns(
         self, index_ranges: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
         self.init_idx()
-        entry = get_cache_entry(self._fn.fn, self._fn.gn)
+        entry = self._get_accel_entry()
         lazy_gp = LazyH5Group(self._fn, entry, reader=self)
         if (
             self.position_encoding == "delta"
@@ -827,6 +1033,40 @@ class PatternsSOneH5ReadBuffer(PatternsSOneH5):
             )
         return place_ones.view("u4"), place_multi.view("u4"), count_multi
 
+    @property
+    def place_ones(self) -> npt.NDArray[np.uint32]:
+        fp = self._ensure_file_handle()
+        gp = fp[self._fn.gn]
+        assert isinstance(gp, (h5py.Group, h5py.File))
+        ensure_group_filters(gp)
+        values = cast(h5py.Dataset, gp["place_ones"])[...]
+        return (
+            decode_pattern_local_delta(values, self.ones)
+            if self.position_encoding == "delta"
+            else _as_nonneg_u32(values)
+        )
+
+    @property
+    def place_multi(self) -> npt.NDArray[np.uint32]:
+        fp = self._ensure_file_handle()
+        gp = fp[self._fn.gn]
+        assert isinstance(gp, (h5py.Group, h5py.File))
+        ensure_group_filters(gp)
+        values = cast(h5py.Dataset, gp["place_multi"])[...]
+        return (
+            decode_pattern_local_delta(values, self.multi)
+            if self.position_encoding == "delta"
+            else _as_nonneg_u32(values)
+        )
+
+    @property
+    def count_multi(self) -> npt.NDArray[np.int32]:
+        fp = self._ensure_file_handle()
+        gp = fp[self._fn.gn]
+        assert isinstance(gp, (h5py.Group, h5py.File))
+        ensure_group_filters(gp)
+        return cast(h5py.Dataset, gp["count_multi"])[...]
+
 
 class PatternsSOneH5V1(PatternsSOneFile):
     def __init__(self, fn: str | Path | H5Path):
@@ -844,14 +1084,21 @@ class PatternsSOneH5V1(PatternsSOneFile):
         if self._init_idx:
             return
         with self._fn.open_group() as (_, gp):
-            place_ones = cast(h5py.Dataset, gp["place_ones"])[...]
-            ones = np.array([len(i) for i in place_ones], np.uint32)
-            place_ones = np.concatenate(place_ones)
-            place_multi = cast(h5py.Dataset, gp["place_multi"])[...]
-            multi = np.array([len(i) for i in place_multi], np.uint32)
-            place_multi = np.concatenate(place_multi)
-            count_multi = cast(h5py.Dataset, gp["count_multi"])[...]
-            count_multi = np.concatenate(count_multi)
+            raw_ones = cast(h5py.Dataset, gp["place_ones"])[...]
+            raw_multi = cast(h5py.Dataset, gp["place_multi"])[...]
+            raw_count = cast(h5py.Dataset, gp["count_multi"])[...]
+            if len(raw_ones) == 0:
+                ones = np.empty(0, dtype=np.uint32)
+                multi = np.empty(0, dtype=np.uint32)
+                place_ones = np.empty(0, dtype=np.uint32)
+                place_multi = np.empty(0, dtype=np.uint32)
+                count_multi = np.empty(0, dtype=np.int32)
+            else:
+                ones = np.array([len(i) for i in raw_ones], np.uint32)
+                place_ones = np.concatenate(raw_ones).astype(np.uint32, copy=False)
+                multi = np.array([len(i) for i in raw_multi], np.uint32)
+                place_multi = np.concatenate(raw_multi).astype(np.uint32, copy=False)
+                count_multi = np.concatenate(raw_count).astype(np.int32, copy=False)
         self._patterns = PatternsSOne(
             self.num_pix, ones, multi, place_ones, place_multi, count_multi
         )
@@ -883,18 +1130,26 @@ class PatternsSOneH5V1(PatternsSOneFile):
         return self._patterns.count_multi
 
     @overload
-    def __getitem__(self, index: int | np.integer) -> npt.NDArray[np.int32]: ...
+    def __getitem__(self, index: tuple[INT_INDEX, INT_INDEX]) -> np.int32: ...
 
     @overload
-    def __getitem__(self, index: TRANGE) -> PatternsSOne: ...
+    def __getitem__(
+        self,
+        index: INT_INDEX | tuple[INT_INDEX, TRANGE] | tuple[TRANGE, INT_INDEX],
+    ) -> npt.NDArray[np.int32]: ...
 
     @overload
-    def __getitem__(self, index: tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
+    def __getitem__(self, index: TRANGE | tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
 
     def __getitem__(
         self,
-        index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
-    ) -> npt.NDArray[np.int32] | PatternsSOne:
+        index: INT_INDEX
+        | TRANGE
+        | tuple[INT_INDEX, INT_INDEX]
+        | tuple[INT_INDEX, TRANGE]
+        | tuple[TRANGE, INT_INDEX]
+        | tuple[TRANGE, TRANGE],
+    ) -> np.int32 | npt.NDArray[np.int32] | PatternsSOne:
         self.init_idx()
         return self._patterns[index]
 
@@ -966,27 +1221,68 @@ class PatternsSOneList(PatternsSOneFile):
         return self.pattern_list
 
     def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
-        return np.concatenate([p.ones for p in self.pattern_list]), np.concatenate(
-            [p.multi for p in self.pattern_list]
+        return (
+            np.concatenate([p.ones for p in self.pattern_list]).astype(
+                np.uint32, copy=False
+            ),
+            np.concatenate([p.multi for p in self.pattern_list]).astype(
+                np.uint32, copy=False
+            ),
+        )
+
+    @property
+    def place_ones(self) -> npt.NDArray[np.uint32]:
+        arrays = [p.place_ones for p in self.pattern_list]
+        return (
+            np.concatenate(arrays).astype(np.uint32, copy=False)
+            if arrays
+            else np.empty(0, dtype=np.uint32)
+        )
+
+    @property
+    def place_multi(self) -> npt.NDArray[np.uint32]:
+        arrays = [p.place_multi for p in self.pattern_list]
+        return (
+            np.concatenate(arrays).astype(np.uint32, copy=False)
+            if arrays
+            else np.empty(0, dtype=np.uint32)
+        )
+
+    @property
+    def count_multi(self) -> npt.NDArray[np.int32]:
+        arrays = [p.count_multi for p in self.pattern_list]
+        return (
+            np.concatenate(arrays).astype(np.int32, copy=False)
+            if arrays
+            else np.empty(0, dtype=np.int32)
         )
 
     @overload
-    def __getitem__(self, index: int | np.integer) -> npt.NDArray[np.int32]: ...
+    def __getitem__(self, index: tuple[INT_INDEX, INT_INDEX]) -> np.int32: ...
 
     @overload
-    def __getitem__(self, index: TRANGE) -> PatternsSOne: ...
+    def __getitem__(
+        self,
+        index: INT_INDEX | tuple[INT_INDEX, TRANGE] | tuple[TRANGE, INT_INDEX],
+    ) -> npt.NDArray[np.int32]: ...
 
     @overload
-    def __getitem__(self, index: tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
+    def __getitem__(self, index: TRANGE | tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
 
     def __getitem__(
         self,
-        index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
-    ) -> npt.NDArray[np.int32] | PatternsSOne:
+        index: INT_INDEX
+        | TRANGE
+        | tuple[INT_INDEX, INT_INDEX]
+        | tuple[INT_INDEX, TRANGE]
+        | tuple[TRANGE, INT_INDEX]
+        | tuple[TRANGE, TRANGE],
+    ) -> np.int32 | npt.NDArray[np.int32] | PatternsSOne:
+        if isinstance(index, (bool, np.bool_)):
+            raise IndexError("Boolean scalar indices are not supported")
         match index:
             case tuple() as axes if len(axes) == 2:
-                ax0, ax1 = axes
-                return self[ax0][:, ax1]
+                return _dispatch_2d_file_getitem(self, axes)
             case int() | np.integer():
                 pidx = int(index)
                 if pidx < 0:
@@ -1131,23 +1427,30 @@ class PatternsSOneParquet(PatternsSOneFile):
         )
 
     @overload
-    def __getitem__(self, index: int | np.integer) -> npt.NDArray[np.int32]: ...
+    def __getitem__(self, index: tuple[INT_INDEX, INT_INDEX]) -> np.int32: ...
 
     @overload
-    def __getitem__(self, index: TRANGE) -> PatternsSOne: ...
+    def __getitem__(
+        self,
+        index: INT_INDEX | tuple[INT_INDEX, TRANGE] | tuple[TRANGE, INT_INDEX],
+    ) -> npt.NDArray[np.int32]: ...
 
     @overload
-    def __getitem__(self, index: tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
+    def __getitem__(self, index: TRANGE | tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
 
     def __getitem__(
         self,
-        index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
-    ) -> npt.NDArray[np.int32] | PatternsSOne:
+        index: INT_INDEX
+        | TRANGE
+        | tuple[INT_INDEX, INT_INDEX]
+        | tuple[INT_INDEX, TRANGE]
+        | tuple[TRANGE, INT_INDEX]
+        | tuple[TRANGE, TRANGE],
+    ) -> np.int32 | npt.NDArray[np.int32] | PatternsSOne:
         from ._parquet import read_parquet_patterns_with_counts
 
         if isinstance(index, tuple) and len(index) == 2:
-            ax0, ax1 = index
-            return self[ax0][:, ax1]
+            return _dispatch_2d_file_getitem(self, index)
 
         is_scalar, index_ranges = _normalize_row_index_ranges(
             cast(int | np.integer[Any] | TRANGE, index), self.num_data
@@ -1245,10 +1548,10 @@ class PatternsSOneParquetReadBuffer(PatternsSOneParquet):
         self._mm: mmap.mmap | None = None
         try:
             if self._fn.stat().st_size > 0:
-                self._fp = self._fn.open("rb")
-                self._mm = mmap.mmap(self._fp.fileno(), 0, access=mmap.ACCESS_READ)
+                with self._fn.open("rb") as fp:
+                    self._mm = mmap.mmap(fp.fileno(), 0, access=mmap.ACCESS_READ)
                 self._cache["mm"] = self._mm
-        except OSError:
+        except (OSError, ValueError):
             pass
 
     def __enter__(self) -> PatternsSOneParquetReadBuffer:
@@ -1271,10 +1574,16 @@ class PatternsSOneParquetReadBuffer(PatternsSOneParquet):
 
 
 def file_patterns(fn: Sequence[PATH_TYPE] | PATH_TYPE) -> PatternsSOneFile:
-    if (isinstance(fn, str) and glob.has_magic(fn)) or (
-        isinstance(fn, Path) and glob.has_magic(str(fn))
+    if (
+        isinstance(fn, (str, Path))
+        and "::" not in str(fn)
+        and glob.has_magic(str(fn))
+        and not Path(fn).exists()
     ):
-        return PatternsSOneList(sorted(glob.glob(str(fn))))
+        matched = sorted(glob.glob(str(fn)))
+        if not matched:
+            raise FileNotFoundError(f"No pattern files matched {fn!r}")
+        return PatternsSOneList(matched)
     if isinstance(fn, (tuple, list)):
         return PatternsSOneList(fn)
     assert isinstance(fn, (str, Path, H5Path))

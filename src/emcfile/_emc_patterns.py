@@ -4,13 +4,15 @@ import io
 import logging
 import os
 import threading
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from typing import (
     Any,
     NamedTuple,
     Protocol,
+    TypeGuard,
     TypeVar,
     cast,
     overload,
@@ -30,7 +32,13 @@ from ._h5_direct_write import PrefilteredDatasetWriter
 from ._h5_direct_write import available as direct_zstd_available
 from ._h5_filters import hdf5plugin
 from ._h5_workers import env_workers
-from ._hdf5 import PATH_TYPE, H5Path, check_remove_groups, make_path
+from ._hdf5 import (
+    PATH_TYPE,
+    H5Path,
+    atomic_write_path,
+    check_remove_groups,
+    make_path,
+)
 from ._html_display import html_card
 from ._indexing import contiguous_ranges
 
@@ -69,15 +77,105 @@ HANDLED_FUNCTIONS: dict[Callable[..., Any], Callable[..., Any]] = {}
 
 
 TRANGE = slice | npt.NDArray[np.bool_ | np.int32 | np.int64 | np.uint32 | np.uint64]
+INT_INDEX = int | np.integer[Any]
+
+_U32_MAX = int(np.iinfo(np.uint32).max)
+_I32_MIN = int(np.iinfo(np.int32).min)
+_I32_MAX = int(np.iinfo(np.int32).max)
+
+
+def _is_int_index(val: object) -> TypeGuard[INT_INDEX]:
+    return isinstance(val, (int, np.integer)) and not isinstance(val, (bool, np.bool_))
+
+
+def _index_1d_pattern_columns(
+    row_arr: npt.NDArray[np.int32],
+    columns: object,
+) -> np.int32 | npt.NDArray[np.int32]:
+    if isinstance(columns, (bool, np.bool_)):
+        raise IndexError("Boolean scalar indices are not supported")
+    if _is_int_index(columns):
+        return cast(np.int32, row_arr[int(columns)])
+    if isinstance(columns, slice):
+        return row_arr[columns]
+    if isinstance(columns, np.ndarray):
+        if columns.ndim != 1:
+            raise IndexError("column indices must be one-dimensional")
+        if np.issubdtype(columns.dtype, np.bool_):
+            if columns.size != row_arr.size:
+                raise IndexError(
+                    "Boolean column mask must match the number of pixels"
+                )
+            return row_arr[columns]
+        if np.issubdtype(columns.dtype, np.integer):
+            if columns.size > 0 and (
+                np.any(columns >= row_arr.size)
+                or (
+                    np.issubdtype(columns.dtype, np.signedinteger)
+                    and np.any(columns < -row_arr.size)
+                )
+            ):
+                raise IndexError("column index out of range")
+            return row_arr[columns.astype(np.intp, copy=False)]
+        raise IndexError("column indices must be integers or Boolean")
+    raise IndexError(f"Unsupported column index: {type(columns).__name__}")
+
+
+def _ensure_32bit_unsigned(arr: Any, name: str) -> npt.NDArray[np.uint32]:
+    if (
+        isinstance(arr, np.ndarray)
+        and arr.ndim == 1
+        and arr.dtype in (np.dtype(np.uint32), np.dtype(np.int32))
+    ):
+        return cast(npt.NDArray[np.uint32], arr)
+    if isinstance(arr, (list, tuple)) and len(arr) == 0:
+        return np.empty(0, dtype=np.uint32)
+    a = np.asarray(arr)
+    if a.ndim != 1 or not np.issubdtype(a.dtype, np.integer):
+        raise ValueError(f"{name} must be a 1D integer array")
+    if a.size > 0:
+        if np.issubdtype(a.dtype, np.signedinteger) and int(a.min()) < 0:
+            raise ValueError(f"{name} values must be non-negative")
+        if a.dtype.itemsize > 4 and int(a.max()) > _U32_MAX:
+            raise ValueError(f"{name} values exceed uint32 maximum")
+    return a.astype(np.uint32, copy=False)
+
+
+def _ensure_32bit_signed(arr: Any, name: str) -> npt.NDArray[np.int32]:
+    if (
+        isinstance(arr, np.ndarray)
+        and arr.ndim == 1
+        and arr.dtype == np.dtype(np.int32)
+    ):
+        return cast(npt.NDArray[np.int32], arr)
+    if isinstance(arr, (list, tuple)) and len(arr) == 0:
+        return np.empty(0, dtype=np.int32)
+    a = np.asarray(arr)
+    if a.ndim != 1 or not np.issubdtype(a.dtype, np.integer):
+        raise ValueError(f"{name} must be a 1D integer array")
+    if a.size > 0:
+        if np.issubdtype(a.dtype, np.signedinteger) and int(a.min()) < _I32_MIN:
+            raise ValueError(f"{name} values are below int32 minimum")
+        if (
+            a.dtype.itemsize > 4 or np.issubdtype(a.dtype, np.unsignedinteger)
+        ) and int(a.max()) > _I32_MAX:
+            raise ValueError(f"{name} values exceed int32 maximum")
+    return a.astype(np.int32, copy=False)
 
 
 def _count_offsets(
     counts: npt.NDArray[np.integer[Any]],
 ) -> npt.NDArray[np.uint64]:
     """Return cumulative event offsets for per-pattern counts."""
-    offsets = np.empty(len(counts) + 1, dtype=np.uint64)
+    arr = np.asarray(counts)
+    if arr.ndim != 1 or not np.issubdtype(arr.dtype, np.integer):
+        raise ValueError("counts must be a 1D integer array")
+    if arr.size > 0 and np.issubdtype(arr.dtype, np.signedinteger) and np.any(arr < 0):
+        raise ValueError("counts must be non-negative")
+    offsets = np.empty(len(arr) + 1, dtype=np.uint64)
     offsets[0] = 0
-    np.cumsum(counts, dtype=np.uint64, out=offsets[1:])
+    np.cumsum(arr, dtype=np.uint64, out=offsets[1:])
+    offsets.flags.writeable = False
     return offsets
 
 
@@ -116,18 +214,26 @@ class PatternsSOneBase(Protocol):
     def __len__(self) -> int: ...
 
     @overload
-    def __getitem__(self, index: int | np.integer) -> npt.NDArray[np.int32]: ...
+    def __getitem__(self, index: tuple[INT_INDEX, INT_INDEX]) -> np.int32: ...
 
     @overload
-    def __getitem__(self, index: TRANGE) -> PatternsSOne: ...
+    def __getitem__(
+        self,
+        index: INT_INDEX | tuple[INT_INDEX, TRANGE] | tuple[TRANGE, INT_INDEX],
+    ) -> npt.NDArray[np.int32]: ...
 
     @overload
-    def __getitem__(self, index: tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
+    def __getitem__(self, index: TRANGE | tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
 
     def __getitem__(
         self,
-        index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
-    ) -> npt.NDArray[np.int32] | PatternsSOne: ...
+        index: INT_INDEX
+        | TRANGE
+        | tuple[INT_INDEX, INT_INDEX]
+        | tuple[INT_INDEX, TRANGE]
+        | tuple[TRANGE, INT_INDEX]
+        | tuple[TRANGE, TRANGE],
+    ) -> np.int32 | npt.NDArray[np.int32] | PatternsSOne: ...
 
 
 EMCPatternSource = PatternsSOneBase
@@ -190,11 +296,11 @@ class PatternsSOne:
     ) -> None:
         self.ndim: int = 2
         self.num_pix = int(num_pix)
-        self.ones = ones
-        self.multi = multi
-        self.place_ones = place_ones
-        self.place_multi = place_multi
-        self.count_multi = count_multi
+        self.ones = _ensure_32bit_unsigned(ones, "ones")
+        self.multi = _ensure_32bit_unsigned(multi, "multi")
+        self.place_ones = _ensure_32bit_unsigned(place_ones, "place_ones")
+        self.place_multi = _ensure_32bit_unsigned(place_multi, "place_multi")
+        self.count_multi = _ensure_32bit_signed(count_multi, "count_multi")
         self._update_offsets()
 
     def _update_offsets(self) -> None:
@@ -508,20 +614,40 @@ class PatternsSOne:
         keepdims: bool = False,
         dtype: npt.DTypeLike | None = None,
     ) -> npt.NDArray[Any] | np.int32 | np.int64 | np.float32 | np.float64 | int | float:
+        if axis is not None:
+            if isinstance(axis, (bool, np.bool_)) or not isinstance(
+                axis, (int, np.integer)
+            ):
+                raise TypeError(
+                    f"axis must be an integer or None, not {type(axis).__name__}"
+                )
+            axis = int(axis)
+            if axis < 0:
+                axis += 2
+            if axis not in (0, 1):
+                raise ValueError(f"Do not support axis={axis}.")
+        acc_dtype = np.empty(0, dtype=np.int32).sum(dtype=dtype).dtype
         if axis is None:
+            total = np.array(len(self.place_ones), dtype=acc_dtype) + np.sum(
+                self.count_multi, dtype=acc_dtype
+            )
+            if keepdims:
+                return np.asarray(total, dtype=acc_dtype).reshape((1, 1))
             return cast(
-                int, len(self.place_ones) + np.sum(self.count_multi, dtype=dtype)
+                np.int32 | np.int64 | np.float32 | np.float64 | int | float, total
             )
         elif axis == 1:
-            ans = self.ones.astype(dtype, copy=True)
-            ans += np.squeeze(self._get_sparse_multi().sum(axis=1, dtype=dtype))
+            ans: npt.NDArray[Any] = self.ones.astype(acc_dtype, copy=True)
+            if self.place_multi.size > 0:
+                ans += np.asarray(
+                    self._get_sparse_multi().sum(axis=1, dtype=acc_dtype)
+                ).reshape(-1)
             return ans[:, None] if keepdims else ans
-        elif axis == 0:
-            column_sum: npt.NDArray[Any] = np.zeros(self.num_pix, dtype=dtype)
+        else:
+            column_sum: npt.NDArray[Any] = np.zeros(self.num_pix, dtype=acc_dtype)
             np.add.at(column_sum, self.place_ones, 1)
             np.add.at(column_sum, self.place_multi, self.count_multi)
             return column_sum[None, :] if keepdims else column_sum
-        raise ValueError(f"Do not support axis={axis}.")
 
     def _get_subdataset0(self, i: npt.NDArray[np.integer[Any]]) -> PatternsSOne:
         if i.ndim != 1:
@@ -564,18 +690,26 @@ class PatternsSOne:
         return result
 
     @overload
-    def __getitem__(self, index: int | np.integer) -> npt.NDArray[np.int32]: ...
+    def __getitem__(self, index: tuple[INT_INDEX, INT_INDEX]) -> np.int32: ...
 
     @overload
-    def __getitem__(self, index: TRANGE) -> PatternsSOne: ...
+    def __getitem__(
+        self,
+        index: INT_INDEX | tuple[INT_INDEX, TRANGE] | tuple[TRANGE, INT_INDEX],
+    ) -> npt.NDArray[np.int32]: ...
 
     @overload
-    def __getitem__(self, index: tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
+    def __getitem__(self, index: TRANGE | tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
 
     def __getitem__(
         self,
-        index: int | np.integer | TRANGE | tuple[TRANGE, TRANGE],
-    ) -> npt.NDArray[np.int32] | PatternsSOne:
+        index: INT_INDEX
+        | TRANGE
+        | tuple[INT_INDEX, INT_INDEX]
+        | tuple[INT_INDEX, TRANGE]
+        | tuple[TRANGE, INT_INDEX]
+        | tuple[TRANGE, TRANGE],
+    ) -> np.int32 | npt.NDArray[np.int32] | PatternsSOne:
         """Select patterns and optionally pixels.
 
         An integer returns a dense 1D ``int32`` NumPy array. A row slice or
@@ -584,12 +718,41 @@ class PatternsSOne:
         index arrays copy events. Integer row indices preserve order and
         duplicates. Boolean masks must match the number of patterns.
 
-        A two-item tuple selects rows and columns. Selections containing a
-        slice select rows first; two advanced selectors follow SciPy's
-        paired-index semantics rather than forming a Cartesian product.
+        A two-item tuple selects rows and columns, reducing integer axes like
+        NumPy: ``(int, int)`` returns an ``np.int32`` scalar, and ``(int,
+        slice/array)`` or ``(slice/array, int)`` returns a 1D ``int32`` array.
+        Selections containing two slices/arrays select rows first; two advanced
+        selectors follow SciPy's paired-index semantics rather than forming a
+        Cartesian product.
         """
+        if isinstance(index, (bool, np.bool_)):
+            raise IndexError("Boolean scalar indices are not supported")
         if isinstance(index, tuple) and len(index) == 2:
             rows, columns = index
+            if isinstance(rows, (bool, np.bool_)) or isinstance(
+                columns, (bool, np.bool_)
+            ):
+                raise IndexError("Boolean scalar indices are not supported")
+            if _is_int_index(rows):
+                return _index_1d_pattern_columns(self._get_pattern(int(rows)), columns)
+            if _is_int_index(columns):
+                col = int(columns)
+                if col < 0:
+                    col += self.num_pix
+                if col < 0 or col >= self.num_pix:
+                    raise IndexError(
+                        f"column index {columns} is out of bounds for axis 1 "
+                        f"with size {self.num_pix}"
+                    )
+                sub = cast(PatternsSOne, self[cast(TRANGE, rows), col : col + 1])
+                col_out = sub.ones.astype(np.int32, copy=True)
+                if sub.place_multi.size > 0:
+                    row_ids = np.repeat(
+                        np.arange(sub.num_data, dtype=np.intp),
+                        sub.multi.astype(np.intp, copy=False),
+                    )
+                    np.add.at(col_out, row_ids, sub.count_multi)
+                return col_out
             # Two fancy selectors have SciPy's paired-index semantics, rather
             # than a Cartesian product. Keep that existing general path.
             if (
@@ -861,30 +1024,46 @@ def iter_array_buffer(
     return _iter_buffered_arrays(datas, buffer_size, g)
 
 
+def _as_bin_attr_le32(data: PatternsSOneBase, attr: str) -> np.ndarray:
+    arr = getattr(data, attr)
+    if attr == "count_multi":
+        return _ensure_32bit_signed(arr, attr).astype("<i4", copy=False)
+    return _ensure_32bit_unsigned(arr, attr).view(np.uint32).astype("<u4", copy=False)
+
+
+def _validate_bin_sources(datas: Sequence[PatternsSOneBase]) -> tuple[int, int]:
+    if not datas:
+        raise ValueError("At least one pattern source is required")
+    num_pix = int(datas[0].num_pix)
+    if any(int(d.num_pix) != num_pix for d in datas):
+        raise ValueError("Inconsistent number of pixels across pattern sources")
+    num_data = sum(int(data.num_data) for data in datas)
+    if num_data < 0 or num_data > _I32_MAX or num_pix < 0 or num_pix > _I32_MAX:
+        raise ValueError("EMC binary header requires int32 num_data and num_pix")
+    return num_data, num_pix
+
+
 def _write_bin(datas: Sequence[PatternsSOneBase], path: Path, overwrite: bool) -> None:
     if path.exists() and not overwrite:
         raise FileExistsError(f"{path} exists")
-    num_data = np.sum([data.num_data for data in datas])
-    num_pix = datas[0].num_pix
-    with path.open("wb") as fptr:
-        header = np.zeros((256), dtype="i4")
+    num_data, num_pix = _validate_bin_sources(datas)
+    with atomic_write_path(path) as tmp_path, tmp_path.open("wb") as fptr:
+        header = np.zeros((256), dtype="<i4")
         header[:2] = [num_data, num_pix]
         header.tofile(fptr)
         for g in PatternsSOne.ATTRS:
             for data in datas:
-                getattr(data, g).tofile(fptr)
+                _as_bin_attr_le32(data, g).tofile(fptr)
 
 
 def _write_bytes(datas: Sequence[PatternsSOneBase], path: io.BytesIO) -> None:
-    num_data = np.sum([data.num_data for data in datas])
-    num_pix = datas[0].num_pix
-
-    header = np.zeros((256), dtype="i4")
+    num_data, num_pix = _validate_bin_sources(datas)
+    header = np.zeros((256), dtype="<i4")
     header[:2] = [num_data, num_pix]
     path.write(header.tobytes())
     for g in PatternsSOne.ATTRS:
         for data in datas:
-            path.write(getattr(data, g).tobytes())
+            path.write(_as_bin_attr_le32(data, g).tobytes())
 
 
 def _h5_filter_kwargs(
@@ -902,6 +1081,52 @@ def _h5_filter_kwargs(
         if compression_opts is not None:
             result["compression_opts"] = compression_opts
     return result
+
+
+_ALL_H5_PATTERN_KEYS = frozenset(
+    {"num_pix", "ones", "multi", "place_ones", "place_multi", "count_multi"}
+)
+_ALL_H5_PATTERN_ATTRS = frozenset(
+    {"num_pix", "num_data", "version", "position_encoding"}
+)
+
+
+@contextmanager
+def _open_h5_pattern_target(
+    path: H5Path, names: Sequence[str], overwrite: bool
+) -> Iterator[h5py.Group | h5py.File]:
+    file_exists = path.fn.exists()
+    is_valid_h5 = file_exists and h5py.is_hdf5(path.fn)
+    if file_exists and not overwrite:
+        if not is_valid_h5:
+            raise FileExistsError(f"{path.fn} exists")
+        with h5py.File(path.fn, "r") as rf:
+            if path.gn in rf:
+                grp = rf[path.gn]
+                if not isinstance(grp, h5py.Group):
+                    raise TypeError(f"{path} is not a group.")
+                check_remove_groups(grp, names, overwrite=False)
+
+    use_atomic = False
+    if not file_exists or not is_valid_h5:
+        use_atomic = True
+    elif overwrite and path.gn == "/":
+        with h5py.File(path.fn, "r") as rf:
+            if set(rf.keys()).issubset(_ALL_H5_PATTERN_KEYS) and set(
+                rf.attrs.keys()
+            ).issubset(_ALL_H5_PATTERN_ATTRS):
+                use_atomic = True
+
+    if use_atomic:
+        with atomic_write_path(path.fn) as tmp_fn:
+            with h5py.File(tmp_fn, "w") as h5f:
+                target = h5f if path.gn == "/" else h5f.create_group(path.gn)
+                yield target
+    else:
+        with path.open_group("a", "a") as (_, fp):
+            assert isinstance(fp, (h5py.Group, h5py.File))
+            check_remove_groups(fp, names, overwrite)
+            yield fp
 
 
 def _write_h5_v2(
@@ -942,11 +1167,10 @@ def _write_h5_v2(
     max_payload = max(1, num_ones, num_multi)
     workers = env_workers("EMCFILE_H5_WRITE_WORKERS", 4)
     kwargs = _h5_filter_kwargs(compression, compression_opts, shuffle)
+    names = ["ones", "multi", "place_ones", "place_multi", "count_multi"]
+    check_names = ["num_pix", *names]
     invalidate_cache_for_path(path.fn)
-    with path.open_group("a", "a") as (_, fp):
-        assert isinstance(fp, (h5py.Group, h5py.File))
-        names = ["ones", "multi", "place_ones", "place_multi", "count_multi"]
-        check_remove_groups(fp, names, overwrite)
+    with _open_h5_pattern_target(path, check_names, overwrite) as fp:
         shapes = {
             "ones": (num_data, "i4"),
             "multi": (num_data, "i4"),
@@ -967,12 +1191,6 @@ def _write_h5_v2(
             datasets[name] = fp.create_dataset(
                 name, (size,), dtype=dtype, **dataset_kwargs
             )
-        fp.attrs.update(
-            num_pix=num_pix,
-            num_data=num_data,
-            version="2",
-            position_encoding=position_encoding,
-        )
         pool = ThreadPoolExecutor(max_workers=workers) if direct_zstd else None
         slots = threading.Semaphore(max(2, workers * 2)) if direct_zstd else None
         writers = (
@@ -1065,10 +1283,16 @@ def _write_h5_v2(
                         else:
                             writers[name].write(array)
                             writers[name].drain()
-        finally:
             if writers is not None:
                 for writer in writers.values():
                     writer.close()
+            fp.attrs.update(
+                num_pix=num_pix,
+                num_data=num_data,
+                version="2",
+                position_encoding=position_encoding,
+            )
+        finally:
             if pool is not None:
                 pool.shutdown(cancel_futures=True)
     invalidate_cache_for_path(path.fn)
@@ -1209,32 +1433,34 @@ def _write_h5_v1(
     end: int | None = None,
 ) -> None:
     dt = h5py.special_dtype(vlen=np.int32)
-    with path.open_group("a", "a") as (_, fp):
-        assert isinstance(fp, (h5py.Group, h5py.File))
-        check_remove_groups(
-            fp,
-            ["num_pix", "ones", "multi", "place_ones", "place_multi", "count_multi"],
-            overwrite,
-        )
+    names = ["num_pix", "ones", "multi", "place_ones", "place_multi", "count_multi"]
+    invalidate_cache_for_path(path.fn)
+    with _open_h5_pattern_target(path, names, overwrite) as fp:
+        for k in ("num_pix", "num_data", "position_encoding"):
+            fp.attrs.pop(k, None)
         num_pix = fp.create_dataset("num_pix", (1,), dtype=np.int32)
         num_pix[0] = data.num_pix
 
         place_ones = fp.create_dataset("place_ones", (data.num_data,), dtype=dt)
-
-        ones_idx = _count_offsets(data.ones)
-        multi_idx = _count_offsets(data.multi)
-
-        for idx, d in enumerate(np.split(data.place_ones, ones_idx[1:-1]), start):
-            place_ones[idx] = d
-
         place_multi = fp.create_dataset("place_multi", (data.num_data,), dtype=dt)
-        for idx, d in enumerate(np.split(data.place_multi, multi_idx[1:-1]), start):
-            place_multi[idx] = d
-
         count_multi = fp.create_dataset("count_multi", (data.num_data,), dtype=dt)
-        for idx, d_c in enumerate(np.split(data.count_multi, multi_idx[1:-1]), start):
-            count_multi[idx] = d_c
+
+        if data.num_data > 0:
+            ones_idx = _count_offsets(data.ones)
+            multi_idx = _count_offsets(data.multi)
+
+            for idx, d in enumerate(np.split(data.place_ones, ones_idx[1:-1]), start):
+                place_ones[idx] = d
+
+            for idx, d in enumerate(np.split(data.place_multi, multi_idx[1:-1]), start):
+                place_multi[idx] = d
+
+            for idx, d_c in enumerate(
+                np.split(data.count_multi, multi_idx[1:-1]), start
+            ):
+                count_multi[idx] = d_c
         fp.attrs["version"] = "1"
+    invalidate_cache_for_path(path.fn)
 
 
 @implements(np.concatenate)
@@ -1278,11 +1504,11 @@ def _concatenate_emc_pattern_arrays(
         assert ones.shape is not None
         return PatternsSOne(
             ones.shape[1],
-            ones=cast(np.ndarray, ones.indptr[1:] - ones.indptr[:-1]),
-            multi=cast(np.ndarray, multi.indptr[1:] - multi.indptr[:-1]),
-            place_ones=cast(np.ndarray, ones.indices),
-            place_multi=cast(np.ndarray, multi.indices),
-            count_multi=cast(np.ndarray, multi.data),
+            ones=np.diff(ones.indptr).astype(np.uint32, copy=False),
+            multi=np.diff(multi.indptr).astype(np.uint32, copy=False),
+            place_ones=cast(np.ndarray, ones.indices).astype(np.uint32, copy=False),
+            place_multi=cast(np.ndarray, multi.indices).astype(np.uint32, copy=False),
+            count_multi=cast(np.ndarray, multi.data).astype(np.int32, copy=False),
         )
     raise ValueError("The axis should be 0 or 1.")
 
