@@ -20,7 +20,7 @@ use crate::{
     as_c_slice_2d, as_c_slice_mut_2d, get_pool, view_pybuffer_u8_detachable, THREAD_ZSTD,
 };
 
-type ChunkSpan = (usize, usize, usize);
+type ChunkSpan = (usize, usize, usize, bool);
 type ChunkWorkItem = (usize, Vec<ChunkSpan>);
 type FrameArrays<'py> = (
     Bound<'py, PyArray1<u32>>,
@@ -792,8 +792,10 @@ pub fn decode_indexed_mmap<'py>(
     let n_ranges = ranges.len() / 2;
     let n_chunks = table.len() / 3;
 
-    if n_ranges > 0 {
-        validate_offsets_u64(offsets, None)?;
+    if n_ranges > 0 && offsets.is_empty() {
+        return Err(PyValueError::new_err(
+            "Pattern counts do not match HDF5 v2 payload size",
+        ));
     }
 
     let mut total_elems = 0usize;
@@ -808,6 +810,11 @@ pub fn decode_indexed_mmap<'py>(
         let first = first_i as usize;
         let last = last_i as usize;
         if last > first {
+            if offsets[last] < offsets[first] {
+                return Err(PyValueError::new_err(
+                    "offsets must be monotonically non-decreasing",
+                ));
+            }
             let span_elems = usize::try_from(offsets[last] - offsets[first])
                 .map_err(|_| PyValueError::new_err("Pattern span overflows usize"))?;
             total_elems = total_elems
@@ -830,40 +837,80 @@ pub fn decode_indexed_mmap<'py>(
 
     let res = py.detach(|| -> Result<(), i32> {
         let mut chunk_map: HashMap<usize, Vec<ChunkSpan>> = HashMap::new();
-        let mut boundaries: Vec<usize> = if is_delta {
-            Vec::with_capacity(n_sel_pats + 1)
-        } else {
-            Vec::new()
-        };
-        if is_delta {
-            boundaries.push(0);
-        }
+        let mut straddle_pats: Vec<(usize, usize)> = Vec::new();
+        let _ = n_sel_pats;
 
         let mut dst = 0usize;
-        for r in 0..n_ranges {
-            let first = ranges[r * 2] as usize;
-            let last = ranges[r * 2 + 1] as usize;
-            if last <= first {
-                continue;
-            }
-            let mut begin = offsets[first] as usize;
-            let end = offsets[last] as usize;
-            if is_delta {
-                let base = offsets[first];
-                for &off in &offsets[(first + 1)..=last] {
-                    boundaries.push(dst + (off - base) as usize);
+        if is_delta {
+            for r in 0..n_ranges {
+                let first = ranges[r * 2] as usize;
+                let last = ranges[r * 2 + 1] as usize;
+                for p in first..last {
+                    let ps_u64 = offsets[p];
+                    let pe_u64 = offsets[p + 1];
+                    if pe_u64 < ps_u64 {
+                        return Err(-3);
+                    }
+                    let ps = ps_u64 as usize;
+                    let pe = pe_u64 as usize;
+                    if pe <= ps {
+                        continue;
+                    }
+                    let pat_len = pe - ps;
+                    let c_first = ps / chunk_len;
+                    let c_last = (pe - 1) / chunk_len;
+                    if c_first == c_last {
+                        if c_first >= n_chunks {
+                            return Err(-1);
+                        }
+                        chunk_map
+                            .entry(c_first)
+                            .or_default()
+                            .push((dst, ps % chunk_len, pat_len, true));
+                        dst += pat_len;
+                    } else {
+                        if c_last >= n_chunks {
+                            return Err(-1);
+                        }
+                        straddle_pats.push((dst, dst + pat_len));
+                        let mut begin = ps;
+                        while begin < pe {
+                            let c_idx = begin / chunk_len;
+                            let local = begin % chunk_len;
+                            let len = (pe - begin).min(chunk_len - local);
+                            chunk_map
+                                .entry(c_idx)
+                                .or_default()
+                                .push((dst, local, len, false));
+                            begin += len;
+                            dst += len;
+                        }
+                    }
                 }
             }
-            while begin < end {
-                let c_idx = begin / chunk_len;
-                if c_idx >= n_chunks {
-                    return Err(-1);
+        } else {
+            for r in 0..n_ranges {
+                let first = ranges[r * 2] as usize;
+                let last = ranges[r * 2 + 1] as usize;
+                if last <= first {
+                    continue;
                 }
-                let local = begin % chunk_len;
-                let len = (end - begin).min(chunk_len - local);
-                chunk_map.entry(c_idx).or_default().push((dst, local, len));
-                begin += len;
-                dst += len;
+                let mut begin = offsets[first] as usize;
+                let end = offsets[last] as usize;
+                while begin < end {
+                    let c_idx = begin / chunk_len;
+                    if c_idx >= n_chunks {
+                        return Err(-1);
+                    }
+                    let local = begin % chunk_len;
+                    let len = (end - begin).min(chunk_len - local);
+                    chunk_map
+                        .entry(c_idx)
+                        .or_default()
+                        .push((dst, local, len, false));
+                    begin += len;
+                    dst += len;
+                }
             }
         }
 
@@ -910,12 +957,17 @@ pub fn decode_indexed_mmap<'py>(
                     }
                 };
 
-                for &(d_off, l_off, s_len) in spans {
+                for &(d_off, l_off, s_len, full_pat) in spans {
                     let dst_span = unsafe {
                         std::slice::from_raw_parts_mut((out_addr as *mut u32).add(d_off), s_len)
                     };
                     if (mask & 1) != 0 {
                         copy_unaligned_u32(raw_slice, l_off, dst_span);
+                        if full_pat && s_len > 1 {
+                            cumsum_u32_inplace(dst_span);
+                        }
+                    } else if full_pat {
+                        unshuffle_span_u32_opt_cumsum(raw_slice, chunk_len, l_off, dst_span, true);
                     } else {
                         unshuffle_span_u32(raw_slice, chunk_len, l_off, dst_span);
                     }
@@ -932,12 +984,10 @@ pub fn decode_indexed_mmap<'py>(
             get_pool(w).install(|| chunk_items.par_iter().try_for_each(decode_item))?;
         }
 
-        if is_delta && boundaries.len() > 1 {
-            let n_b = boundaries.len() - 1;
-            if n_workers <= 1 || total_elems < 262_144 {
-                for i in 0..n_b {
-                    let s = boundaries[i];
-                    let e = boundaries[i + 1];
+        if !straddle_pats.is_empty() {
+            let n_s = straddle_pats.len();
+            if n_workers <= 1 || n_s < 16 {
+                for &(s, e) in &straddle_pats {
                     if e > s + 1 {
                         let seg = unsafe {
                             std::slice::from_raw_parts_mut((out_addr as *mut u32).add(s), e - s)
@@ -946,24 +996,17 @@ pub fn decode_indexed_mmap<'py>(
                     }
                 }
             } else {
-                let w_d = n_workers.min(n_b);
-                let step = n_b.div_ceil(w_d);
+                let w_d = n_workers.min(n_s);
                 get_pool(w_d).install(|| {
-                    (0..w_d).into_par_iter().for_each(|tid| {
-                        let b0 = tid * step;
-                        let b1 = ((tid + 1) * step).min(n_b);
-                        for i in b0..b1 {
-                            let s = boundaries[i];
-                            let e = boundaries[i + 1];
-                            if e > s + 1 {
-                                let seg = unsafe {
-                                    std::slice::from_raw_parts_mut(
-                                        (out_addr as *mut u32).add(s),
-                                        e - s,
-                                    )
-                                };
-                                cumsum_u32_inplace(seg);
-                            }
+                    straddle_pats.par_iter().for_each(|&(s, e)| {
+                        if e > s + 1 {
+                            let seg = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    (out_addr as *mut u32).add(s),
+                                    e - s,
+                                )
+                            };
+                            cumsum_u32_inplace(seg);
                         }
                     });
                 });
@@ -975,6 +1018,9 @@ pub fn decode_indexed_mmap<'py>(
     match res {
         Ok(()) => Ok(out_arr),
         Err(-2) => Err(PyValueError::new_err("Unexpected HDF5 v2 chunk filter mask")),
+        Err(-3) => Err(PyValueError::new_err(
+            "offsets must be monotonically non-decreasing",
+        )),
         Err(_) => Err(PyValueError::new_err(
             "Unexpected HDF5 v2 decoded chunk length",
         )),
@@ -1043,7 +1089,7 @@ pub fn decode_chunk_span_cached<'py>(
             let mut cache_entry = get_single_cache()[slot_idx]
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if cache_entry.key != key || cache_entry.buf.len() < u_bytes {
+            if file_id == 0 || cache_entry.key != key || cache_entry.buf.len() < u_bytes {
                 if cache_entry.buf.len() < u_bytes {
                     cache_entry.buf.resize(u_bytes, 0);
                 }
@@ -1052,7 +1098,11 @@ pub fn decode_chunk_span_cached<'py>(
                     .decompress(&mut cache_entry.buf[..u_bytes], payload)
                 {
                     Ok(n) if n == u_bytes => {
-                        cache_entry.key = key;
+                        cache_entry.key = if file_id != 0 {
+                            key
+                        } else {
+                            (0, -1, -1, -1, 0)
+                        };
                     }
                     _ => {
                         cache_entry.key = (0, -1, -1, -1, 0);
@@ -1166,7 +1216,7 @@ fn decode_single_col_from_mmap(
                 let mut cache_entry = get_single_cache()[slot_idx]
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                if cache_entry.key != key || cache_entry.buf.len() < u_bytes {
+                if file_id == 0 || cache_entry.key != key || cache_entry.buf.len() < u_bytes {
                     if cache_entry.buf.len() < u_bytes {
                         cache_entry.buf.resize(u_bytes, 0);
                     }
@@ -1175,7 +1225,11 @@ fn decode_single_col_from_mmap(
                         .decompress(&mut cache_entry.buf[..u_bytes], &mm_u8[b_off..b_off + c_sz])
                     {
                         Ok(n) if n == u_bytes => {
-                            cache_entry.key = key;
+                            cache_entry.key = if file_id != 0 {
+                                key
+                            } else {
+                                (0, -1, -1, -1, 0)
+                            };
                         }
                         _ => {
                             cache_entry.key = (0, -1, -1, -1, 0);
@@ -1270,7 +1324,7 @@ pub fn decode_single_frame_mmap<'py>(
     let cm_addr = s_cm.as_mut_ptr() as usize;
 
     let rc = py.detach(|| {
-        let large_chunks = chunk_len_po >= 262_144 && len_o > 0 && len_m > 0;
+        let large_chunks = chunk_len_po >= 524_288 && len_o > 0 && len_m > 0;
         if large_chunks {
             let sc = get_single_cache();
             let c0 = begin_o / chunk_len_po;
@@ -1297,9 +1351,13 @@ pub fn decode_single_frame_mmap<'py>(
                 t_cm[c2 * 3 + 1],
                 chunk_len_cm,
             );
-            let misses = (sc[0].lock().unwrap_or_else(|e| e.into_inner()).key != k0) as usize
-                + (sc[1].lock().unwrap_or_else(|e| e.into_inner()).key != k1) as usize
-                + (sc[2].lock().unwrap_or_else(|e| e.into_inner()).key != k2) as usize;
+            let misses = if file_id == 0 {
+                3
+            } else {
+                (sc[0].lock().unwrap_or_else(|e| e.into_inner()).key != k0) as usize
+                    + (sc[1].lock().unwrap_or_else(|e| e.into_inner()).key != k1) as usize
+                    + (sc[2].lock().unwrap_or_else(|e| e.into_inner()).key != k2) as usize
+            };
             if misses >= 2 {
                 let err = AtomicI32::new(0);
                 get_pool(3).install(|| {
@@ -1427,6 +1485,152 @@ pub fn cumsum_inplace_u32<'py>(mut b_arr: PyReadwriteArray1<'py, u32>) -> PyResu
     Ok(())
 }
 
+#[pyfunction]
+pub fn scatter_dense_pattern<'py>(
+    py: Python<'py>,
+    num_pix: usize,
+    b_po: PyReadonlyArray1<'py, u32>,
+    b_pm: PyReadonlyArray1<'py, u32>,
+    b_cm: PyReadonlyArray1<'py, i32>,
+) -> PyResult<Bound<'py, PyArray1<i32>>> {
+    let po = b_po.as_slice()?;
+    let pm = b_pm.as_slice()?;
+    let cm = b_cm.as_slice()?;
+    if pm.len() != cm.len() {
+        return Err(PyValueError::new_err(
+            "place_multi and count_multi lengths must match",
+        ));
+    }
+    let out_arr = PyArray1::<i32>::zeros(py, [num_pix], false);
+    let out = unsafe { out_arr.as_slice_mut()? };
+    for &idx_u32 in po {
+        let idx = idx_u32 as usize;
+        if idx >= num_pix {
+            return Err(PyIndexError::new_err(
+                "place_ones index out of bounds for num_pix",
+            ));
+        }
+        out[idx] = 1;
+    }
+    for (&idx_u32, &val) in pm.iter().zip(cm.iter()) {
+        let idx = idx_u32 as usize;
+        if idx >= num_pix {
+            return Err(PyIndexError::new_err(
+                "place_multi index out of bounds for num_pix",
+            ));
+        }
+        out[idx] = val;
+    }
+    Ok(out_arr)
+}
+
+#[cfg(target_pointer_width = "64")]
+struct H5ChunkIterCtx<'a> {
+    tbl: &'a mut [i64],
+    chunk_len: u64,
+    n_chunks: usize,
+    visited: usize,
+    invalid: bool,
+}
+
+#[cfg(target_pointer_width = "64")]
+unsafe extern "C" fn h5d_chunk_iter_cb(
+    offset_ptr: *const u64,
+    filter_mask: std::ffi::c_uint,
+    addr: u64,
+    size: u64,
+    op_data: *mut std::ffi::c_void,
+) -> std::ffi::c_int {
+    let ctx = unsafe { &mut *(op_data as *mut H5ChunkIterCtx<'_>) };
+    if offset_ptr.is_null() || addr == u64::MAX || addr > i64::MAX as u64 || size > i64::MAX as u64
+    {
+        ctx.invalid = true;
+        return 1;
+    }
+    let coord = unsafe { *offset_ptr };
+    if !coord.is_multiple_of(ctx.chunk_len) {
+        ctx.invalid = true;
+        return 1;
+    }
+    let idx_u64 = coord / ctx.chunk_len;
+    let Ok(idx) = usize::try_from(idx_u64) else {
+        ctx.invalid = true;
+        return 1;
+    };
+    if idx >= ctx.n_chunks {
+        ctx.invalid = true;
+        return 1;
+    }
+    let base = idx * 3;
+    if ctx.tbl[base + 1] >= 0 {
+        ctx.invalid = true;
+        return 1;
+    }
+    ctx.tbl[base] = addr as i64;
+    ctx.tbl[base + 1] = size as i64;
+    ctx.tbl[base + 2] = filter_mask as i64;
+    ctx.visited += 1;
+    0
+}
+
+#[pyfunction]
+pub fn populate_chunk_table_h5d<'py>(
+    fn_addr: usize,
+    dset_id: i64,
+    chunk_len: usize,
+    mut b_table: PyReadwriteArray2<'py, i64>,
+) -> PyResult<i32> {
+    if fn_addr == 0 || dset_id <= 0 || chunk_len == 0 {
+        return Ok(-1);
+    }
+    #[cfg(target_pointer_width = "64")]
+    {
+        let tbl = as_c_slice_mut_2d(&mut b_table, 3, "b_table")?;
+        let n_chunks = tbl.len() / 3;
+        if n_chunks == 0 {
+            return Ok(1);
+        }
+        type H5DChunkIterFn = unsafe extern "C" fn(
+            i64,
+            i64,
+            unsafe extern "C" fn(
+                *const u64,
+                std::ffi::c_uint,
+                u64,
+                u64,
+                *mut std::ffi::c_void,
+            ) -> std::ffi::c_int,
+            *mut std::ffi::c_void,
+        ) -> std::ffi::c_int;
+
+        let h5d_chunk_iter: H5DChunkIterFn = unsafe { std::mem::transmute(fn_addr) };
+        let mut ctx = H5ChunkIterCtx {
+            tbl,
+            chunk_len: chunk_len as u64,
+            n_chunks,
+            visited: 0,
+            invalid: false,
+        };
+        let rc = unsafe {
+            h5d_chunk_iter(
+                dset_id,
+                0,
+                h5d_chunk_iter_cb,
+                (&mut ctx as *mut H5ChunkIterCtx<'_>).cast::<std::ffi::c_void>(),
+            )
+        };
+        if rc != 0 || ctx.invalid {
+            return Ok(-1);
+        }
+        Ok(if ctx.visited == n_chunks { 1 } else { 0 })
+    }
+    #[cfg(not(target_pointer_width = "64"))]
+    {
+        let _ = &mut b_table;
+        Ok(-1)
+    }
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compress_raw_zstd, m)?)?;
     m.add_function(wrap_pyfunction!(decode_raw_chunk, m)?)?;
@@ -1439,6 +1643,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(decode_chunk_span_cached, m)?)?;
     m.add_function(wrap_pyfunction!(decode_single_frame_mmap, m)?)?;
     m.add_function(wrap_pyfunction!(cumsum_inplace_u32, m)?)?;
+    m.add_function(wrap_pyfunction!(scatter_dense_pattern, m)?)?;
+    m.add_function(wrap_pyfunction!(populate_chunk_table_h5d, m)?)?;
     Ok(())
 }
 

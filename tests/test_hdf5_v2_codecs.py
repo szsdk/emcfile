@@ -306,9 +306,7 @@ def test_rust_h5_rejects_fortran_and_invalid_offsets(tmp_path: Path, hdf5_fast):
 def _h5_fork_child(src_path: str, dst_path: str, conn) -> None:
     try:
         got = ef.open_patterns(src_path)[:]
-        got.write(
-            dst_path, position_encoding="delta", compression="zstd", shuffle=True
-        )
+        got.write(dst_path, position_encoding="delta", compression="zstd", shuffle=True)
         reopened = ef.open_patterns(dst_path)[:]
         conn.send((got == reopened, len(reopened)))
     except BaseException as exc:  # pragma: no cover - diagnostic path
@@ -454,3 +452,103 @@ def test_h5_atomic_overwrite_while_mmap_open_and_clean_failures(
     assert not failed_new.exists()
 
 
+def test_h5_unallocated_chunks_fallback_and_native_chunk_table(
+    tmp_path: Path, monkeypatch, hdf5_fast
+):
+    from emcfile._h5_accel import (
+        _get_h5d_chunk_iter_addr,
+        build_chunk_tables,
+        get_cache_entry,
+        get_h5_rs,
+        invalidate_cache_for_path,
+    )
+
+    monkeypatch.setattr(fast, "MIN_FULL_SCAN_BYTES", 0)
+    monkeypatch.setenv("EMCFILE_H5_INDEXED_WORKERS", "2")
+
+    # 1. Verify native H5Dchunk_iter matches Python chunk_iter bit-for-bit
+    expected = _patterns(8)
+    normal_path = tmp_path / "normal_chunks.h5"
+    expected.write(
+        normal_path,
+        position_encoding="delta",
+        compression="zstd",
+        shuffle=True,
+    )
+    rs = get_h5_rs()
+    fn_addr = _get_h5d_chunk_iter_addr()
+    if rs is not None and fn_addr > 0:
+        entry = get_cache_entry(normal_path, "/")
+        assert entry is not None
+        with h5py.File(normal_path, "r") as fp:
+            dsets = [fp[k] for k in ("place_ones", "place_multi", "count_multi")]
+            assert build_chunk_tables(entry, dsets)
+            assert entry.tables is not None
+            for ds, c_tbl in zip(dsets, entry.tables):
+                n = int(ds.chunks[0])
+                py_tbl = np.full_like(c_tbl, -1)
+
+                def _cb(info, _t=py_tbl, _n=n):
+                    idx = info.chunk_offset[0] // _n
+                    _t[idx] = (info.byte_offset, info.size, info.filter_mask)
+
+                ds.id.chunk_iter(_cb)
+                np.testing.assert_array_equal(c_tbl, py_tbl)
+
+    # 2. Verify unallocated chunks fall back cleanly across single, indexed, and full_scan
+    sparse_h5 = tmp_path / "unallocated_chunk.h5"
+    f_kwargs = implementation._h5_filter_kwargs("zstd", 1, True)
+    with h5py.File(sparse_h5, "w") as fp:
+        fp.attrs["version"] = "2"
+        fp.attrs["num_data"] = 2
+        fp.attrs["num_pix"] = 16
+        fp.attrs["position_encoding"] = "delta"
+        fp.create_dataset("ones", data=np.array([2, 2], dtype=np.uint32))
+        fp.create_dataset("multi", data=np.array([4, 4], dtype=np.uint32))
+        ds_po = fp.create_dataset(
+            "place_ones", shape=(4,), chunks=(2,), dtype=np.uint32, **f_kwargs
+        )
+        ds_po[:] = np.array([1, 2, 0, 5], dtype=np.uint32)
+        ds_pm = fp.create_dataset(
+            "place_multi", shape=(8,), chunks=(4,), dtype=np.uint32, **f_kwargs
+        )
+        ds_pm[:] = np.array([2, 1, 1, 1, 3, 1, 1, 1], dtype=np.uint32)
+        # Only allocate chunk 0 of count_multi; chunk 1 remains unallocated with fillvalue=2
+        ds_cm = fp.create_dataset(
+            "count_multi",
+            shape=(8,),
+            chunks=(4,),
+            dtype=np.int32,
+            fillvalue=2,
+            **f_kwargs,
+        )
+        ds_cm[:4] = np.array([3, 4, 5, 6], dtype=np.int32)
+        assert ds_cm.id.get_num_chunks() == 1
+
+    ref_p0 = np.zeros(16, dtype=np.int32)
+    ref_p0[[1, 3]] = 1
+    ref_p0[[2, 3, 4, 5]] = [3, 4, 5, 6]
+    ref_p1 = np.zeros(16, dtype=np.int32)
+    ref_p1[[0, 5]] = 1
+    ref_p1[[3, 4, 5, 6]] = 2
+
+    # Cold single-frame hitting unallocated chunk
+    invalidate_cache_for_path(sparse_h5)
+    np.testing.assert_array_equal(ef.open_patterns(sparse_h5)[1], ref_p1)
+
+    # Cold single-frame hitting allocated chunk, then 2nd reopen hitting unallocated table check
+    invalidate_cache_for_path(sparse_h5)
+    np.testing.assert_array_equal(ef.open_patterns(sparse_h5)[0], ref_p0)
+    np.testing.assert_array_equal(ef.open_patterns(sparse_h5)[1], ref_p1)
+
+    # Cold indexed multi-frame read
+    invalidate_cache_for_path(sparse_h5)
+    got_idx = ef.open_patterns(sparse_h5)[np.array([1, 0])][:]
+    np.testing.assert_array_equal(got_idx[0], ref_p1)
+    np.testing.assert_array_equal(got_idx[1], ref_p0)
+
+    # Cold full scan
+    invalidate_cache_for_path(sparse_h5)
+    got_all = ef.open_patterns(sparse_h5)[:][:]
+    np.testing.assert_array_equal(got_all[0], ref_p0)
+    np.testing.assert_array_equal(got_all[1], ref_p1)

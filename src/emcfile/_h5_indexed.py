@@ -145,6 +145,8 @@ def indexed_read(group: Any, ranges: Any, ones_offsets: Any, multi_offsets: Any)
                     group[name] for name in ("place_ones", "place_multi", "count_multi")
                 ]
             build_chunk_tables(entry, datasets)
+            if entry.eligible is False:
+                return None
         if (
             entry.tables is not None
             and entry.mm is not None
@@ -186,6 +188,14 @@ def indexed_read(group: Any, ranges: Any, ones_offsets: Any, multi_offsets: Any)
         datasets = [
             group[name] for name in ("place_ones", "place_multi", "count_multi")
         ]
+    if any(
+        ds.chunks is None
+        or ds.id.get_num_chunks() != (ds.size + ds.chunks[0] - 1) // ds.chunks[0]
+        for ds in datasets
+    ):
+        if entry is not None:
+            entry.eligible = False
+        return None
     decode_segmented_delta_inplace(
         np.empty(0, "u4"), np.array([0], "u8"), np.empty(0, "u4"), accelerated=True
     )
@@ -246,41 +256,93 @@ def _single_frame(
     *,
     entry: H5AccelEntry | None = None,
     group: Any = None,
-) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
+) -> (
+    tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]] | None
+):
     rs = get_h5_rs()
-    if _decode_chunk is _DEFAULT_DECODE_CHUNK and rs is not None and entry is not None:
-        if entry.tables is None or entry.mm is None:
-            if datasets is None and group is not None:
-                datasets = [
-                    group[name] for name in ("place_ones", "place_multi", "count_multi")
-                ]
-            if datasets is not None:
-                build_chunk_tables(entry, datasets)
-        if (
-            entry.tables is not None
-            and entry.mm is not None
-            and entry.chunk_lens is not None
+    if _decode_chunk is _DEFAULT_DECODE_CHUNK and rs is not None:
+        if entry is not None:
+            if (entry.tables is None or entry.mm is None) and entry.single_reads >= 1:
+                if datasets is None and group is not None:
+                    datasets = [
+                        group[name]
+                        for name in ("place_ones", "place_multi", "count_multi")
+                    ]
+                if datasets is not None:
+                    build_chunk_tables(entry, datasets)
+                    if entry.eligible is False:
+                        return None
+            if (
+                entry.tables is not None
+                and entry.mm is not None
+                and entry.chunk_lens is not None
+            ):
+                begin_o = int(ones_offsets[frame])
+                end_o = int(ones_offsets[frame + 1])
+                begin_m = int(multi_offsets[frame])
+                end_m = int(multi_offsets[frame + 1])
+                p_ones, p_multi, c_multi = rs.decode_single_frame_mmap(
+                    entry.file_token,
+                    entry.mm,
+                    entry.tables[0],
+                    entry.chunk_lens[0],
+                    begin_o,
+                    end_o,
+                    entry.tables[1],
+                    entry.chunk_lens[1],
+                    begin_m,
+                    end_m,
+                    entry.tables[2],
+                    entry.chunk_lens[2],
+                    True,
+                )
+                return p_ones, p_multi, c_multi.view(np.int32)
+            entry.single_reads += 1
+
+        if datasets is None:
+            assert group is not None
+            datasets = [
+                group[name] for name in ("place_ones", "place_multi", "count_multi")
+            ]
+        file_token = entry.file_token if entry is not None else 0
+        fast_outputs: list[npt.NDArray[Any]] = []
+        for index, (dataset, offsets) in enumerate(
+            zip(datasets, (ones_offsets, multi_offsets, multi_offsets))
         ):
-            begin_o = int(ones_offsets[frame])
-            end_o = int(ones_offsets[frame + 1])
-            begin_m = int(multi_offsets[frame])
-            end_m = int(multi_offsets[frame + 1])
-            p_ones, p_multi, c_multi = rs.decode_single_frame_mmap(
-                entry.file_token,
-                entry.mm,
-                entry.tables[0],
-                entry.chunk_lens[0],
-                begin_o,
-                end_o,
-                entry.tables[1],
-                entry.chunk_lens[1],
-                begin_m,
-                end_m,
-                entry.tables[2],
-                entry.chunk_lens[2],
-                True,
-            )
-            return p_ones, p_multi, c_multi.view(np.int32)
+            begin, end = int(offsets[frame]), int(offsets[frame + 1])
+            u32_out = np.empty(end - begin, dtype=np.uint32)
+            assert dataset.chunks is not None
+            n = int(dataset.chunks[0])
+            destination = 0
+            while begin < end:
+                chunk, start = divmod(begin, n)
+                length = min(end - begin, n - start)
+                try:
+                    mask, payload = dataset.id.read_direct_chunk((chunk * n,))
+                except (OSError, RuntimeError):
+                    if dataset.id.get_num_chunks() != (dataset.size + n - 1) // n:
+                        if entry is not None:
+                            entry.eligible = False
+                        return None
+                    raise
+                u32_out[destination : destination + length] = (
+                    rs.decode_chunk_span_cached(
+                        index,
+                        file_token,
+                        chunk * n,
+                        mask,
+                        memoryview(payload),
+                        n,
+                        start,
+                        start + length,
+                    )
+                )
+                begin += length
+                destination += length
+            if index < 2 and u32_out.size > 1:
+                rs.cumsum_inplace_u32(u32_out)
+            fast_outputs.append(u32_out.view(dataset.dtype))
+        return fast_outputs[0], fast_outputs[1], fast_outputs[2]
 
     if datasets is None:
         assert group is not None
@@ -298,7 +360,14 @@ def _single_frame(
         while begin < end:
             chunk, start = divmod(begin, n)
             length = min(end - begin, n - start)
-            mask, payload = dataset.id.read_direct_chunk((chunk * n,))
+            try:
+                mask, payload = dataset.id.read_direct_chunk((chunk * n,))
+            except (OSError, RuntimeError):
+                if dataset.id.get_num_chunks() != (dataset.size + n - 1) // n:
+                    if entry is not None:
+                        entry.eligible = False
+                    return None
+                raise
             output[destination : destination + length] = _decode_chunk(
                 mask,
                 payload,

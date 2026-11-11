@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import itertools
 import mmap
 import os
@@ -18,6 +19,7 @@ import numpy.typing as npt
 _CACHE_LOCK = threading.Lock()
 _MAX_CACHE_ENTRIES = 16
 _TOKEN_COUNTER = itertools.count(1)
+_H5D_CHUNK_ITER_ADDR: int | None = None
 
 
 def get_h5_rs() -> Any:
@@ -55,6 +57,7 @@ class H5AccelEntry:
         "tables",
         "chunk_lens",
         "dataset_sizes",
+        "single_reads",
         "lock",
     )
 
@@ -90,6 +93,7 @@ class H5AccelEntry:
         ) = None
         self.chunk_lens: tuple[int, int, int] | None = None
         self.dataset_sizes: tuple[int, int, int] | None = None
+        self.single_reads = 0
         self.lock = threading.Lock()
 
     def ensure_mmap(self, *, allow_open: bool = False) -> mmap.mmap | None:
@@ -206,6 +210,62 @@ def get_entry_for_group(group: Any) -> H5AccelEntry | None:
         return None
 
 
+def _get_h5d_chunk_iter_addr() -> int:
+    """Resolve ``H5Dchunk_iter`` from an already-loaded ``libhdf5`` shared library."""
+    global _H5D_CHUNK_ITER_ADDR
+    if _H5D_CHUNK_ITER_ADDR is not None:
+        return _H5D_CHUNK_ITER_ADDR
+    addr = 0
+    rtld_noload = getattr(os, "RTLD_NOLOAD", 0)
+    if (
+        sys.platform != "win32"
+        and rtld_noload
+        and getattr(h5py.version, "hdf5_version_tuple", (0, 0, 0)) >= (1, 14, 0)
+    ):
+        mode = rtld_noload | getattr(os, "RTLD_LAZY", 1)
+        candidates: list[str | None] = [None]
+        try:
+            h5_dir = Path(h5py.__file__).resolve().parent
+            for lib_dir in (h5_dir.parent / "h5py.libs", h5_dir / ".dylibs", h5_dir):
+                if lib_dir.is_dir():
+                    for p in sorted(lib_dir.glob("libhdf5*")):
+                        if ".so" in p.name or ".dylib" in p.name:
+                            candidates.append(str(p))
+        except OSError:
+            pass
+        if sys.platform.startswith("linux"):
+            try:
+                with open("/proc/self/maps", encoding="utf-8", errors="ignore") as fp:
+                    seen: set[str] = set()
+                    for line in fp:
+                        if "libhdf5" in line:
+                            parts = line.split(None, 5)
+                            if len(parts) == 6:
+                                lib_path = parts[5].strip()
+                                if lib_path.startswith("/") and lib_path not in seen:
+                                    seen.add(lib_path)
+                                    candidates.append(lib_path)
+            except OSError:
+                pass
+        for cand in candidates:
+            try:
+                lib = (
+                    ctypes.CDLL(cand, mode=mode)
+                    if cand is not None
+                    else ctypes.CDLL(None)
+                )
+                fn = getattr(lib, "H5Dchunk_iter", None)
+                if fn is not None:
+                    val = ctypes.cast(fn, ctypes.c_void_p).value
+                    if val:
+                        addr = int(val)
+                        break
+            except OSError:
+                continue
+    _H5D_CHUNK_ITER_ADDR = addr
+    return addr
+
+
 def build_chunk_tables(
     entry: H5AccelEntry,
     datasets: list[h5py.Dataset],
@@ -216,6 +276,8 @@ def build_chunk_tables(
     mm = entry.ensure_mmap()
     if mm is None:
         return False
+    rs = get_h5_rs()
+    fn_addr = _get_h5d_chunk_iter_addr() if rs is not None else 0
     with entry.lock:
         if entry.tables is not None:
             return True
@@ -230,19 +292,34 @@ def build_chunk_tables(
             n_chunks = (sz + n - 1) // n
             tbl = np.full((n_chunks, 3), -1, dtype=np.int64)
             if n_chunks > 0:
-
-                def _cb(
-                    info: Any, _tbl: npt.NDArray[np.int64] = tbl, _n: int = n
-                ) -> None:
-                    idx = info.chunk_offset[0] // _n
-                    if 0 <= idx < _tbl.shape[0]:
-                        _tbl[idx, 0] = info.byte_offset
-                        _tbl[idx, 1] = info.size
-                        _tbl[idx, 2] = info.filter_mask
-
-                ds.id.chunk_iter(_cb)
-                if np.any(tbl[:, 1] < 0):
+                status = -1
+                if (
+                    rs is not None
+                    and fn_addr > 0
+                    and isinstance(ds.id, h5py.h5d.DatasetID)
+                ):
+                    status = int(
+                        rs.populate_chunk_table_h5d(fn_addr, int(ds.id.id), n, tbl)
+                    )
+                if status == 0:
+                    entry.eligible = False
                     return False
+                if status < 0:
+                    tbl.fill(-1)
+
+                    def _cb(
+                        info: Any, _tbl: npt.NDArray[np.int64] = tbl, _n: int = n
+                    ) -> None:
+                        idx = info.chunk_offset[0] // _n
+                        if 0 <= idx < _tbl.shape[0]:
+                            _tbl[idx, 0] = info.byte_offset
+                            _tbl[idx, 1] = info.size
+                            _tbl[idx, 2] = info.filter_mask
+
+                    ds.id.chunk_iter(_cb)
+                    if np.any(tbl[:, 1] < 0):
+                        entry.eligible = False
+                        return False
             tables.append(tbl)
             chunk_lens.append(n)
             sizes.append(sz)

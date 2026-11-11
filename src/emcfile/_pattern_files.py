@@ -31,6 +31,7 @@ from ._h5_accel import (
     LazyH5Group,
     create_private_entry,
     get_cache_entry,
+    get_h5_rs,
 )
 from ._h5_filters import ensure_group_filters
 from ._hdf5 import PATH_TYPE, H5Path, h5path, make_path
@@ -56,6 +57,32 @@ _log = logging.getLogger(__name__)
 I4 = np.dtype("i4").itemsize
 
 INDEX_ARRAY = npt.NDArray[np.integer[Any]]
+
+
+def _materialize_dense_pattern(
+    num_pix: int,
+    place_ones: npt.NDArray[np.uint32],
+    place_multi: npt.NDArray[np.uint32],
+    count_multi: npt.NDArray[np.int32],
+) -> npt.NDArray[np.int32]:
+    rs = get_h5_rs()
+    if (
+        rs is not None
+        and place_ones.dtype == np.uint32
+        and place_multi.dtype == np.uint32
+        and count_multi.dtype == np.int32
+        and place_ones.flags.c_contiguous
+        and place_multi.flags.c_contiguous
+        and count_multi.flags.c_contiguous
+    ):
+        return cast(
+            npt.NDArray[np.int32],
+            rs.scatter_dense_pattern(num_pix, place_ones, place_multi, count_multi),
+        )
+    ans = np.zeros(num_pix, np.int32)
+    ans[place_ones] = 1
+    ans[place_multi] = count_multi
+    return ans
 
 
 def _dispatch_2d_file_getitem(
@@ -351,10 +378,9 @@ class PatternsSOneFile:
         )
         place_ones, place_multi, count_multi = self._read_patterns(index_ranges)
         if is_scalar:
-            ans = np.zeros(self.num_pix, np.int32)
-            ans[place_ones] = 1
-            ans[place_multi] = count_multi
-            return ans
+            return _materialize_dense_pattern(
+                self.num_pix, place_ones, place_multi, count_multi
+            )
         return PatternsSOne(
             self.num_pix,
             self.ones[index],
@@ -546,9 +572,7 @@ class PatternsSOneEMC(PatternsSOneFile):
             fin.seek(
                 I4
                 * (
-                    self.num_data * 2
-                    + int(self.ones_idx[-1])
-                    + int(self.multi_idx[-1])
+                    self.num_data * 2 + int(self.ones_idx[-1]) + int(self.multi_idx[-1])
                 ),
                 os.SEEK_CUR,
             )
@@ -635,7 +659,8 @@ class _PatternsSOneBytes(PatternsSOneFile):
         expected_bytes = I4 * expected
         self._fn.seek(
             1024
-            + I4 * (self.num_data * 2 + int(self.ones_idx[-1]) + int(self.multi_idx[-1]))
+            + I4
+            * (self.num_data * 2 + int(self.ones_idx[-1]) + int(self.multi_idx[-1]))
         )
         raw = self._fn.read(expected_bytes)
         if len(raw) != expected_bytes:
@@ -933,9 +958,7 @@ class PatternsSOneH5ReadBuffer(PatternsSOneH5):
             self.num_data = int(cast(int, gp.attrs["num_data"]))
             self.num_pix = int(cast(int, gp.attrs["num_pix"]))
             self.h5version = str(gp.attrs.get("version", "2"))
-            self.position_encoding = str(
-                gp.attrs.get("position_encoding", "absolute")
-            )
+            self.position_encoding = str(gp.attrs.get("position_encoding", "absolute"))
             if self.h5version != "2":
                 raise ValueError(
                     f"Unsupported HDF5 EMC format version {self.h5version!r}"
@@ -1457,10 +1480,9 @@ class PatternsSOneParquet(PatternsSOneFile):
         )
         if is_scalar:
             place_ones, place_multi, count_multi = self._read_patterns(index_ranges)
-            ans = np.zeros(self.num_pix, np.int32)
-            ans[place_ones] = 1
-            ans[place_multi] = count_multi
-            return ans
+            return _materialize_dense_pattern(
+                self.num_pix, place_ones, place_multi, count_multi
+            )
 
         sel_ones, sel_multi, place_ones, place_multi, count_multi = (
             read_parquet_patterns_with_counts(

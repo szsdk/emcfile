@@ -49,12 +49,7 @@ def _eligible_dataset(dataset: h5py.Dataset) -> bool:
         return False
     shuffle, zstd = plist.get_filter(0), plist.get_filter(1)
     n = dataset.chunks[0]
-    return (
-        shuffle[0] == 2
-        and shuffle[2] == (4,)
-        and zstd[0] == 32015
-        and dataset.id.get_num_chunks() == (dataset.size + n - 1) // n
-    )
+    return n > 0 and shuffle[0] == 2 and shuffle[2] == (4,) and zstd[0] == 32015
 
 
 def _decode_chunk(
@@ -205,12 +200,15 @@ def full_scan(
         return None
 
     entry = get_entry_for_group(group)
+    datasets: list[h5py.Dataset] | None = None
     if entry is not None:
         if entry.tables is None or entry.mm is None:
             datasets = [
                 group[name] for name in ("place_ones", "place_multi", "count_multi")
             ]
             build_chunk_tables(entry, datasets)
+            if entry.eligible is False:
+                return None
         if (
             entry.tables is not None
             and entry.mm is not None
@@ -255,7 +253,18 @@ def full_scan(
             )
             return out_ones, out_multi, out_count.view(np.int32)
 
-    datasets = [group[name] for name in ("place_ones", "place_multi", "count_multi")]
+    if datasets is None:
+        datasets = [
+            group[name] for name in ("place_ones", "place_multi", "count_multi")
+        ]
+    if any(
+        ds.chunks is None
+        or ds.id.get_num_chunks() != (ds.size + ds.chunks[0] - 1) // ds.chunks[0]
+        for ds in datasets
+    ):
+        if entry is not None:
+            entry.eligible = False
+        return None
     if (
         sum(dataset.size * dataset.dtype.itemsize for dataset in datasets)
         < MIN_FULL_SCAN_BYTES
