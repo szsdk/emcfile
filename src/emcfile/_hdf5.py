@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Union, cast
 
 import h5py
 import numpy as np
 import numpy.typing as npt
 
+from ._h5_accel import invalidate_cache_for_path
+from ._h5_filters import ensure_filter_for
 from ._html_display import html_card
 
 __all__ = [
@@ -117,7 +120,8 @@ class H5Path:
         self.gn = str(value)
 
     def __truediv__(self, a: str | Path) -> H5Path:
-        return H5Path(self.fn, str(Path(self.gn) / a))
+        rhs = PurePosixPath(a.as_posix()) if isinstance(a, Path) else PurePosixPath(a)
+        return H5Path(self.fn, str(PurePosixPath(self.gn) / rhs))
 
     def __iter__(self) -> Iterator[Path | str]:
         yield self.fn
@@ -131,8 +135,13 @@ class H5Path:
     def exists(self) -> bool:
         if not self.fn.exists():
             return False
-        with h5py.File(self.fn, "r") as fp:
-            return self.gn in fp
+        try:
+            with h5py.File(self.fn, "r") as fp:
+                if self.gn == "/":
+                    return True
+                return self.gn in fp
+        except OSError:
+            return False
 
     def resolve(self):
         return H5Path(self.fn.resolve(), self.gn)
@@ -196,11 +205,34 @@ class H5Path:
 PATH_TYPE = str | H5Path | os.PathLike[str]
 
 
+@contextmanager
+def atomic_write_path(target: Path) -> Iterator[Path]:
+    """Yield a temporary sibling path and atomically replace ``target`` on success."""
+    parent = target.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_str = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=str(parent),
+    )
+    os.close(fd)
+    tmp_path = Path(tmp_str)
+    try:
+        yield tmp_path
+        os.replace(tmp_path, target)
+    except BaseException:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def read_array(
     fname: PATH_TYPE,
     /,
     *,
-    dtype: npt.DTypeLike = np.float64,
+    dtype: npt.DTypeLike | None = None,
 ) -> npt.NDArray[Any]:
     """
     Read an array from file. The file name (`fname`) could be a `str`, a `Path`.
@@ -210,11 +242,18 @@ def read_array(
         raise FileNotFoundError(f)
     if isinstance(f, H5Path):
         with f.open_group("r", "r") as (_, dataptr):
-            return cast(npt.NDArray[Any], dataptr[...])
+            if isinstance(dataptr, h5py.Dataset):
+                ensure_filter_for(dataptr)
+            ans = cast(npt.NDArray[Any], dataptr[...])
+            if dtype is not None:
+                ans = ans.astype(dtype, copy=False)
+            return ans
     elif f.suffix == ".npy":
         ans = np.load(f)
+        if dtype is not None:
+            ans = ans.astype(dtype, copy=False)
     elif f.suffix in [".bin", ".emc"]:
-        ans = np.fromfile(f, dtype)
+        ans = np.fromfile(f, np.float64 if dtype is None else dtype)
     else:
         raise ValueError(f"Cannot identify file({fname}) suffix.")
     return cast(npt.NDArray[Any], ans)
@@ -233,15 +272,23 @@ def write_array(
     if f.exists() and not overwrite:
         raise FileExistsError(f"{f} exists.")
     if isinstance(f, H5Path):
-        with f.open("a") as fp:
-            if f.gn in fp:
-                del fp[f.gn]
-            fp.create_dataset(
-                f.gn,
-                data=arr,
-                compression=compression,
-                compression_opts=compression_opts,
-            )
+        invalidate_cache_for_path(f.fn)
+        existed = f.fn.exists()
+        try:
+            with f.open("a") as fp:
+                if f.gn in fp:
+                    del fp[f.gn]
+                fp.create_dataset(
+                    f.gn,
+                    data=arr,
+                    compression=compression,
+                    compression_opts=compression_opts,
+                )
+        except BaseException:
+            if not existed:
+                f.fn.unlink(missing_ok=True)
+            raise
+        invalidate_cache_for_path(f.fn)
         return
     else:
         if compression is not None:
@@ -253,10 +300,12 @@ def write_array(
                 "The compression_opts parameter is ignored. This is used only for HDF5 files."
             )  # pragma: no cover
         if f.suffix == ".npy":
-            np.save(f, arr)
+            with atomic_write_path(f) as tmp_path, tmp_path.open("wb") as fp_npy:
+                np.save(fp_npy, arr)
             return
         if f.suffix in [".bin", ".emc"]:
-            arr.ravel().tofile(str(f))
+            with atomic_write_path(f) as tmp_path:
+                arr.ravel().tofile(str(tmp_path))
             return
     raise ValueError(f"Cannot identify file({fname}) suffix.")
 
@@ -380,9 +429,9 @@ def check_remove_groups(
             if overwrite:
                 del fp[g]
             else:
-                raise ValueError(f"{g} exists")
+                raise FileExistsError(f"{g} exists")
         elif g in attrs and not overwrite:
-            raise ValueError(f"{g} exists in attrs")
+            raise FileExistsError(f"{g} exists in attrs")
 
 
 def _check_exists(
@@ -445,16 +494,41 @@ def _write_group(
         raise TypeError(f"Cannot write type {type(obj)}")
 
     obj_dot = obj.get(".")
-    if obj_dot is not None:
-        if _check_exists(group_name, fp, overwrite, verbose):
-            del fp[group_name]
-        fp.create_dataset(group_name, data=obj_dot)
-    elif not _check_exists(group_name, fp, overwrite, verbose):
-        fp.create_group(group_name)
+    if group_name == "/" or group_name.strip("/") == "":
+        if obj_dot is not None:
+            raise ValueError(
+                "Cannot write a dataset directly at HDF5 root '/'; specify a dataset path"
+            )
+        has_existing = len(fp) > 0 or len(fp.attrs) > 0
+        if has_existing:
+            if verbose:
+                _log.info("/ already exists.")
+            if not overwrite:
+                raise FileExistsError("/ already exists.")
+            fp.clear()
+            fp.attrs.clear()
+        g: h5py.File | h5py.Group | h5py.Dataset = fp
+    else:
+        if obj_dot is not None:
+            if _check_exists(group_name, fp, overwrite, verbose):
+                del fp[group_name]
+            fp.create_dataset(
+                group_name,
+                data=obj_dot,
+                compression=compression,
+                compression_opts=compression_opts,
+            )
+        else:
+            if _check_exists(group_name, fp, overwrite, verbose):
+                del fp[group_name]
+            fp.create_group(group_name)
+        raw_g = fp[group_name]
+        if isinstance(raw_g, h5py.Datatype):
+            raise NotImplementedError(
+                "The support for h5py.Datatype is not implemented."
+            )
+        g = raw_g
 
-    g = fp[group_name]
-    if isinstance(g, h5py.Datatype):
-        raise NotImplementedError("The support for h5py.Datatype is not implemented.")
     for k, v in obj.items():
         if k == ".":
             continue
@@ -518,8 +592,18 @@ def write_obj_h5(
     True
     """
     f = h5path(fn)
-    with f.open("a") as fp:
-        _write_group(fp, f.gn, obj, overwrite, verbose, compression, compression_opts)
+    invalidate_cache_for_path(f.fn)
+    existed = f.fn.exists()
+    try:
+        with f.open("a") as fp:
+            _write_group(
+                fp, f.gn, obj, overwrite, verbose, compression, compression_opts
+            )
+    except BaseException:
+        if not existed:
+            f.fn.unlink(missing_ok=True)
+        raise
+    invalidate_cache_for_path(f.fn)
 
 
 def _read_group(
