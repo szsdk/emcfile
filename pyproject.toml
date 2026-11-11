@@ -56,7 +56,7 @@ required_plugins = ["pytest-html", "pytest-cov"]
 exclude = ["^tests/.*$", "^emcfile/tests/.*$", "^tutorial/.*$"]
 
 [[tool.mypy.overrides]]
-module = ["h5py", "scipy.*", "emcfile_fast", "emcfile_fast.*"]
+module = ["h5py", "scipy.*", "hdf5plugin", "emcfile_fast", "emcfile_fast.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]

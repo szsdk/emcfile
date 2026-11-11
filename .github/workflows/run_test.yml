@@ -37,9 +37,11 @@ jobs:
       - name: Type-check with Mypy
         run: uv run --no-sync mypy src
       - name: Check & test Rust crate
-        env:
-          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: |
+          PY_BIN="$(uv run --no-sync python -c 'import sys; print(sys.executable)')"
+          PY_LIBDIR="$(uv run --no-sync python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
+          export PYO3_PYTHON="$PY_BIN"
+          export LD_LIBRARY_PATH="${PY_LIBDIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
           cargo test --manifest-path rust/Cargo.toml
 
@@ -86,15 +88,12 @@ jobs:
       - name: Verify dependency profile
         env:
           DEPENDENCY_PROFILE: ${{ matrix.dependencies }}
-        run: |
-          uv run --no-sync python - <<'PY'
-          import importlib.util
-          import os
-
-          expected = os.environ["DEPENDENCY_PROFILE"] == "fast"
-          for module in ("emcfile_fast", "hdf5plugin"):
-              assert (importlib.util.find_spec(module) is not None) == expected, module
-          PY
+        run: >-
+          uv run --no-sync python -c
+          "import importlib.util, os;
+          expected = os.environ['DEPENDENCY_PROFILE'] == 'fast';
+          bad = [m for m in ('emcfile_fast', 'hdf5plugin') if (importlib.util.find_spec(m) is not None) != expected];
+          assert not bad, bad"
       - name: Test with pytest
         run: >-
           uv run --no-sync pytest tests tutorial/test_tutorial.py
