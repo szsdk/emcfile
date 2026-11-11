@@ -13,6 +13,14 @@ and rendering of detector data onto a regular image grid.
 pip install emcfile
 ```
 
+The base package supports raw EMC binary plus uncompressed, gzip, and LZF HDF5.
+For standard-HDF5 Zstd, Parquet (`.parquet`/`.pq`), and the Rust-accelerated
+fast paths (`emcfile-fast` + `hdf5plugin`), install:
+
+```bash
+pip install 'emcfile[fast]'
+```
+
 ## Quick start
 
 ```python
@@ -115,10 +123,9 @@ processed in bounded chunks to keep indices within signed int32 limits.
 Each chunk contains at most one billion events per event stream (approximately
 4 GiB of indices); memory also includes the selected output and its assembly.
 Combined selections with at least one slice gather or view the requested rows
-first; other advanced selectors retain the general SciPy path. Pure
-NumPy trades some dense-selection speed for a smaller implementation and avoids
-the optional gather kernel's compilation and memory overhead. Numba remains
-an optional dependency for the accelerated HDF5 encoding and decoding paths.
+first; other advanced selectors retain the general SciPy path. The optional
+`emcfile-fast` Rust extension accelerates HDF5 and Parquet encoding and decoding
+paths without runtime JIT compilation.
 
 To write several arrays or file-backed sources as one dataset, use
 `write_patterns()`:
@@ -232,39 +239,34 @@ costly validation pass on the normal writer path. Pass `check_sorted=True` to
 validate that invariant and raise `ValueError` before writing.
 
 `count_multi` remains absolute. These are ordinary HDF5 shuffle+Zstd files and
-can be read with h5py after importing `hdf5plugin`. emcfile provides automatic
-full-scan and single-frame direct-chunk implementations, plus opt-in multi-frame
-indexed acceleration, for the compatible delta+shuffle+Zstd layout.
-VDS files and other filter pipelines
-use h5py's generic reader. Set `EMCFILE_H5_FULL_SCAN_WORKERS=0` to disable the
-full-scan optimization.
+can be read with h5py after importing `hdf5plugin`. When `emcfile-fast` is
+installed (`emcfile[fast]`), `emcfile` automatically accelerates full-scan,
+single-frame, and nontrivial multi-frame indexed reads and writes for the
+compatible delta+shuffle+Zstd layout. VDS files and other filter pipelines use
+h5py's generic reader (automatically registering Zstd filters when needed). Set
+`EMCFILE_H5_FULL_SCAN_WORKERS=0` to disable the full-scan direct path.
 
 Single-frame indexed reads (`source[i]`, `source[i:i+1]`, and `source.sparse_pattern(i)`)
-automatically use a serial direct-chunk path for this layout when `zstandard`
-is installed. Zstd still decompresses each touched chunk, but only the selected
-frame's byte-plane spans are unshuffled and its positions reconstructed.
-There is no thread-pool or Numba startup cost, no additional chunk cache, and no
-change to the file layout, chunk size, compression ratio, or writer.
-Other layouts and missing optional dependencies fall back to h5py.
+automatically use a serial Rust direct-chunk path for this layout when
+`emcfile-fast` is installed. Zstd decompresses each touched chunk, and only the
+selected frame's byte-plane spans are unshuffled and reconstructed with no
+thread-pool overhead and no change to the file layout, chunk size, or compression
+ratio. Other layouts and missing optional dependencies fall back to h5py.
 
-Multi-frame indexed reads use `direct_threads`: the calling thread reads each
-touched physical chunk once, while workers decompress, unshuffle, and scatter selected
-spans. Order and duplicates are retained, followed by parallel pattern-local
-delta reconstruction. At most twice the worker count of chunk jobs are pending.
-Set `EMCFILE_H5_INDEXED_WORKERS=0` explicitly to use the generic reader even for
-single frames, or a positive integer to enable multi-frame acceleration with a
-CPU-affinity-clamped budget (`4` is a useful starting point). When unset, only
-single-frame acceleration is enabled. Single frames stay serial regardless
-of the worker budget. This applies to both
-`open_patterns(path)[ids]` and persistent `with source.open()`
-readers. No process pool or separate HDF5 handles are required.
+Multi-frame indexed reads decompress, unshuffle, and scatter selected spans in
+parallel across touched chunks while retaining order and duplicates, followed by
+pattern-local delta reconstruction. This is enabled automatically with four
+workers on nontrivial datasets, or can be controlled explicitly via
+`EMCFILE_H5_INDEXED_WORKERS` (`0` disables the direct indexed path even for
+single frames; positive integers set a CPU-affinity-clamped worker budget).
+Single frames stay serial when `EMCFILE_H5_INDEXED_WORKERS > 0`. This applies to
+both `open_patterns(path)[ids]` and persistent `with source.open()` readers.
 
-The full-scan/writer paths use four workers by default; multi-frame indexed
-acceleration is opt-in because small/localized reads can favor h5py's cache and
-first-use Numba compilation adds latency. Power users can set
+The full-scan and writer paths also use four workers by default; eight is a
+useful HPC starting point for large full writes. Power users can set
 `EMCFILE_H5_WRITE_WORKERS`, `EMCFILE_H5_FULL_SCAN_WORKERS`, or
-`EMCFILE_H5_INDEXED_WORKERS` before starting
-Python; set either reader budget to `0` to disable that reader's direct path.
+`EMCFILE_H5_INDEXED_WORKERS` (plus matching `EMCFILE_PARQUET_*` variables) to
+override worker budgets; setting a reader budget to `0` disables that direct path.
 
 For a reproducible warm-cache comparison on your own file, run
 `uv run --extra fast python benchmarks/hdf5_single_frame.py patterns.h5`,
@@ -351,25 +353,3 @@ act push -j test --matrix python-version:3.13 --matrix dependencies:core \
 `act` 0.2.89 cannot handle the upload-artifact v7 API: tests can pass locally
 while the report-upload step fails with an unknown `mime_type` field.
 Validate artifact uploads on GitHub Actions until `act` supports this API.
-
-# Installation
-
-The base package supports raw EMC plus uncompressed, gzip, and LZF HDF5.
-For standard-HDF5 Zstd, Parquet (`.parquet`/`.pq`), and the Rust-accelerated
-fast paths, install:
-
-```bash
-pip install 'emcfile[fast]'
-```
-
-Zstd uses the portable `hdf5plugin` filter; direct read/write acceleration is
-automatic and falls back to generic h5py when its optional native helpers are
-unavailable. The full-scan reader and writer use four aggregate workers by default;
-single-frame indexed reads are accelerated automatically without workers,
-while multi-frame indexed acceleration is disabled until explicitly enabled.
-Set `EMCFILE_H5_WRITE_WORKERS`, `EMCFILE_H5_FULL_SCAN_WORKERS`, or
-`EMCFILE_H5_INDEXED_WORKERS` to override
-that budget (reader `0` disables the corresponding direct path). Four workers is a
-conservative desktop default; eight is a useful HPC starting point for large
-full writes, with little additional benefit expected beyond sixteen workers
-for the benchmarked workloads.
