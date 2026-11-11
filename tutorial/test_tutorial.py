@@ -11,5 +11,6 @@ def test_script_execution(script):
     try:
         runpy.run_path(str(script))
     except ModuleNotFoundError as err:
-        if "cupy" not in str(err):
-            raise err
+        if err.name in {"cupy", "marimo"}:
+            pytest.skip(f"{err.name} is not installed")
+        raise
