@@ -384,7 +384,6 @@ pub fn unshuffle_span_u32_opt_cumsum(
                         | ((*s3.add(i) as u32) << 24);
                     i += 1;
                 }
-                return;
             } else {
                 let mut acc128 = _mm_setzero_si128();
                 while i + 16 <= count {
@@ -439,7 +438,6 @@ pub fn unshuffle_span_u32_opt_cumsum(
                     *d_ptr.add(i) = acc;
                     i += 1;
                 }
-                return;
             }
         }
         #[cfg(not(target_arch = "x86_64"))]
