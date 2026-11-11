@@ -14,6 +14,16 @@ pub fn delta_and_shuffle_segment_u32(
     dst_u8: &mut [u8],
 ) -> i32 {
     let k = src.len();
+    assert!(
+        local_off
+            .checked_add(k)
+            .is_some_and(|end| end <= chunk_len),
+        "segment [local_off..local_off + k] exceeds chunk_len"
+    );
+    assert!(
+        chunk_len.checked_mul(4).is_some_and(|b| b <= dst_u8.len()),
+        "dst_u8 too small for 4 * chunk_len bytes"
+    );
     if k == 0 {
         return 0;
     }
@@ -173,6 +183,16 @@ pub fn shuffle_tile_u32(
     dst_u8: &mut [u8],
 ) {
     let count = src.len();
+    assert!(
+        local_off
+            .checked_add(count)
+            .is_some_and(|end| end <= chunk_len),
+        "tile [local_off..local_off + count] exceeds chunk_len"
+    );
+    assert!(
+        chunk_len.checked_mul(4).is_some_and(|b| b <= dst_u8.len()),
+        "dst_u8 too small for 4 * chunk_len bytes"
+    );
     if count == 0 {
         return;
     }
@@ -262,6 +282,11 @@ unsafe fn shuffle_tile_u32_ssse3(
 /// Zero-pad planes `[count .. chunk_len]` in a 4-plane shuffled buffer of stride `chunk_len`.
 #[inline]
 pub fn zero_pad_chunk_planes(count: usize, chunk_len: usize, dst_u8: &mut [u8]) {
+    assert!(count <= chunk_len, "count exceeds chunk_len");
+    assert!(
+        chunk_len.checked_mul(4).is_some_and(|b| b <= dst_u8.len()),
+        "dst_u8 too small for 4 * chunk_len bytes"
+    );
     if count < chunk_len {
         let rem = chunk_len - count;
         unsafe {
@@ -306,6 +331,16 @@ pub fn unshuffle_span_u32_opt_cumsum(
     do_cumsum: bool,
 ) {
     let count = dst_u32.len();
+    assert!(
+        local_start
+            .checked_add(count)
+            .is_some_and(|end| end <= chunk_len),
+        "span [local_start..local_start + count] exceeds chunk_len"
+    );
+    assert!(
+        chunk_len.checked_mul(4).is_some_and(|b| b <= raw_u8.len()),
+        "raw_u8 too small for 4 * chunk_len bytes"
+    );
     if count == 0 {
         return;
     }
@@ -471,9 +506,9 @@ pub fn cumsum_u32_inplace(slice: &mut [u32]) {
     #[cfg(not(target_arch = "x86_64"))]
     {
         let mut acc = slice[0];
-        for i in 1..k {
-            acc = acc.wrapping_add(slice[i]);
-            slice[i] = acc;
+        for slot in slice.iter_mut().skip(1) {
+            acc = acc.wrapping_add(*slot);
+            *slot = acc;
         }
     }
 }
@@ -487,6 +522,12 @@ pub fn decode_pattern_u32(
     is_shuffled: bool,
 ) {
     let k = dst.len();
+    assert!(
+        k.checked_mul(4)
+            .and_then(|b| byte_off.checked_add(b))
+            .is_some_and(|end| end <= page.len()),
+        "page slice out of bounds for decode_pattern_u32"
+    );
     if k == 0 {
         return;
     }
@@ -628,14 +669,14 @@ fn decode_pattern_u32_scalar(
             }
         }
     } else {
-        for j in 0..k {
+        for (j, slot) in dst.iter_mut().enumerate() {
             let off = byte_off + j * 4;
             let v = u32::from_le_bytes(page[off..off + 4].try_into().unwrap());
             if is_delta {
                 acc = acc.wrapping_add(v);
-                dst[j] = acc;
+                *slot = acc;
             } else {
-                dst[j] = v;
+                *slot = v;
             }
         }
     }
@@ -651,6 +692,12 @@ pub fn encode_pattern_u32(
     check_sorted: bool,
 ) -> i32 {
     let k = src.len();
+    assert!(
+        k.checked_mul(4)
+            .and_then(|b| byte_off.checked_add(b))
+            .is_some_and(|end| end <= page.len()),
+        "page slice out of bounds for encode_pattern_u32"
+    );
     if k == 0 {
         return 0;
     }
@@ -802,8 +849,7 @@ fn encode_pattern_u32_scalar(
             page[byte_off + 3 * k + j] = ((val >> 24) & 0xFF) as u8;
         }
     } else {
-        for j in 0..k {
-            let cur = src[j];
+        for (j, &cur) in src.iter().enumerate() {
             if check_sorted && cur < prev {
                 return -2;
             }
@@ -815,4 +861,112 @@ fn encode_pattern_u32_scalar(
         }
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_delta_shuffle_and_unshuffle_roundtrip() {
+        for k in 0..=37 {
+            let chunk_len = k + 5;
+            let local_off = 3;
+            let src: Vec<u32> = (0..k).map(|i| (i as u32) * 1031 + 17).collect();
+            let mut dst_u8 = vec![0xAAu8; chunk_len * 4];
+            let rc = delta_and_shuffle_segment_u32(&src, 0, true, chunk_len, local_off, &mut dst_u8);
+            assert_eq!(rc, 0);
+
+            let mut out = vec![0u32; k];
+            unshuffle_span_u32_opt_cumsum(&dst_u8, chunk_len, local_off, &mut out, true);
+            assert_eq!(out, src);
+        }
+    }
+
+    #[test]
+    fn test_delta_shuffle_unsorted_detection() {
+        for k in 2..=25 {
+            for bad_pos in 1..k {
+                let mut src: Vec<u32> = (0..k).map(|i| (i as u32) * 10 + 10).collect();
+                src[bad_pos] = src[bad_pos - 1] - 1;
+                let mut dst_u8 = vec![0u8; k * 4];
+                assert_eq!(
+                    delta_and_shuffle_segment_u32(&src, 0, true, k, 0, &mut dst_u8),
+                    -2
+                );
+                assert_eq!(
+                    delta_and_shuffle_segment_u32(&src, 0, false, k, 0, &mut dst_u8),
+                    0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_shuffle_chunk_and_cumsum() {
+        for k in 0..=35 {
+            let chunk_len = (k + 4).max(1);
+            let src: Vec<u32> = (0..k)
+                .map(|i| 0xDEAD_0000u32.wrapping_add((i as u32) * 0x0102_0304))
+                .collect();
+            let mut buf = vec![0xFFu8; chunk_len * 4];
+            shuffle_chunk_u32(&src, chunk_len, &mut buf);
+            let mut out = vec![0u32; chunk_len];
+            unshuffle_span_u32(&buf, chunk_len, 0, &mut out);
+            assert_eq!(&out[..k], &src[..]);
+            assert!(out[k..].iter().all(|&v| v == 0));
+
+            let mut cs = src.clone();
+            cumsum_u32_inplace(&mut cs);
+            let mut expected = Vec::with_capacity(k);
+            let mut acc = 0u32;
+            for &v in &src {
+                acc = acc.wrapping_add(v);
+                expected.push(acc);
+            }
+            assert_eq!(cs, expected);
+        }
+    }
+
+    #[test]
+    fn test_encode_decode_pattern_all_modes() {
+        for &is_delta in &[false, true] {
+            for &is_shuffled in &[false, true] {
+                for &byte_off in &[0usize, 1, 3, 7] {
+                    for k in 0..=35 {
+                        let src: Vec<u32> = (0..k).map(|i| (i as u32) * 257 + 5).collect();
+                        let mut page = vec![0u8; byte_off + k * 4 + 8];
+                        let rc = encode_pattern_u32(
+                            &src,
+                            &mut page,
+                            byte_off,
+                            is_delta,
+                            is_shuffled,
+                            true,
+                        );
+                        assert_eq!(rc, 0);
+                        let mut dst = vec![0u32; k];
+                        decode_pattern_u32(&page, byte_off, &mut dst, is_delta, is_shuffled);
+                        assert_eq!(dst, src);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds chunk_len")]
+    fn test_unshuffle_oob_panics() {
+        let raw = vec![0u8; 16];
+        let mut dst = vec![0u32; 3];
+        unshuffle_span_u32(&raw, 4, 2, &mut dst);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn test_decode_pattern_oob_panics() {
+        let page = vec![0u8; 10];
+        let mut dst = vec![0u32; 3];
+        decode_pattern_u32(&page, 0, &mut dst, false, false);
+    }
 }
