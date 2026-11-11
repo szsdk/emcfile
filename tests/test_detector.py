@@ -321,3 +321,51 @@ def test_detector_not_equal(det):
     modified = deepcopy(det)
     modified.correction_factors[0] = -1000
     assert modified != det
+
+
+def test_2d_detector_rendering_resampling_and_combined_bitmasks(tmp_path, det):
+    det_2d = ef.project_detector_to_2d(det)
+    assert det_2d.ndim == 2
+    assert np.isfinite(det_2d.coordinates).all()
+
+    det_2d_real = ef.project_detector_to_2d(det_2d, pixel_space="real")
+    np.testing.assert_allclose(det_2d_real.coordinates, det_2d.coordinates)
+
+    renderer_2d = ef.detector_renderer(det_2d)
+    assert renderer_2d.frame_shape[0] > 1 and renderer_2d.frame_shape[1] > 1
+    roundtrip_xyz = renderer_2d.to_xyz(renderer_2d.to_cxy(det_2d.coordinates))
+    np.testing.assert_allclose(roundtrip_xyz, det_2d.coordinates)
+    img_2d = renderer_2d.render(np.ones(det_2d.num_pix))
+    covered = np.asarray(renderer_2d._count.filled(0)) > 0
+    assert covered.any()
+    assert not np.isnan(img_2d.data[covered]).any()
+
+    resampled_2d = ef.resample_detector((16, 16), det_2d)
+    assert np.isfinite(resampled_2d.coordinates).all()
+
+    combo = deepcopy(det)
+    combo.mask[:] = ef.PixelType.GOOD
+    combo.mask[0] = int(ef.PixelType.CORNER) | int(ef.PixelType.BAD)
+    combo.mask[1] = 1 << 10
+    assert combo[[ef.PixelType.BAD]].num_pix == 1
+    assert combo[[ef.PixelType.CORNER]].num_pix == 1
+    assert combo[[ef.PixelType.GOOD]].num_pix == combo.num_pix - 2
+
+    combo_renderer = ef.detector_renderer(combo)
+    x0, y0 = combo_renderer.pixel_coordinates[0]
+    assert bool(combo_renderer._mask[y0, x0])
+
+    for suffix in (".dat", ".h5"):
+        out = tmp_path / f"combo{suffix}"
+        combo.write(out)
+        restored = ef.detector(out, normalize=False, check_consistency=False)
+        np.testing.assert_array_equal(restored.mask, combo.mask)
+
+    coords_2d = det_2d.coordinates[:, :2]
+    overridden = ef.detector(
+        det_2d, coordinates=coords_2d, normalize=False, check_consistency=False
+    )
+    assert overridden.coordinates.shape == (det_2d.num_pix, 3)
+    with pytest.raises(ValueError, match="same length"):
+        ef.detector(det_2d, mask=np.zeros(3, dtype=np.int32), check_consistency=False)
+

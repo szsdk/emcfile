@@ -15,7 +15,8 @@ import numpy.typing as npt
 from numpy import ma
 from typing_extensions import deprecated
 
-from ._hdf5 import PATH_TYPE, H5Path, make_path
+from ._h5_accel import invalidate_cache_for_path
+from ._hdf5 import PATH_TYPE, H5Path, atomic_write_path, make_path
 from ._html_display import html_card
 
 __all__ = [
@@ -51,13 +52,21 @@ class PixelType(IntEnum):
 _BITMAP = Sequence[int] | int
 
 
-def _bitmap_to_int(bitmap: _BITMAP) -> np.uint8:
-    if isinstance(bitmap, int):
-        return np.uint8(bitmap)
+def _bitmap_to_int(bitmap: _BITMAP) -> int:
+    if isinstance(bitmap, (int, np.integer)):
+        return int(bitmap)
     result = 0
     for bit_position in bitmap:
         result |= 1 << bit_position
-    return np.uint8(result)
+    return result
+
+
+def _match_pixel_type(
+    mask: npt.NDArray[np.integer[Any]], pt: PixelType
+) -> npt.NDArray[np.bool_]:
+    if pt == PixelType.GOOD:
+        return cast(npt.NDArray[np.bool_], mask == 0)
+    return cast(npt.NDArray[np.bool_], (mask & int(pt)) != 0)
 
 
 class Detector:
@@ -189,14 +198,15 @@ class Detector:
   Normalized: {self.norm_flag}
 """
         for i, pt in enumerate(PixelType):
-            n = np.sum(self.mask == pt)
+            n = np.sum(_match_pixel_type(self.mask, pt))
             ans = ans + (f"  Mask: {pt} - {n}\n" if i == 0 else f"        {pt} - {n}\n")
         return ans
 
     def _repr_html_(self) -> str:
         total = max(1, self.num_pix)
         mask_counts = {
-            pt.name.lower(): int(np.sum(self.mask == pt)) for pt in PixelType
+            pt.name.lower(): int(np.sum(_match_pixel_type(self.mask, pt)))
+            for pt in PixelType
         }
         summary = {
             "dimension": self.ndim,
@@ -273,7 +283,9 @@ class Detector:
             if len(index) == 0:
                 raise ValueError("0-length input")
             if isinstance(index[0], PixelType):
-                idx = reduce(np.logical_or, [self.mask == pt for pt in index])
+                idx = reduce(
+                    np.logical_or, [_match_pixel_type(self.mask, pt) for pt in index]
+                )
         return Detector(
             self.coor[idx],
             self.factor[idx],
@@ -324,7 +336,7 @@ class Detector:
             return True
         r = np.linalg.norm(vec[:3]) / vec[3]
         if not np.isclose(self.ewald_rad, r, rtol=rtol, atol=atol):
-            logging.warning("det Ewald radius: %f, calculated: %f", self.ewald_rad, r)
+            _log.warning("det Ewald radius: %f, calculated: %f", self.ewald_rad, r)
             return False
         return True
 
@@ -446,28 +458,52 @@ def _write_asciidet(det: Detector, fname: Path) -> None:
     _log.info(f"Writing ASCII detector to {fname}")
     qx, qy, qz = [det.coor[:, i].ravel() for i in range(3)]
     corr = det.factor.ravel()
-    mask = det.mask.ravel().astype("u1")
+    mask = det.mask.ravel().astype(np.int32, copy=False)
 
-    with fname.open("w") as fptr:
+    with atomic_write_path(fname) as tmp_fn, tmp_fn.open("w") as fptr:
         fptr.write("%d %.6f %.6f\n" % (qx.size, det.detd, det.ewald_rad))
         for pars in zip(qx, qy, qz, corr, mask):
             fptr.write("%21.15e %21.15e %21.15e %21.15e %d\n" % pars)
 
 
+def _write_h5det_datasets(fptr: h5py.Group | h5py.File, det: Detector) -> None:
+    for s in ["qx", "qy", "qz", "corr", "mask", "detd", "ewald_rad"]:
+        if s in fptr:
+            del fptr[s]
+    fptr["qx"] = det.coor[:, 0].ravel().astype("f8")
+    fptr["qy"] = det.coor[:, 1].ravel().astype("f8")
+    fptr["qz"] = det.coor[:, 2].ravel().astype("f8")
+    fptr["corr"] = det.factor.ravel().astype("f8")
+    flat_mask = det.mask.ravel()
+    if flat_mask.size == 0 or (int(flat_mask.min()) >= 0 and int(flat_mask.max()) <= 255):
+        fptr["mask"] = flat_mask.astype("u1")
+    else:
+        fptr["mask"] = flat_mask.astype("i4")
+    fptr["detd"] = float(det.detd)
+    fptr["ewald_rad"] = float(det.ewald_rad)
+
+
 def _write_h5det(det: Detector, fname: H5Path) -> None:
     _log.info(f"Writing HDF5 detector to {fname}")
-    with fname.open_group("a", "a") as (_, fptr):
-        assert isinstance(fptr, (h5py.Group, h5py.File))
-        for s in ["qx", "qy", "qz", "corr", "mask", "detd", "ewald_rad"]:
-            if s in fptr:
-                del fptr[s]
-        fptr["qx"] = det.coor[:, 0].ravel().astype("f8")
-        fptr["qy"] = det.coor[:, 1].ravel().astype("f8")
-        fptr["qz"] = det.coor[:, 2].ravel().astype("f8")
-        fptr["corr"] = det.factor.ravel().astype("f8")
-        fptr["mask"] = det.mask.ravel().astype("u1")
-        fptr["detd"] = float(det.detd)
-        fptr["ewald_rad"] = float(det.ewald_rad)
+    det_keys = {"qx", "qy", "qz", "corr", "mask", "detd", "ewald_rad"}
+    file_exists = fname.fn.exists()
+    is_valid_h5 = file_exists and h5py.is_hdf5(fname.fn)
+    use_atomic = not file_exists or not is_valid_h5
+    if not use_atomic and fname.gn == "/":
+        with h5py.File(fname.fn, "r") as rf:
+            if set(rf.keys()).issubset(det_keys) and len(rf.attrs) == 0:
+                use_atomic = True
+    invalidate_cache_for_path(fname.fn)
+    if use_atomic:
+        with atomic_write_path(fname.fn) as tmp_fn:
+            with h5py.File(tmp_fn, "w") as h5f:
+                target = h5f if fname.gn == "/" else h5f.create_group(fname.gn)
+                _write_h5det_datasets(target, det)
+    else:
+        with fname.open_group("a", "a") as (_, fptr):
+            assert isinstance(fptr, (h5py.Group, h5py.File))
+            _write_h5det_datasets(fptr, det)
+    invalidate_cache_for_path(fname.fn)
 
 
 def _from_h5det(fname: H5Path) -> Detector:
@@ -505,6 +541,13 @@ def _init_detector(
     mask: npt.NDArray[T2],
     factor: npt.NDArray[T1],
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int32], npt.NDArray[np.float64]]:
+    coor = np.asarray(coor)
+    mask = np.asarray(mask)
+    factor = np.asarray(factor)
+    if coor.ndim != 2 or coor.shape[1] not in (2, 3):
+        raise ValueError("`coor` should have shape (N, 2) or (N, 3).")
+    if mask.ndim != 1 or factor.ndim != 1:
+        raise ValueError("`mask` and `factor` should be 1D arrays.")
     if not (coor.shape[0] == mask.shape[0] == factor.shape[0]):
         raise ValueError("`coor`, `mask`, `factor` should have the same length.")
     if coor.shape[1] == 2:
@@ -698,17 +741,35 @@ def detector(
         elif (coor is not None) and (detd is not None):
             det = simple_detector(cast(tuple[int, int], coor), detd)
     elif isinstance(src, Detector):
+        coor_, mask_, factor_ = _init_detector(
+            cast(npt.NDArray[Any], src.coor if coor is None else coor),
+            cast(npt.NDArray[Any], src.mask if mask is None else mask),
+            cast(npt.NDArray[Any], src.factor if factor is None else factor),
+        )
         det = Detector(
-            src.coor
-            if coor is None
-            else cast(npt.NDArray[Any], coor).astype(np.float64),
-            src.factor if factor is None else factor.astype(np.float64),
-            src.mask if mask is None else mask.astype(np.int32),
+            coor_,
+            factor_,
+            mask_,
             src.detd if detd is None else float(detd),
             src.ewald_rad if ewald_rad is None else float(ewald_rad),
         )
     elif isinstance(src, (str, Path, H5Path)):
-        det = _from_file(src)
+        loaded = _from_file(src)
+        if any(x is not None for x in (coor, mask, factor, detd, ewald_rad)):
+            coor_, mask_, factor_ = _init_detector(
+                cast(npt.NDArray[Any], loaded.coor if coor is None else coor),
+                cast(npt.NDArray[Any], loaded.mask if mask is None else mask),
+                cast(npt.NDArray[Any], loaded.factor if factor is None else factor),
+            )
+            det = Detector(
+                coor_,
+                factor_,
+                mask_,
+                loaded.detd if detd is None else float(detd),
+                loaded.ewald_rad if ewald_rad is None else float(ewald_rad),
+            )
+        else:
+            det = loaded
 
     if det is None:
         if src is None:
@@ -752,15 +813,16 @@ def project_detector_to_2d(
         ans = det
     else:
         ans = deepcopy(det)
-    if det.detd != det.ewald_rad:
-        logging.warning(
-            f"Detector distance is not equal to Ewald radius. {pixel_space} space is used"
+    if not np.isinf(det.ewald_rad):
+        if det.detd != det.ewald_rad:
+            _log.warning(
+                f"Detector distance is not equal to Ewald radius. {pixel_space} space is used"
+            )
+        ans.coor[:, :2] = xyz_to_cxy(
+            ans.coor, det.ewald_rad, -int(np.sign(det.coor[:, 2].sum()))
         )
-    ans.coor[:, :2] = xyz_to_cxy(
-        ans.coor, det.ewald_rad, -int(np.sign(det.coor[:, 2].sum()))
-    )
-    if pixel_space == "real":
-        ans.coor[:] *= det.detd / det.ewald_rad
+        if pixel_space == "real":
+            ans.coor[:] *= det.detd / det.ewald_rad
 
     ans.coor[:, 2] = 0.0
     ans.ewald_rad = np.inf
@@ -896,21 +958,30 @@ def get_ewald_vec(coor: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
 def xyz_to_cxy(
     xyz: npt.NDArray[Any], ewald_rad: float, direction: int
 ) -> npt.NDArray[np.float64]:
+    xyz = np.asarray(xyz, dtype=np.float64)
     is_1d = xyz.ndim == 1
     if is_1d:
         xyz = xyz[None, :]
-    ans = xyz[:, :2] * ewald_rad / (ewald_rad + direction * xyz[:, 2][:, None])
+    if np.isinf(ewald_rad):
+        ans = xyz[:, :2].copy()
+    else:
+        ans = xyz[:, :2] * ewald_rad / (ewald_rad + direction * xyz[:, 2][:, None])
     return ans.ravel() if is_1d else ans
 
 
 def cxy_to_xyz(
     cxy: npt.NDArray[Any], ewald_rad: float, direction: int
 ) -> npt.NDArray[np.float64]:
+    cxy = np.asarray(cxy, dtype=np.float64)
     is_1d = cxy.ndim == 1
     if is_1d:
         cxy = cxy[None, :]
+    if np.isinf(ewald_rad):
+        xyz = np.zeros((cxy.shape[0], 3), dtype=np.float64)
+        xyz[:, :2] = cxy
+        return xyz.ravel() if is_1d else xyz
     cxy = cxy / ewald_rad
-    xyz = np.empty((cxy.shape[0], 3))
+    xyz = np.empty((cxy.shape[0], 3), dtype=np.float64)
     cr = 1 / np.sqrt(1 + np.linalg.norm(cxy, axis=1) ** 2)
     xyz[:, :2] = ewald_rad * cxy * cr.reshape(-1, 1)
     xyz[:, 2] = direction * ewald_rad * (cr - 1)
@@ -942,7 +1013,7 @@ class DetRender:
         self.xy = np.round(self.cxy - self.cxy.min(axis=0)).astype(np.int32)
         self.frame_shape = self.xy.max(axis=0) + 1
         self._mask = np.zeros(self.frame_shape, dtype="u1")
-        pix_idx = self._det.mask == 2
+        pix_idx = _match_pixel_type(self._det.mask, PixelType.BAD)
         self._mask[self.xy[pix_idx, 0], self.xy[pix_idx, 1]] = 1
         self._mask = self._mask.T.copy()
         self._count: ma.MaskedArray = ma.masked_array(
@@ -1045,23 +1116,31 @@ class DetRender:
 
     def to_cxy(self, xyz: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
         cxy = xyz_to_cxy(xyz, self._det.ewald_rad, self.direction)
-        cxy *= self._det.detd / self._det.ewald_rad
+        if not np.isinf(self._det.ewald_rad):
+            cxy *= self._det.detd / self._det.ewald_rad
         return cxy
 
     def to_xyz(self, cxy: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
-        cxy = cxy * self._det.ewald_rad / self._det.detd
-        return cxy_to_xyz(cxy, self._det.ewald_rad, self.direction)
+        cxy_arr = np.asarray(cxy, dtype=np.float64)
+        if not np.isinf(self._det.ewald_rad):
+            cxy_arr = cxy_arr * (self._det.ewald_rad / self._det.detd)
+        return cxy_to_xyz(cxy_arr, self._det.ewald_rad, self.direction)
 
     def frame_extent(
         self, pixel_unit: bool = True
     ) -> tuple[float, float, float, float]:
         xmin, ymin = self.cxy.min(axis=0)
         dx, dy = self.frame_shape
-        if pixel_unit:
-            return xmin, xmin + dx, ymin, ymin + dy
+        if pixel_unit or np.isinf(self._det.ewald_rad):
+            return float(xmin), float(xmin + dx), float(ymin), float(ymin + dy)
         else:
             r = self._det.detd / self._det.ewald_rad
-            return xmin * r, (xmin + dx) * r, ymin * r, (ymin + dy) * r
+            return (
+                float(xmin * r),
+                float((xmin + dx) * r),
+                float(ymin * r),
+                float((ymin + dy) * r),
+            )
 
     def _repr_html_(self) -> str:
         summary = {
