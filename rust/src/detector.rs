@@ -5,6 +5,9 @@ use numpy::{
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+type RenderedImage<'py> = (Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<bool>>);
+type RenderedStack<'py> = (Bound<'py, PyArray3<f64>>, Bound<'py, PyArray3<bool>>);
+
 /// Source block of 65,536 pixels (`local_p: u16`, 256 KiB for `i32`, 64 OS pages -> L1 dTLB resident)
 /// paired with destination tiles of 4,096 frame pixels (`local_d: u16`, 32 KiB of `f64` -> L1d resident,
 /// `<= 4` ways per L1d cache set on 1024-wide detectors).
@@ -234,7 +237,7 @@ impl RustRendererPlan {
         &self,
         py: Python<'py>,
         arr: PyReadonlyArray1<'py, T>,
-    ) -> PyResult<Option<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<bool>>)>> {
+    ) -> PyResult<Option<RenderedImage<'py>>> {
         if !arr.is_c_contiguous() {
             return Ok(None);
         }
@@ -270,7 +273,7 @@ impl RustRendererPlan {
         &self,
         py: Python<'py>,
         arr: PyReadonlyArray2<'py, T>,
-    ) -> PyResult<Option<(Bound<'py, PyArray3<f64>>, Bound<'py, PyArray3<bool>>)>> {
+    ) -> PyResult<Option<RenderedStack<'py>>> {
         if !arr.is_c_contiguous() {
             return Ok(None);
         }
@@ -334,7 +337,7 @@ impl RustRendererPlan {
         &self,
         py: Python<'py>,
         raw_img: &Bound<'py, PyAny>,
-    ) -> PyResult<Option<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<bool>>)>> {
+    ) -> PyResult<Option<RenderedImage<'py>>> {
         macro_rules! try_1d {
             ($($t:ty),*) => {
                 $(
@@ -354,7 +357,7 @@ impl RustRendererPlan {
         &self,
         py: Python<'py>,
         raw_img: &Bound<'py, PyAny>,
-    ) -> PyResult<Option<(Bound<'py, PyArray3<f64>>, Bound<'py, PyArray3<bool>>)>> {
+    ) -> PyResult<Option<RenderedStack<'py>>> {
         macro_rules! try_2d {
             ($($t:ty),*) => {
                 $(
@@ -375,7 +378,7 @@ impl RustRendererPlan {
         place_ones: PyReadonlyArray1<'py, u32>,
         place_multi: PyReadonlyArray1<'py, u32>,
         count_multi: PyReadonlyArray1<'py, i32>,
-    ) -> PyResult<Option<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<bool>>)>> {
+    ) -> PyResult<Option<RenderedImage<'py>>> {
         if !place_ones.is_c_contiguous()
             || !place_multi.is_c_contiguous()
             || !count_multi.is_c_contiguous()
@@ -419,7 +422,7 @@ impl RustRendererPlan {
         place_ones: PyReadonlyArray1<'py, u32>,
         place_multi: PyReadonlyArray1<'py, u32>,
         count_multi: PyReadonlyArray1<'py, i32>,
-    ) -> PyResult<Option<(Bound<'py, PyArray3<f64>>, Bound<'py, PyArray3<bool>>)>> {
+    ) -> PyResult<Option<RenderedStack<'py>>> {
         if !ones_idx.is_c_contiguous()
             || !multi_idx.is_c_contiguous()
             || !place_ones.is_c_contiguous()
