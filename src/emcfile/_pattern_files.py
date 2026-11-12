@@ -14,6 +14,13 @@ import numpy as np
 import numpy.typing as npt
 
 from ._delta import decode_pattern_local_delta
+from ._emc_accel import (
+    EmcAccelEntry,
+    create_private_emc_entry,
+    emc_workers,
+    get_emc_cache_entry,
+    get_emc_rs,
+)
 from ._emc_patterns import (
     INT_INDEX,
     SPARSE_PATTERN,
@@ -460,6 +467,247 @@ class PatternsSOneFile:
         return cast(float | int, total)
 
 
+def _emc_scalar_sum_to_dtype(
+    raw_total: int, acc_dtype: np.dtype[Any], keepdims: bool
+) -> int | float | npt.NDArray[Any]:
+    if np.issubdtype(acc_dtype, np.integer):
+        info = np.iinfo(acc_dtype)
+        if info.min <= raw_total <= info.max:
+            scalar_total: Any = acc_dtype.type(raw_total)
+        else:
+            scalar_total = np.array(
+                raw_total & ((1 << 64) - 1), dtype=np.uint64
+            ).astype(acc_dtype, copy=False)[()]
+    else:
+        scalar_total = acc_dtype.type(raw_total)
+    if keepdims:
+        return np.asarray(scalar_total, dtype=acc_dtype).reshape((1, 1))
+    return cast(int | float, scalar_total)
+
+
+def _emc_resolve_col_row_ids(
+    ax0: Any, num_data: int
+) -> tuple[bool, npt.NDArray[np.int64] | None]:
+    if isinstance(ax0, slice):
+        start, stop, step = ax0.indices(num_data)
+        if start == 0 and stop == num_data and step == 1:
+            return True, None
+        return True, np.arange(start, stop, step, dtype=np.int64)
+    if isinstance(ax0, np.ndarray) and np.issubdtype(ax0.dtype, np.bool_):
+        if ax0.ndim != 1 or ax0.size != num_data:
+            raise IndexError("Boolean row mask must match the number of patterns")
+        return True, np.flatnonzero(ax0).astype(np.int64, copy=False)
+    if isinstance(ax0, np.ndarray) and np.issubdtype(ax0.dtype, np.integer):
+        if ax0.ndim != 1:
+            raise IndexError("row indices must be one-dimensional")
+        if ax0.dtype == np.uint64 and ax0.size > 0 and int(ax0.max()) >= num_data:
+            raise IndexError("row index out of range")
+        return True, np.ascontiguousarray(ax0, dtype=np.int64)
+    raise IndexError(f"Unsupported pattern index: {type(ax0).__name__}")
+
+
+def _emc_buffer_getitem(
+    source: PatternsSOneFile,
+    rs: Any,
+    buf: Any,
+    index: Any,
+) -> np.int32 | npt.NDArray[np.int32] | PatternsSOne:
+    if isinstance(index, (bool, np.bool_)):
+        raise IndexError("Boolean scalar indices are not supported")
+    if isinstance(index, tuple) and len(index) == 2:
+        ax0, ax1 = index
+        if isinstance(ax0, (bool, np.bool_)) or isinstance(ax1, (bool, np.bool_)):
+            raise IndexError("Boolean scalar indices are not supported")
+        if _is_int_index(ax0):
+            return _index_1d_pattern_columns(source[int(ax0)], ax1)
+        if _is_int_index(ax1):
+            col = int(ax1)
+            if col < 0:
+                col += source.num_pix
+            if col < 0 or col >= source.num_pix:
+                raise IndexError(
+                    f"column index {ax1} is out of bounds for axis 1 "
+                    f"with size {source.num_pix}"
+                )
+            _, row_ids = _emc_resolve_col_row_ids(ax0, source.num_data)
+            source.init_idx()
+            return cast(
+                npt.NDArray[np.int32],
+                rs.emc_extract_column(
+                    buf,
+                    source.num_data,
+                    source.num_pix,
+                    source.ones_idx,
+                    source.multi_idx,
+                    row_ids,
+                    col,
+                    emc_workers(),
+                ),
+            )
+        return _dispatch_2d_file_getitem(source, index)
+
+    if _is_int_index(index):
+        idx = int(index)
+        if idx < 0:
+            idx += source.num_data
+        if idx < 0 or idx >= source.num_data:
+            raise IndexError("Pattern index out of range")
+        source.init_idx()
+        return cast(
+            npt.NDArray[np.int32],
+            rs.emc_read_dense_frame(
+                buf,
+                source.num_data,
+                source.num_pix,
+                source.ones_idx,
+                source.multi_idx,
+                idx,
+            ),
+        )
+
+    if isinstance(index, slice):
+        start, stop, step = index.indices(source.num_data)
+        source.init_idx()
+        workers = emc_workers()
+        if step == 1:
+            end = max(start, stop)
+            po, pm, cm = rs.emc_read_slice(
+                buf,
+                source.num_data,
+                source.ones_idx,
+                source.multi_idx,
+                start,
+                end,
+                workers,
+            )
+            ones_sub = source._ones[start:end].copy()
+            multi_sub = source._multi[start:end].copy()
+            oidx_sub = (
+                source.ones_idx[: end + 1]
+                if start == 0
+                else source.ones_idx[start : end + 1] - source.ones_idx[start]
+            )
+            midx_sub = (
+                source.multi_idx[: end + 1]
+                if start == 0
+                else source.multi_idx[start : end + 1] - source.multi_idx[start]
+            )
+            return PatternsSOne._from_raw_parts(
+                source.num_pix,
+                ones_sub,
+                multi_sub,
+                oidx_sub,
+                midx_sub,
+                po,
+                pm,
+                cm,
+            )
+        parts = rs.emc_read_strided(
+            buf,
+            source.num_data,
+            source._ones,
+            source._multi,
+            source.ones_idx,
+            source.multi_idx,
+            start,
+            stop,
+            step,
+            workers,
+        )
+        return PatternsSOne._from_raw_parts(source.num_pix, *parts)
+
+    if isinstance(index, np.ndarray) and np.issubdtype(index.dtype, np.bool_):
+        if index.ndim != 1 or index.size != source.num_data:
+            raise IndexError("Boolean row mask must match the number of patterns")
+        source.init_idx()
+        mask_c = np.ascontiguousarray(index, dtype=np.bool_)
+        parts = rs.emc_read_mask(
+            buf,
+            source.num_data,
+            source._ones,
+            source._multi,
+            source.ones_idx,
+            source.multi_idx,
+            mask_c,
+            emc_workers(),
+        )
+        return PatternsSOne._from_raw_parts(source.num_pix, *parts)
+
+    if isinstance(index, np.ndarray) and np.issubdtype(index.dtype, np.integer):
+        if index.ndim != 1:
+            raise IndexError("row indices must be one-dimensional")
+        if (
+            index.dtype == np.uint64
+            and index.size > 0
+            and int(index.max()) >= source.num_data
+        ):
+            raise IndexError("row index out of range")
+        source.init_idx()
+        ids_i64 = np.ascontiguousarray(index, dtype=np.int64)
+        parts = rs.emc_read_indexed(
+            buf,
+            source.num_data,
+            source._ones,
+            source._multi,
+            source.ones_idx,
+            source.multi_idx,
+            ids_i64,
+            emc_workers(),
+        )
+        return PatternsSOne._from_raw_parts(source.num_pix, *parts)
+
+    raise IndexError(f"Unsupported pattern index: {type(index).__name__}")
+
+
+def _emc_buffer_sum(
+    source: PatternsSOneFile,
+    rs: Any,
+    buf: Any,
+    axis: int | None,
+    keepdims: bool,
+    dtype: npt.DTypeLike | None,
+) -> int | float | npt.NDArray[Any]:
+    source.init_idx()
+    total_ones = int(source.ones_idx[-1])
+    total_multi = int(source.multi_idx[-1])
+    acc_dtype = np.empty(0, dtype=np.int32).sum(dtype=dtype).dtype
+    workers = emc_workers()
+    if axis is None:
+        raw_total = rs.emc_sum_total(
+            buf, source.num_data, total_ones, total_multi, workers
+        )
+        return _emc_scalar_sum_to_dtype(int(raw_total), acc_dtype, keepdims)
+    if axis == 1:
+        row_i64 = rs.emc_sum_axis1(
+            buf,
+            source.num_data,
+            source._ones,
+            source.multi_idx,
+            total_ones,
+            workers,
+        )
+        row_ans = (
+            row_i64
+            if acc_dtype == np.dtype(np.int64)
+            else row_i64.astype(acc_dtype, copy=False)
+        )
+        return cast(npt.NDArray[Any], row_ans[:, None] if keepdims else row_ans)
+    col_i64 = rs.emc_sum_axis0(
+        buf,
+        source.num_data,
+        source.num_pix,
+        total_ones,
+        total_multi,
+        workers,
+    )
+    col_ans = (
+        col_i64
+        if acc_dtype == np.dtype(np.int64)
+        else col_i64.astype(acc_dtype, copy=False)
+    )
+    return cast(npt.NDArray[Any], col_ans[None, :] if keepdims else col_ans)
+
+
 class PatternsSOneEMC(PatternsSOneFile):
     """
     Represents a collection of patterns stored in an EMC-formatted binary file.
@@ -492,19 +740,86 @@ class PatternsSOneEMC(PatternsSOneFile):
             self.num_data = int(num_data)
             self.num_pix = int(num_pix)
         else:
-            with open(self._fn, "rb") as fin:
-                header_raw = fin.read(self.HEADER_BYTES)
-            if len(header_raw) < self.HEADER_BYTES:
-                raise ValueError(f"Truncated EMC header in {self._fn}")
-            header_vals = np.frombuffer(header_raw, dtype="<i4", count=2)
-            self.num_data = int(header_vals[0])
-            self.num_pix = int(header_vals[1])
+            entry = get_emc_cache_entry(self._fn, _resolved=True)
+            if (
+                entry is not None
+                and entry.num_data is not None
+                and entry.num_pix is not None
+            ):
+                self.num_data = entry.num_data
+                self.num_pix = entry.num_pix
+            else:
+                with open(self._fn, "rb") as fin:
+                    header_raw = fin.read(self.HEADER_BYTES)
+                if len(header_raw) < self.HEADER_BYTES:
+                    raise ValueError(f"Truncated EMC header in {self._fn}")
+                header_vals = np.frombuffer(header_raw, dtype="<i4", count=2)
+                self.num_data = int(header_vals[0])
+                self.num_pix = int(header_vals[1])
+                if entry is not None and self.num_data >= 0 and self.num_pix >= 0:
+                    entry.num_data = self.num_data
+                    entry.num_pix = self.num_pix
         if self.num_data < 0 or self.num_pix < 0:
             raise ValueError(
                 f"Invalid EMC header dimensions ({self.num_data}, {self.num_pix})"
             )
         self.ndim = 2
         self._init_idx = False
+
+    def _get_emc_entry(self) -> EmcAccelEntry | None:
+        return get_emc_cache_entry(self._fn, _resolved=True)
+
+    def init_idx(self) -> None:
+        if self._init_idx:
+            return
+        entry = self._get_emc_entry()
+        if (
+            entry is not None
+            and entry.ones is not None
+            and entry.multi is not None
+            and entry.ones_idx is not None
+            and entry.multi_idx is not None
+            and len(entry.ones) == self.num_data
+        ):
+            self._ones = entry.ones
+            self._multi = entry.multi
+            self.ones_idx = entry.ones_idx
+            self.multi_idx = entry.multi_idx
+            self._init_idx = True
+            return
+
+        rs = get_emc_rs()
+        if rs is not None and entry is not None:
+            with entry.borrow_mmap() as mm:
+                if mm is not None:
+                    ones, multi, ones_idx, multi_idx = rs.emc_read_counts_and_offsets(
+                        mm, self.num_data
+                    )
+                    ones_idx.flags.writeable = False
+                    multi_idx.flags.writeable = False
+                    self._ones = ones
+                    self._multi = multi
+                    self.ones_idx = ones_idx
+                    self.multi_idx = multi_idx
+                    if entry.num_data is None or entry.num_data == self.num_data:
+                        entry.ones = ones
+                        entry.multi = multi
+                        entry.ones_idx = ones_idx
+                        entry.multi_idx = multi_idx
+                    self._init_idx = True
+                    return
+
+        self._ones, self._multi = self._read_ones_multi()
+        self.ones_idx = _count_offsets(self._ones)
+        self.multi_idx = _count_offsets(self._multi)
+        if entry is not None and (
+            entry.num_data is None or entry.num_data == self.num_data
+        ):
+            entry.ones = self._ones
+            entry.multi = self._multi
+            entry.ones_idx = self.ones_idx
+            entry.multi_idx = self.multi_idx
+        self._init_idx = True
 
     def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
         with self._fn.open("rb") as fin:
@@ -526,6 +841,92 @@ class PatternsSOneEMC(PatternsSOneFile):
         with self._fn.open("rb") as fin:
             return read_patterns(fin, index_ranges, self.ones_idx, self.multi_idx)
 
+    @overload
+    def __getitem__(self, index: tuple[INT_INDEX, INT_INDEX]) -> np.int32: ...
+
+    @overload
+    def __getitem__(
+        self,
+        index: INT_INDEX | tuple[INT_INDEX, TRANGE] | tuple[TRANGE, INT_INDEX],
+    ) -> npt.NDArray[np.int32]: ...
+
+    @overload
+    def __getitem__(self, index: TRANGE | tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
+
+    def __getitem__(
+        self,
+        index: INT_INDEX
+        | TRANGE
+        | tuple[INT_INDEX, INT_INDEX]
+        | tuple[INT_INDEX, TRANGE]
+        | tuple[TRANGE, INT_INDEX]
+        | tuple[TRANGE, TRANGE],
+    ) -> np.int32 | npt.NDArray[np.int32] | PatternsSOne:
+        rs = get_emc_rs()
+        if rs is not None:
+            entry = self._get_emc_entry()
+            if entry is not None:
+                with entry.borrow_mmap() as mm:
+                    if mm is not None:
+                        return _emc_buffer_getitem(self, rs, mm, index)
+        return super().__getitem__(index)
+
+    def sparse_pattern(self, index: int) -> SPARSE_PATTERN:
+        rs = get_emc_rs()
+        if rs is not None:
+            idx = int(index)
+            if idx < 0:
+                idx += self.num_data
+            if idx < 0 or idx >= self.num_data:
+                raise IndexError(f"{index}")
+            entry = self._get_emc_entry()
+            if entry is not None:
+                self.init_idx()
+                with entry.borrow_mmap() as mm:
+                    if mm is not None:
+                        po, pm, cm = rs.emc_read_sparse_frame(
+                            mm, self.num_data, self.ones_idx, self.multi_idx, idx
+                        )
+                        return SPARSE_PATTERN(self.num_pix, po, pm, cm)
+        return super().sparse_pattern(index)
+
+    def sum(
+        self,
+        axis: int | None = None,
+        keepdims: bool = False,
+        dtype: npt.DTypeLike | None = None,
+        chunk_size: int | None = None,
+    ) -> int | float | npt.NDArray[Any]:
+        norm_axis: int | None = None
+        if axis is not None:
+            if isinstance(axis, (bool, np.bool_)) or not isinstance(
+                axis, (int, np.integer)
+            ):
+                raise TypeError(
+                    f"axis must be an integer or None, not {type(axis).__name__}"
+                )
+            norm_axis = int(axis)
+            if norm_axis < 0:
+                norm_axis += 2
+            if norm_axis not in (0, 1):
+                raise ValueError(f"Do not support axis={norm_axis}.")
+        if chunk_size is not None and chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        if self.num_data == 0:
+            return super().sum(
+                axis=axis, keepdims=keepdims, dtype=dtype, chunk_size=chunk_size
+            )
+        rs = get_emc_rs()
+        if rs is not None:
+            entry = self._get_emc_entry()
+            if entry is not None:
+                with entry.borrow_mmap() as mm:
+                    if mm is not None:
+                        return _emc_buffer_sum(self, rs, mm, norm_axis, keepdims, dtype)
+        return super().sum(
+            axis=axis, keepdims=keepdims, dtype=dtype, chunk_size=chunk_size
+        )
+
     def open(self) -> PatternsSOneEMCReadBuffer:
         """Open a persistent reader with its own file handle.
 
@@ -539,6 +940,18 @@ class PatternsSOneEMC(PatternsSOneFile):
     def place_ones(self) -> npt.NDArray[np.uint32]:
         self.init_idx()
         expected = int(self.ones_idx[-1])
+        entry = self._get_emc_entry()
+        if get_emc_rs() is not None and entry is not None:
+            with entry.borrow_mmap() as mm:
+                if mm is not None:
+                    byte_off = 1024 + I4 * self.num_data * 2
+                    if len(mm) < byte_off + I4 * expected:
+                        raise ValueError(
+                            f"Truncated EMC place_ones array in {self._fn}"
+                        )
+                    return np.frombuffer(
+                        mm, dtype="<u4", count=expected, offset=byte_off
+                    ).astype(np.uint32, copy=True)
         with self._fn.open("rb") as fin:
             fin.seek(1024)
             fin.seek(I4 * self.num_data * 2, os.SEEK_CUR)
@@ -553,6 +966,18 @@ class PatternsSOneEMC(PatternsSOneFile):
     def place_multi(self) -> npt.NDArray[np.uint32]:
         self.init_idx()
         expected = int(self.multi_idx[-1])
+        entry = self._get_emc_entry()
+        if get_emc_rs() is not None and entry is not None:
+            with entry.borrow_mmap() as mm:
+                if mm is not None:
+                    byte_off = 1024 + I4 * (self.num_data * 2 + int(self.ones_idx[-1]))
+                    if len(mm) < byte_off + I4 * expected:
+                        raise ValueError(
+                            f"Truncated EMC place_multi array in {self._fn}"
+                        )
+                    return np.frombuffer(
+                        mm, dtype="<u4", count=expected, offset=byte_off
+                    ).astype(np.uint32, copy=True)
         with self._fn.open("rb") as fin:
             fin.seek(1024)
             fin.seek(I4 * (self.num_data * 2 + int(self.ones_idx[-1])), os.SEEK_CUR)
@@ -567,6 +992,22 @@ class PatternsSOneEMC(PatternsSOneFile):
     def count_multi(self) -> npt.NDArray[np.int32]:
         self.init_idx()
         expected = int(self.multi_idx[-1])
+        entry = self._get_emc_entry()
+        if get_emc_rs() is not None and entry is not None:
+            with entry.borrow_mmap() as mm:
+                if mm is not None:
+                    byte_off = 1024 + I4 * (
+                        self.num_data * 2
+                        + int(self.ones_idx[-1])
+                        + int(self.multi_idx[-1])
+                    )
+                    if len(mm) < byte_off + I4 * expected:
+                        raise ValueError(
+                            f"Truncated EMC count_multi array in {self._fn}"
+                        )
+                    return np.frombuffer(
+                        mm, dtype="<i4", count=expected, offset=byte_off
+                    ).astype(np.int32, copy=True)
         with self._fn.open("rb") as fin:
             fin.seek(1024)
             fin.seek(
@@ -603,6 +1044,26 @@ class _PatternsSOneBytes(PatternsSOneFile):
         self.ndim = 2
         self._init_idx = False
 
+    def init_idx(self) -> None:
+        if self._init_idx:
+            return
+        rs = get_emc_rs()
+        if rs is not None:
+            with self._fn.getbuffer() as raw_mv:
+                ro_mv = memoryview(raw_mv).toreadonly()
+                ones, multi, ones_idx, multi_idx = rs.emc_read_counts_and_offsets(
+                    ro_mv, self.num_data
+                )
+            ones_idx.flags.writeable = False
+            multi_idx.flags.writeable = False
+            self._ones = ones
+            self._multi = multi
+            self.ones_idx = ones_idx
+            self.multi_idx = multi_idx
+            self._init_idx = True
+            return
+        super().init_idx()
+
     def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
         self._fn.seek(1024)
         expected_bytes = I4 * self.num_data
@@ -625,6 +1086,86 @@ class _PatternsSOneBytes(PatternsSOneFile):
         self.init_idx()
         self._fn.seek(0)
         return read_patterns(self._fn, index_ranges, self.ones_idx, self.multi_idx)
+
+    @overload
+    def __getitem__(self, index: tuple[INT_INDEX, INT_INDEX]) -> np.int32: ...
+
+    @overload
+    def __getitem__(
+        self,
+        index: INT_INDEX | tuple[INT_INDEX, TRANGE] | tuple[TRANGE, INT_INDEX],
+    ) -> npt.NDArray[np.int32]: ...
+
+    @overload
+    def __getitem__(self, index: TRANGE | tuple[TRANGE, TRANGE]) -> PatternsSOne: ...
+
+    def __getitem__(
+        self,
+        index: INT_INDEX
+        | TRANGE
+        | tuple[INT_INDEX, INT_INDEX]
+        | tuple[INT_INDEX, TRANGE]
+        | tuple[TRANGE, INT_INDEX]
+        | tuple[TRANGE, TRANGE],
+    ) -> np.int32 | npt.NDArray[np.int32] | PatternsSOne:
+        rs = get_emc_rs()
+        if rs is not None:
+            with self._fn.getbuffer() as raw_mv:
+                ro_mv = memoryview(raw_mv).toreadonly()
+                return _emc_buffer_getitem(self, rs, ro_mv, index)
+        return super().__getitem__(index)
+
+    def sparse_pattern(self, index: int) -> SPARSE_PATTERN:
+        rs = get_emc_rs()
+        if rs is not None:
+            idx = int(index)
+            if idx < 0:
+                idx += self.num_data
+            if idx < 0 or idx >= self.num_data:
+                raise IndexError(f"{index}")
+            self.init_idx()
+            with self._fn.getbuffer() as raw_mv:
+                ro_mv = memoryview(raw_mv).toreadonly()
+                po, pm, cm = rs.emc_read_sparse_frame(
+                    ro_mv, self.num_data, self.ones_idx, self.multi_idx, idx
+                )
+            return SPARSE_PATTERN(self.num_pix, po, pm, cm)
+        return super().sparse_pattern(index)
+
+    def sum(
+        self,
+        axis: int | None = None,
+        keepdims: bool = False,
+        dtype: npt.DTypeLike | None = None,
+        chunk_size: int | None = None,
+    ) -> int | float | npt.NDArray[Any]:
+        norm_axis: int | None = None
+        if axis is not None:
+            if isinstance(axis, (bool, np.bool_)) or not isinstance(
+                axis, (int, np.integer)
+            ):
+                raise TypeError(
+                    f"axis must be an integer or None, not {type(axis).__name__}"
+                )
+            norm_axis = int(axis)
+            if norm_axis < 0:
+                norm_axis += 2
+            if norm_axis not in (0, 1):
+                raise ValueError(f"Do not support axis={norm_axis}.")
+        if chunk_size is not None and chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        if self.num_data == 0:
+            return super().sum(
+                axis=axis, keepdims=keepdims, dtype=dtype, chunk_size=chunk_size
+            )
+        rs = get_emc_rs()
+        if rs is not None:
+            with self._fn.getbuffer() as raw_mv:
+                ro_mv = memoryview(raw_mv).toreadonly()
+                return _emc_buffer_sum(self, rs, ro_mv, norm_axis, keepdims, dtype)
+        return super().sum(
+            axis=axis, keepdims=keepdims, dtype=dtype, chunk_size=chunk_size
+        )
 
     @property
     def place_ones(self) -> npt.NDArray[np.uint32]:
@@ -672,20 +1213,46 @@ class _PatternsSOneBytes(PatternsSOneFile):
 
 class PatternsSOneEMCReadBuffer(PatternsSOneEMC):
     def __init__(self, fn: str | Path):
-        super().__init__(fn)
-        self._file_handle = self._fn.open("rb")
+        self._file_handle: BufferedReader | None = None
+        self._private_entry: EmcAccelEntry | None = None
+        self._closed = False
+        try:
+            super().__init__(fn)
+            self._file_handle = self._fn.open("rb")
+            self._private_entry = create_private_emc_entry(self._fn)
+            self._private_entry.num_data = self.num_data
+            self._private_entry.num_pix = self.num_pix
+        except BaseException:
+            self.close()
+            raise
+
+    def _ensure_file_handle(self) -> BufferedReader:
+        if self._closed or self._file_handle is None:
+            raise ValueError("I/O operation on closed EMC pattern reader")
+        return self._file_handle
+
+    def _get_emc_entry(self) -> EmcAccelEntry | None:
+        if self._closed:
+            raise ValueError("I/O operation on closed EMC pattern reader")
+        return self._private_entry
 
     def __enter__(self) -> PatternsSOneEMCReadBuffer:
         return self
 
     def close(self) -> None:
-        self._file_handle.close()
+        self._closed = True
+        if self._private_entry is not None:
+            self._private_entry.close()
+            self._private_entry = None
+        if self._file_handle is not None:
+            self._file_handle.close()
+            self._file_handle = None
 
     def __exit__(self, exc_type: Any, exc_value: Any, exc_traceback: Any) -> None:
         self.close()
 
     def _read_ones_multi(self) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32]]:
-        fin = self._file_handle
+        fin = self._ensure_file_handle()
         fin.seek(1024)
         ones = np.fromfile(fin, dtype="<u4", count=self.num_data).astype(
             np.uint32, copy=False
@@ -700,9 +1267,35 @@ class PatternsSOneEMCReadBuffer(PatternsSOneEMC):
     def _read_patterns(
         self, index_ranges: INDEX_ARRAY
     ) -> tuple[npt.NDArray[np.uint32], npt.NDArray[np.uint32], npt.NDArray[np.int32]]:
+        fin = self._ensure_file_handle()
         self.init_idx()
-        return read_patterns(
-            self._file_handle, index_ranges, self.ones_idx, self.multi_idx
+        return read_patterns(fin, index_ranges, self.ones_idx, self.multi_idx)
+
+    @property
+    def place_ones(self) -> npt.NDArray[np.uint32]:
+        self._ensure_file_handle()
+        return super().place_ones
+
+    @property
+    def place_multi(self) -> npt.NDArray[np.uint32]:
+        self._ensure_file_handle()
+        return super().place_multi
+
+    @property
+    def count_multi(self) -> npt.NDArray[np.int32]:
+        self._ensure_file_handle()
+        return super().count_multi
+
+    def sum(
+        self,
+        axis: int | None = None,
+        keepdims: bool = False,
+        dtype: npt.DTypeLike | None = None,
+        chunk_size: int | None = None,
+    ) -> int | float | npt.NDArray[Any]:
+        self._ensure_file_handle()
+        return super().sum(
+            axis=axis, keepdims=keepdims, dtype=dtype, chunk_size=chunk_size
         )
 
 
