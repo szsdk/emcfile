@@ -7,10 +7,28 @@ from typing import TypeVar, cast
 
 import numpy as np
 import numpy.typing as npt
-from scipy.sparse import coo_array, coo_matrix, sparray, spmatrix
+from scipy.sparse import (
+    coo_array,
+    coo_matrix,
+    csr_array,
+    csr_matrix,
+    sparray,
+    spmatrix,
+)
 from typing_extensions import deprecated
 
-from ._emc_patterns import SPARSE_PATTERN, PatternsSOne, _full, _ones, _zeros
+from ._emc_accel import emc_workers, get_emc_rs
+from ._emc_patterns import (
+    _I32_MAX,
+    _U32_MAX,
+    SPARSE_PATTERN,
+    PatternsSOne,
+    _ensure_32bit_signed,
+    _ensure_32bit_unsigned,
+    _full,
+    _ones,
+    _zeros,
+)
 from ._hdf5 import PATH_TYPE, H5Path
 from ._pattern_files import _PatternsSOneBytes, file_patterns
 
@@ -25,6 +43,13 @@ def _from_dense_array(arr: npt.NDArray[np.integer[T1]]) -> PatternsSOne:
         arr = arr[None, :]
     elif arr.ndim != 2:
         raise ValueError(f"Dense pattern array must be 1D or 2D, got {arr.ndim}D")
+    rs = get_emc_rs()
+    if rs is not None and arr.shape[1] <= _U32_MAX + 1:
+        arr_c = arr if arr.flags.c_contiguous else np.ascontiguousarray(arr)
+        res = rs.from_dense_2d(arr_c, emc_workers())
+        if res is not None:
+            num_pix, parts = res
+            return PatternsSOne._from_raw_parts(int(num_pix), *parts)
     idx = arr == 1
     ones = idx.sum(axis=1)
     place_ones = idx.nonzero()[1]
@@ -35,11 +60,11 @@ def _from_dense_array(arr: npt.NDArray[np.integer[T1]]) -> PatternsSOne:
     count_multi = arr[nz[0], nz[1]]
     return PatternsSOne(
         arr.shape[1],
-        ones.astype(np.uint32),
-        multi.astype(np.uint32),
-        place_ones.astype(np.uint32),
-        place_multi.astype(np.uint32),
-        count_multi.astype(np.int32),
+        _ensure_32bit_unsigned(ones, "ones"),
+        _ensure_32bit_unsigned(multi, "multi"),
+        _ensure_32bit_unsigned(place_ones, "place_ones"),
+        _ensure_32bit_unsigned(place_multi, "place_multi"),
+        _ensure_32bit_signed(count_multi, "count_multi"),
     )
 
 
@@ -48,6 +73,19 @@ def _from_coo_array(coo: coo_matrix | coo_array) -> PatternsSOne:
         raise ValueError(f"Sparse pattern input must be 2D, got {coo.ndim}D")
     if not np.issubdtype(coo.data.dtype, np.integer):
         raise ValueError(f"{coo.data.dtype} is not supported")
+    assert coo.shape is not None
+    r_cnt = int(cast(int, coo.shape[0]))
+    c_cnt = int(cast(int, coo.shape[1]))
+    rs = get_emc_rs()
+    if rs is not None and r_cnt <= _U32_MAX + 1 and c_cnt <= _U32_MAX + 1:
+        if coo.data.dtype == np.uint64 and coo.data.size > 0:
+            if int(coo.data.max()) > _I32_MAX:
+                raise ValueError("count_multi values exceed int32 maximum")
+        rows_i64 = np.ascontiguousarray(coo.row, dtype=np.int64)
+        cols_i64 = np.ascontiguousarray(coo.col, dtype=np.int64)
+        data_i64 = np.ascontiguousarray(coo.data, dtype=np.int64)
+        parts = rs.from_coo(r_cnt, c_cnt, rows_i64, cols_i64, data_i64, emc_workers())
+        return PatternsSOne._from_raw_parts(c_cnt, *parts)
     coo = coo.copy()
     coo.sum_duplicates()
     neg = coo.data < 0
@@ -59,15 +97,37 @@ def _from_coo_array(coo: coo_matrix | coo_array) -> PatternsSOne:
     coo.eliminate_zeros()
     coo_csr = coo.tocsr()
     c_csr = c.tocsr()
-    assert coo.shape is not None
     return PatternsSOne(
-        int(cast(int, coo.shape[1])),
+        c_cnt,
         np.diff(c_csr.indptr).astype(np.uint32),
         np.diff(coo_csr.indptr).astype(np.uint32),
         cast(np.ndarray, c_csr.indices).astype(np.uint32),
         cast(np.ndarray, coo_csr.indices).astype(np.uint32),
-        cast(np.ndarray, coo_csr.data).astype(np.int32),
+        _ensure_32bit_signed(cast(np.ndarray, coo_csr.data), "count_multi"),
     )
+
+
+def _try_from_csr_fast(csr: csr_array | csr_matrix) -> PatternsSOne | None:
+    if not np.issubdtype(csr.data.dtype, np.integer):
+        raise ValueError(f"{csr.data.dtype} is not supported")
+    rs = get_emc_rs()
+    if rs is None or not csr.has_canonical_format:
+        return None
+    assert csr.shape is not None
+    r_cnt = int(cast(int, csr.shape[0]))
+    c_cnt = int(cast(int, csr.shape[1]))
+    if c_cnt > _U32_MAX + 1:
+        return None
+    if csr.data.dtype == np.uint64 and csr.data.size > 0:
+        if int(csr.data.max()) > _I32_MAX:
+            raise ValueError("count_multi values exceed int32 maximum")
+    indptr_i64 = np.ascontiguousarray(csr.indptr, dtype=np.int64)
+    indices_i64 = np.ascontiguousarray(csr.indices, dtype=np.int64)
+    data_i64 = np.ascontiguousarray(csr.data, dtype=np.int64)
+    parts = rs.from_canonical_csr(
+        r_cnt, c_cnt, indptr_i64, indices_i64, data_i64, emc_workers()
+    )
+    return PatternsSOne._from_raw_parts(c_cnt, *parts)
 
 
 @deprecated("Use patterns() with a dense array instead.")
@@ -221,6 +281,10 @@ def patterns(
         case np.ndarray():
             if not np.issubdtype(src.dtype, np.integer):
                 raise ValueError(f"{src.dtype} is not supported")
+            if src.ndim == 2 and (start is not None or end is not None):
+                src = src[start:end]
+                start = None
+                end = None
             ans = _from_dense_array(src)
             if (start is not None) or (end is not None):
                 ans = ans[start:end]
@@ -233,12 +297,14 @@ def patterns(
         case sparray() | spmatrix():
             if src.ndim != 2:
                 raise ValueError(f"Sparse pattern input must be 2D, got {src.ndim}D")
-            sliced = (
-                src[start:end] if (start is not None or end is not None) else src
-            )
+            sliced = src[start:end] if (start is not None or end is not None) else src
+            if isinstance(sliced, (csr_array, csr_matrix)):
+                fast_csr = _try_from_csr_fast(sliced)
+                if fast_csr is not None:
+                    return fast_csr
             return _from_coo_array(sliced.tocoo())
-        case list() | tuple() if (
-            len(src) == 0 or all(isinstance(i, SPARSE_PATTERN) for i in src)
+        case list() | tuple() if len(src) == 0 or all(
+            isinstance(i, SPARSE_PATTERN) for i in src
         ):
             ans = _from_sparse_patterns(cast(Sequence[SPARSE_PATTERN], src))
             if (start is not None) or (end is not None):

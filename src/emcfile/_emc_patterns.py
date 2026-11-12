@@ -26,6 +26,15 @@ from scipy.sparse import csr_array, hstack
 from typing_extensions import deprecated
 
 from ._delta import encode_pattern_local_delta_parallel
+from ._emc_accel import (
+    as_c_i32_counts,
+    as_c_u32_counts,
+    as_c_u32_positions,
+    as_c_u64_offsets,
+    emc_workers,
+    get_emc_rs,
+    invalidate_emc_cache_for_path,
+)
 from ._formatting import pretty_size
 from ._h5_accel import invalidate_cache_for_path
 from ._h5_direct_write import PrefilteredDatasetWriter
@@ -103,9 +112,7 @@ def _index_1d_pattern_columns(
             raise IndexError("column indices must be one-dimensional")
         if np.issubdtype(columns.dtype, np.bool_):
             if columns.size != row_arr.size:
-                raise IndexError(
-                    "Boolean column mask must match the number of pixels"
-                )
+                raise IndexError("Boolean column mask must match the number of pixels")
             return row_arr[columns]
         if np.issubdtype(columns.dtype, np.integer):
             if columns.size > 0 and (
@@ -156,9 +163,9 @@ def _ensure_32bit_signed(arr: Any, name: str) -> npt.NDArray[np.int32]:
     if a.size > 0:
         if np.issubdtype(a.dtype, np.signedinteger) and int(a.min()) < _I32_MIN:
             raise ValueError(f"{name} values are below int32 minimum")
-        if (
-            a.dtype.itemsize > 4 or np.issubdtype(a.dtype, np.unsignedinteger)
-        ) and int(a.max()) > _I32_MAX:
+        if (a.dtype.itemsize > 4 or np.issubdtype(a.dtype, np.unsignedinteger)) and int(
+            a.max()
+        ) > _I32_MAX:
             raise ValueError(f"{name} values exceed int32 maximum")
     return a.astype(np.int32, copy=False)
 
@@ -302,6 +309,65 @@ class PatternsSOne:
         self.place_multi = _ensure_32bit_unsigned(place_multi, "place_multi")
         self.count_multi = _ensure_32bit_signed(count_multi, "count_multi")
         self._update_offsets()
+
+    @classmethod
+    def _from_raw_parts(
+        cls,
+        num_pix: int,
+        ones: npt.NDArray[np.uint32],
+        multi: npt.NDArray[np.uint32],
+        ones_idx: npt.NDArray[np.uint64],
+        multi_idx: npt.NDArray[np.uint64],
+        place_ones: npt.NDArray[np.uint32],
+        place_multi: npt.NDArray[np.uint32],
+        count_multi: npt.NDArray[np.int32],
+    ) -> PatternsSOne:
+        obj = cls.__new__(cls)
+        obj.ndim = 2
+        obj.num_pix = int(num_pix)
+        obj.ones = ones
+        obj.multi = multi
+        obj.place_ones = place_ones
+        obj.place_multi = place_multi
+        obj.count_multi = count_multi
+        ones_idx.flags.writeable = False
+        multi_idx.flags.writeable = False
+        obj.ones_idx = ones_idx
+        obj.multi_idx = multi_idx
+        return obj
+
+    def _fast_buffers(
+        self,
+    ) -> (
+        tuple[
+            npt.NDArray[np.uint32],
+            npt.NDArray[np.uint32],
+            npt.NDArray[np.uint64],
+            npt.NDArray[np.uint64],
+            npt.NDArray[np.uint32],
+            npt.NDArray[np.uint32],
+            npt.NDArray[np.int32],
+        ]
+        | None
+    ):
+        ones = as_c_u32_counts(self.ones)
+        multi = as_c_u32_counts(self.multi)
+        oidx = as_c_u64_offsets(self.ones_idx)
+        midx = as_c_u64_offsets(self.multi_idx)
+        po = as_c_u32_positions(self.place_ones, self.num_pix)
+        pm = as_c_u32_positions(self.place_multi, self.num_pix)
+        cm = as_c_i32_counts(self.count_multi)
+        if (
+            ones is None
+            or multi is None
+            or oidx is None
+            or midx is None
+            or po is None
+            or pm is None
+            or cm is None
+        ):
+            return None
+        return ones, multi, oidx, midx, po, pm, cm
 
     def _update_offsets(self) -> None:
         self.ones_idx = _count_offsets(self.ones)
@@ -460,6 +526,27 @@ class PatternsSOne:
             idx += self.num_data
         if idx >= self.num_data or idx < 0:
             raise IndexError(f"{orig_idx}")
+        if get_emc_rs() is not None:
+            from ._h5_accel import get_h5_rs
+
+            h5_rs = get_h5_rs()
+            po = as_c_u32_positions(self.place_ones, self.num_pix)
+            pm = as_c_u32_positions(self.place_multi, self.num_pix)
+            cm = as_c_i32_counts(self.count_multi)
+            if (
+                h5_rs is not None
+                and po is not None
+                and pm is not None
+                and cm is not None
+            ):
+                o0, o1 = int(self.ones_idx[idx]), int(self.ones_idx[idx + 1])
+                m0, m1 = int(self.multi_idx[idx]), int(self.multi_idx[idx + 1])
+                return cast(
+                    npt.NDArray[np.int32],
+                    h5_rs.scatter_dense_pattern(
+                        self.num_pix, po[o0:o1], pm[m0:m1], cm[m0:m1]
+                    ),
+                )
         pattern = np.zeros(self.num_pix, "int32")
         pattern[self.place_ones[self.ones_idx[idx] : self.ones_idx[idx + 1]]] = 1
         r = slice(*self.multi_idx[idx : idx + 2])
@@ -627,6 +714,44 @@ class PatternsSOne:
             if axis not in (0, 1):
                 raise ValueError(f"Do not support axis={axis}.")
         acc_dtype = np.empty(0, dtype=np.int32).sum(dtype=dtype).dtype
+        rs = get_emc_rs()
+        bufs = self._fast_buffers() if rs is not None else None
+        if rs is not None and bufs is not None:
+            ones_b, _multi_b, _oidx_b, midx_b, po_b, pm_b, cm_b = bufs
+            workers = emc_workers()
+            if axis is None:
+                raw_total = rs.sum_total_i128(len(po_b), cm_b, workers)
+                if np.issubdtype(acc_dtype, np.integer):
+                    info = np.iinfo(acc_dtype)
+                    if info.min <= raw_total <= info.max:
+                        scalar_total: Any = acc_dtype.type(raw_total)
+                    else:
+                        scalar_total = np.array(
+                            raw_total & ((1 << 64) - 1), dtype=np.uint64
+                        ).astype(acc_dtype, copy=False)[()]
+                else:
+                    scalar_total = acc_dtype.type(raw_total)
+                if keepdims:
+                    return np.asarray(scalar_total, dtype=acc_dtype).reshape((1, 1))
+                return cast(
+                    np.int32 | np.int64 | np.float32 | np.float64 | int | float,
+                    scalar_total,
+                )
+            if axis == 1:
+                row_i64 = rs.sum_axis1_i64(ones_b, midx_b, cm_b, workers)
+                row_ans = (
+                    row_i64
+                    if acc_dtype == np.dtype(np.int64)
+                    else row_i64.astype(acc_dtype, copy=False)
+                )
+                return row_ans[:, None] if keepdims else row_ans
+            col_i64 = rs.sum_axis0_i64(self.num_pix, po_b, pm_b, cm_b, workers)
+            col_ans = (
+                col_i64
+                if acc_dtype == np.dtype(np.int64)
+                else col_i64.astype(acc_dtype, copy=False)
+            )
+            return col_ans[None, :] if keepdims else col_ans
         if axis is None:
             total = np.array(len(self.place_ones), dtype=acc_dtype) + np.sum(
                 self.count_multi, dtype=acc_dtype
@@ -649,11 +774,67 @@ class PatternsSOne:
             np.add.at(column_sum, self.place_multi, self.count_multi)
             return column_sum[None, :] if keepdims else column_sum
 
+    def _select_columns_fast(self, columns: TRANGE) -> PatternsSOne | None:
+        rs = get_emc_rs()
+        if rs is None:
+            return None
+        bufs = self._fast_buffers()
+        if bufs is None:
+            return None
+        _ones, _multi, oidx, midx, po, pm, cm = bufs
+        workers = emc_workers()
+        if isinstance(columns, slice):
+            start, stop, step = columns.indices(self.num_pix)
+            col_count, parts = rs.select_columns_slice(
+                self.num_pix, oidx, po, midx, pm, cm, start, stop, step, workers
+            )
+            return PatternsSOne._from_raw_parts(col_count, *parts)
+        if columns.ndim != 1:
+            raise IndexError("column indices must be one-dimensional")
+        if np.issubdtype(columns.dtype, np.bool_):
+            if columns.size != self.num_pix:
+                raise IndexError("Boolean column mask must match the number of pixels")
+            mask_c = np.ascontiguousarray(columns, dtype=np.bool_)
+            col_count, parts = rs.select_columns_mask(
+                self.num_pix, oidx, po, midx, pm, cm, mask_c, workers
+            )
+            return PatternsSOne._from_raw_parts(col_count, *parts)
+        if not np.issubdtype(columns.dtype, np.integer):
+            raise IndexError("column indices must be integers or Boolean")
+        if columns.dtype == np.uint64 and columns.size > 0:
+            if int(columns.max()) >= self.num_pix:
+                raise IndexError("column index out of range")
+        cols_i64 = np.ascontiguousarray(columns, dtype=np.int64)
+        col_count, parts = rs.select_columns_indices(
+            self.num_pix, oidx, po, midx, pm, cm, cols_i64, workers
+        )
+        return PatternsSOne._from_raw_parts(col_count, *parts)
+
     def _get_subdataset0(self, i: npt.NDArray[np.integer[Any]]) -> PatternsSOne:
         if i.ndim != 1:
             raise IndexError("row indices must be one-dimensional")
         if i.size == 0:
             return _zeros((0, self.num_pix))
+        rs = get_emc_rs()
+        if rs is not None:
+            bufs = self._fast_buffers()
+            if bufs is not None:
+                if i.dtype == np.uint64 and int(i.max()) >= self.num_data:
+                    raise IndexError("row index out of range")
+                ones_b, multi_b, oidx_b, midx_b, po_b, pm_b, cm_b = bufs
+                ids_i64 = np.ascontiguousarray(i, dtype=np.int64)
+                parts = rs.gather_rows_ids(
+                    ones_b,
+                    multi_b,
+                    oidx_b,
+                    midx_b,
+                    po_b,
+                    pm_b,
+                    cm_b,
+                    ids_i64,
+                    emc_workers(),
+                )
+                return PatternsSOne._from_raw_parts(self.num_pix, *parts)
         if np.any(i >= self.num_data) or (
             np.issubdtype(i.dtype, np.signedinteger) and np.any(i < -self.num_data)
         ):
@@ -744,6 +925,68 @@ class PatternsSOne:
                         f"column index {columns} is out of bounds for axis 1 "
                         f"with size {self.num_pix}"
                     )
+                rs = get_emc_rs()
+                if rs is not None and isinstance(rows, (slice, np.ndarray)):
+                    if isinstance(rows, slice) and rows.step in (None, 1):
+                        sub_src = self._get_contiguous_rows(rows)
+                        bufs = sub_src._fast_buffers()
+                        if bufs is not None:
+                            _, _, oidx_b, midx_b, po_b, pm_b, cm_b = bufs
+                            return cast(
+                                npt.NDArray[np.int32],
+                                rs.extract_column_1d(
+                                    sub_src.num_pix,
+                                    oidx_b,
+                                    po_b,
+                                    midx_b,
+                                    pm_b,
+                                    cm_b,
+                                    None,
+                                    col,
+                                    emc_workers(),
+                                ),
+                            )
+                    else:
+                        bufs = self._fast_buffers()
+                        if bufs is not None:
+                            _, _, oidx_b, midx_b, po_b, pm_b, cm_b = bufs
+                            r_ids: npt.NDArray[np.int64] | None = None
+                            if isinstance(rows, slice):
+                                r_ids = np.arange(
+                                    *rows.indices(self.num_data), dtype=np.int64
+                                )
+                            elif np.issubdtype(rows.dtype, np.bool_):
+                                if rows.ndim != 1 or rows.size != self.num_data:
+                                    raise IndexError(
+                                        "Boolean row mask must match the number of patterns"
+                                    )
+                                r_ids = np.flatnonzero(rows).astype(
+                                    np.int64, copy=False
+                                )
+                            elif np.issubdtype(rows.dtype, np.integer):
+                                if rows.ndim != 1:
+                                    raise IndexError(
+                                        "row indices must be one-dimensional"
+                                    )
+                                if rows.dtype == np.uint64 and rows.size > 0:
+                                    if int(rows.max()) >= self.num_data:
+                                        raise IndexError("row index out of range")
+                                r_ids = np.ascontiguousarray(rows, dtype=np.int64)
+                            if r_ids is not None:
+                                return cast(
+                                    npt.NDArray[np.int32],
+                                    rs.extract_column_1d(
+                                        self.num_pix,
+                                        oidx_b,
+                                        po_b,
+                                        midx_b,
+                                        pm_b,
+                                        cm_b,
+                                        r_ids,
+                                        col,
+                                        emc_workers(),
+                                    ),
+                                )
                 sub = cast(PatternsSOne, self[cast(TRANGE, rows), col : col + 1])
                 col_out = sub.ones.astype(np.int32, copy=True)
                 if sub.place_multi.size > 0:
@@ -770,6 +1013,9 @@ class PatternsSOne:
                     1,
                 ):
                     return source
+                fast_cols = source._select_columns_fast(columns)
+                if fast_cols is not None:
+                    return fast_cols
                 if (
                     source.num_pix <= np.iinfo(np.int32).max
                     and source.place_ones.dtype
@@ -789,12 +1035,51 @@ class PatternsSOne:
                     raise IndexError(
                         "Boolean row mask must match the number of patterns"
                     )
+                rs = get_emc_rs()
+                if rs is not None:
+                    bufs = self._fast_buffers()
+                    if bufs is not None:
+                        ones_b, multi_b, oidx_b, midx_b, po_b, pm_b, cm_b = bufs
+                        mask_c = np.ascontiguousarray(index, dtype=np.bool_)
+                        parts = rs.gather_rows_mask(
+                            ones_b,
+                            multi_b,
+                            oidx_b,
+                            midx_b,
+                            po_b,
+                            pm_b,
+                            cm_b,
+                            mask_c,
+                            emc_workers(),
+                        )
+                        return PatternsSOne._from_raw_parts(self.num_pix, *parts)
                 return self._get_subdataset0(np.where(index)[0])
-            case np.ndarray() if np.issubdtype(index.dtype, np.integer):
+            case np.ndarray() if np.issubdtype(index.dtype, integer := np.integer):
+                del integer
                 return self._get_subdataset0(cast(npt.NDArray[np.integer[Any]], index))
             case slice() if index.step is None or index.step == 1:
                 return self._get_contiguous_rows(index)
             case slice():
+                rs = get_emc_rs()
+                if rs is not None:
+                    bufs = self._fast_buffers()
+                    if bufs is not None:
+                        ones_b, multi_b, oidx_b, midx_b, po_b, pm_b, cm_b = bufs
+                        start, stop, step = index.indices(self.num_data)
+                        parts = rs.gather_rows_strided(
+                            ones_b,
+                            multi_b,
+                            oidx_b,
+                            midx_b,
+                            po_b,
+                            pm_b,
+                            cm_b,
+                            start,
+                            stop,
+                            step,
+                            emc_workers(),
+                        )
+                        return PatternsSOne._from_raw_parts(self.num_pix, *parts)
                 return self._get_subdataset0(
                     np.arange(*index.indices(self.num_data), dtype=np.intp)
                 )
@@ -889,6 +1174,22 @@ class PatternsSOne:
         removed, and a one-pattern, one-pixel dataset becomes a 0D array.
         Memory before squeezing is ``num_patterns * num_pixels * 4`` bytes.
         """
+        rs = get_emc_rs()
+        if rs is not None:
+            bufs = self._fast_buffers()
+            if bufs is not None:
+                _, _, oidx_b, midx_b, po_b, pm_b, cm_b = bufs
+                dense_2d = rs.todense_2d(
+                    self.num_data,
+                    self.num_pix,
+                    oidx_b,
+                    po_b,
+                    midx_b,
+                    pm_b,
+                    cm_b,
+                    emc_workers(),
+                )
+                return cast(npt.NDArray[np.int32], np.squeeze(dense_2d))
         ans = np.zeros(self.shape, dtype=np.int32)
         ans += self._get_sparse_ones()
         ans += self._get_sparse_multi()
@@ -907,6 +1208,30 @@ class PatternsSOne:
         return ans
 
     def __matmul__(self, mtx: npt.NDArray[Any]) -> npt.NDArray[Any]:
+        if (
+            isinstance(mtx, np.ndarray)
+            and mtx.ndim in (1, 2)
+            and mtx.shape[0] == self.num_pix
+        ):
+            rs = get_emc_rs()
+            if rs is not None:
+                bufs = self._fast_buffers()
+                if bufs is not None:
+                    _, _, oidx_b, midx_b, po_b, pm_b, cm_b = bufs
+                    rhs = mtx if mtx.flags.c_contiguous else np.ascontiguousarray(mtx)
+                    fast_out = rs.matmul_dense(
+                        self.num_data,
+                        self.num_pix,
+                        oidx_b,
+                        po_b,
+                        midx_b,
+                        pm_b,
+                        cm_b,
+                        rhs,
+                        emc_workers(),
+                    )
+                    if fast_out is not None:
+                        return cast(npt.NDArray[Any], fast_out)
         return cast(
             npt.NDArray[Any],
             self._get_sparse_ones() @ mtx + self._get_sparse_multi() @ mtx,
@@ -936,6 +1261,21 @@ class PatternsSOne:
         One-photon and multi-photon positions are checked separately for
         each pattern; duplicate positions within a stream are not sorted.
         """
+        rs = get_emc_rs()
+        if rs is not None:
+            oidx_b = as_c_u64_offsets(self.ones_idx)
+            midx_b = as_c_u64_offsets(self.multi_idx)
+            po_b = as_c_u32_positions(self.place_ones, self.num_pix)
+            pm_b = as_c_u32_positions(self.place_multi, self.num_pix)
+            if (
+                oidx_b is not None
+                and midx_b is not None
+                and po_b is not None
+                and pm_b is not None
+            ):
+                return bool(
+                    rs.has_sorted_indices(oidx_b, po_b, midx_b, pm_b, emc_workers())
+                )
         for values, offsets in (
             (self.place_multi, self.multi_idx),
             (self.place_ones, self.ones_idx),
@@ -961,12 +1301,33 @@ class PatternsSOne:
         """
         if self.has_sorted_indices():
             return
+        rs = get_emc_rs()
+        if (
+            rs is not None
+            and self.place_ones.flags.writeable
+            and self.place_multi.flags.writeable
+            and self.count_multi.flags.writeable
+        ):
+            oidx_b = as_c_u64_offsets(self.ones_idx)
+            midx_b = as_c_u64_offsets(self.multi_idx)
+            po_b = as_c_u32_positions(self.place_ones, self.num_pix)
+            pm_b = as_c_u32_positions(self.place_multi, self.num_pix)
+            cm_b = as_c_i32_counts(self.count_multi)
+            if (
+                oidx_b is not None
+                and midx_b is not None
+                and po_b is not None
+                and pm_b is not None
+                and cm_b is not None
+            ):
+                rs.sort_indices_inplace(oidx_b, po_b, midx_b, pm_b, cm_b, emc_workers())
+                return
         for i in range(self.num_data):
             s, e = self.ones_idx[i], self.ones_idx[i + 1]
             t = np.argsort(self.place_ones[s:e])
             self.place_ones[s:e] = self.place_ones[s:e][t]
             s, e = self.multi_idx[i], self.multi_idx[i + 1]
-            t = np.argsort(self.place_multi[s:e])
+            t = np.argsort(self.place_multi[s:e], kind="stable")
             self.place_multi[s:e] = self.place_multi[s:e][t]
             self.count_multi[s:e] = self.count_multi[s:e][t]
 
@@ -1047,13 +1408,58 @@ def _write_bin(datas: Sequence[PatternsSOneBase], path: Path, overwrite: bool) -
     if path.exists() and not overwrite:
         raise FileExistsError(f"{path} exists")
     num_data, num_pix = _validate_bin_sources(datas)
-    with atomic_write_path(path) as tmp_path, tmp_path.open("wb") as fptr:
-        header = np.zeros((256), dtype="<i4")
-        header[:2] = [num_data, num_pix]
-        header.tofile(fptr)
-        for g in PatternsSOne.ATTRS:
-            for data in datas:
-                _as_bin_attr_le32(data, g).tofile(fptr)
+    invalidate_emc_cache_for_path(path)
+    rs = get_emc_rs()
+    try:
+        if rs is not None and all(isinstance(d, PatternsSOne) for d in datas):
+            ones_l = [
+                np.ascontiguousarray(_as_bin_attr_le32(d, "ones"), dtype=np.uint32)
+                for d in datas
+            ]
+            multi_l = [
+                np.ascontiguousarray(_as_bin_attr_le32(d, "multi"), dtype=np.uint32)
+                for d in datas
+            ]
+            po_l = [
+                np.ascontiguousarray(
+                    _as_bin_attr_le32(d, "place_ones"), dtype=np.uint32
+                )
+                for d in datas
+            ]
+            pm_l = [
+                np.ascontiguousarray(
+                    _as_bin_attr_le32(d, "place_multi"), dtype=np.uint32
+                )
+                for d in datas
+            ]
+            cm_l = [
+                np.ascontiguousarray(
+                    _as_bin_attr_le32(d, "count_multi"), dtype=np.int32
+                )
+                for d in datas
+            ]
+            with atomic_write_path(path) as tmp_path, tmp_path.open("wb") as fptr:
+                rs.emc_write_binary(
+                    fptr, num_data, num_pix, ones_l, multi_l, po_l, pm_l, cm_l
+                )
+                fptr.flush()
+            return
+        with atomic_write_path(path) as tmp_path, tmp_path.open("wb") as fptr:
+            header = np.zeros((256), dtype="<i4")
+            header[:2] = [num_data, num_pix]
+            header.tofile(fptr)
+            for g in PatternsSOne.ATTRS:
+                for chunk in _iter_buffered_arrays(datas, 8 << 20, g):
+                    if g == "count_multi":
+                        _ensure_32bit_signed(chunk, g).astype("<i4", copy=False).tofile(
+                            fptr
+                        )
+                    else:
+                        _ensure_32bit_unsigned(chunk, g).view(np.uint32).astype(
+                            "<u4", copy=False
+                        ).tofile(fptr)
+    finally:
+        invalidate_emc_cache_for_path(path)
 
 
 def _write_bytes(datas: Sequence[PatternsSOneBase], path: io.BytesIO) -> None:
