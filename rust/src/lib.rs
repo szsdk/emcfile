@@ -2,6 +2,7 @@
 compile_error!("emcfile_fast requires a little-endian target");
 
 pub mod detector;
+pub mod emc;
 pub mod h5;
 pub mod parquet;
 pub mod simd;
@@ -277,6 +278,7 @@ fn emcfile_fast(m: &Bound<'_, PyModule>) -> PyResult<()> {
     h5::register(m)?;
     parquet::register(m)?;
     detector::register(m)?;
+    emc::register(m)?;
     let py = m.py();
     let h5_mod = PyModule::new(py, "h5")?;
     h5::register(&h5_mod)?;
@@ -287,5 +289,8 @@ fn emcfile_fast(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let det_mod = PyModule::new(py, "detector")?;
     detector::register(&det_mod)?;
     m.add_submodule(&det_mod)?;
+    let emc_mod = PyModule::new(py, "emc")?;
+    emc::register(&emc_mod)?;
+    m.add_submodule(&emc_mod)?;
     Ok(())
 }
