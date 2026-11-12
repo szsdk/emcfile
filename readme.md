@@ -118,14 +118,20 @@ For an in-memory `EMCPatternArray`, contiguous row slices are views of the
 event arrays. Strided row slices, 1D integer indices, and Boolean row masks
 gather the selected events without constructing SciPy CSR arrays; these
 selections are NumPy copies and preserve index order and duplicates, with no
-JIT compilation. Column selections use SciPy CSR; large event arrays are
-processed in bounded chunks to keep indices within signed int32 limits.
-Each chunk contains at most one billion events per event stream (approximately
-4 GiB of indices); memory also includes the selected output and its assembly.
-Combined selections with at least one slice gather or view the requested rows
-first; other advanced selectors retain the general SciPy path. The optional
-`emcfile-fast` Rust extension accelerates HDF5 and Parquet encoding and decoding
-paths without runtime JIT compilation.
+JIT compilation. When `emcfile-fast` is installed, row gathers, column
+selections (slices, Boolean masks, fancy indices, and single-column extraction),
+reductions (`sum`), `todense()`, fused sparse-dense `@` matrix multiplication,
+`has_sorted_indices()` / `sort_indices()`, dense/COO/CSR conversions via
+`patterns()`, and memory-mapped `.emc` binary reads, streaming reductions, and
+buffered writes all run in parallel Rust kernels (`EMCFILE_EMC_WORKERS` sets the
+worker budget, defaulting to `4`; `EMCFILE_DISABLE_EMC_ACCEL=1` forces the pure
+Python/NumPy/SciPy fallback). Without `emcfile-fast`, column selections use
+SciPy CSR in bounded chunks of at most one billion events per stream
+(approximately 4 GiB of indices) to stay within signed int32 limits. Combined
+selections with at least one slice gather or view the requested rows first;
+paired fancy selectors retain the general SciPy path. `emcfile-fast` also
+accelerates HDF5 and Parquet encoding and decoding paths without runtime JIT
+compilation.
 
 To write several arrays or file-backed sources as one dataset, use
 `write_patterns()`:
