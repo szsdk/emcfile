@@ -263,8 +263,8 @@ pub fn emc_read_dense_frame<'py>(
     let out = unsafe { out_arr.as_slice_mut()? };
 
     let po_bytes = &buf[layout.po_byte_off + o0 * 4..layout.po_byte_off + o1 * 4];
-    for chunk in po_bytes.chunks_exact(4) {
-        let idx = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as usize;
+    for &chunk in po_bytes.as_chunks::<4>().0 {
+        let idx = u32::from_le_bytes(chunk) as usize;
         if idx >= num_pix {
             return Err(PyIndexError::new_err(
                 "place_ones index out of bounds for num_pix",
@@ -275,9 +275,14 @@ pub fn emc_read_dense_frame<'py>(
 
     let pm_bytes = &buf[layout.pm_byte_off + m0 * 4..layout.pm_byte_off + m1 * 4];
     let cm_bytes = &buf[layout.cm_byte_off + m0 * 4..layout.cm_byte_off + m1 * 4];
-    for (p_chk, c_chk) in pm_bytes.chunks_exact(4).zip(cm_bytes.chunks_exact(4)) {
-        let idx = u32::from_le_bytes([p_chk[0], p_chk[1], p_chk[2], p_chk[3]]) as usize;
-        let val = i32::from_le_bytes([c_chk[0], c_chk[1], c_chk[2], c_chk[3]]);
+    for (&p_chk, &c_chk) in pm_bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(cm_bytes.as_chunks::<4>().0)
+    {
+        let idx = u32::from_le_bytes(p_chk) as usize;
+        let val = i32::from_le_bytes(c_chk);
         if idx >= num_pix {
             return Err(PyIndexError::new_err(
                 "place_multi index out of bounds for num_pix",
@@ -734,16 +739,16 @@ pub fn emc_extract_column<'py>(
             }
             let mut acc: i32 = 0;
             let po_b = &buf[layout.po_byte_off + o0 * 4..layout.po_byte_off + o1 * 4];
-            for chk in po_b.chunks_exact(4) {
-                if u32::from_le_bytes([chk[0], chk[1], chk[2], chk[3]]) == target_col {
+            for &chk in po_b.as_chunks::<4>().0 {
+                if u32::from_le_bytes(chk) == target_col {
                     acc = acc.wrapping_add(1);
                 }
             }
             let pm_b = &buf[layout.pm_byte_off + m0 * 4..layout.pm_byte_off + m1 * 4];
             let cm_b = &buf[layout.cm_byte_off + m0 * 4..layout.cm_byte_off + m1 * 4];
-            for (pc, cc) in pm_b.chunks_exact(4).zip(cm_b.chunks_exact(4)) {
-                if u32::from_le_bytes([pc[0], pc[1], pc[2], pc[3]]) == target_col {
-                    let val = i32::from_le_bytes([cc[0], cc[1], cc[2], cc[3]]);
+            for (&pc, &cc) in pm_b.as_chunks::<4>().0.iter().zip(cm_b.as_chunks::<4>().0) {
+                if u32::from_le_bytes(pc) == target_col {
+                    let val = i32::from_le_bytes(cc);
                     acc = acc.wrapping_add(val);
                 }
             }
@@ -805,8 +810,8 @@ pub fn emc_sum_total(
                     .par_chunks(chunk_bytes)
                     .map(|part| {
                         let mut s: i64 = 0;
-                        for chk in part.chunks_exact(4) {
-                            s += i32::from_le_bytes([chk[0], chk[1], chk[2], chk[3]]) as i64;
+                        for &chk in part.as_chunks::<4>().0 {
+                            s += i32::from_le_bytes(chk) as i64;
                         }
                         s as i128
                     })
@@ -817,8 +822,8 @@ pub fn emc_sum_total(
                 .chunks(1 << 26)
                 .map(|part| {
                     let mut s: i64 = 0;
-                    for chk in part.chunks_exact(4) {
-                        s += i32::from_le_bytes([chk[0], chk[1], chk[2], chk[3]]) as i64;
+                    for &chk in part.as_chunks::<4>().0 {
+                        s += i32::from_le_bytes(chk) as i64;
                     }
                     s as i128
                 })
@@ -871,8 +876,8 @@ pub fn emc_sum_axis1<'py>(
             }
             let mut acc = s_ones[r] as i64;
             let cm_b = &buf[layout.cm_byte_off + m0 * 4..layout.cm_byte_off + m1 * 4];
-            for chk in cm_b.chunks_exact(4) {
-                acc += i32::from_le_bytes([chk[0], chk[1], chk[2], chk[3]]) as i64;
+            for &chk in cm_b.as_chunks::<4>().0 {
+                acc += i32::from_le_bytes(chk) as i64;
             }
             acc
         };
@@ -935,8 +940,8 @@ pub fn emc_sum_axis0<'py>(
                         let mut local = vec![0i64; num_pix];
                         let o_beg = total_ones * tid / w;
                         let o_end = total_ones * (tid + 1) / w;
-                        for chk in po_bytes[o_beg * 4..o_end * 4].chunks_exact(4) {
-                            let idx = u32::from_le_bytes([chk[0], chk[1], chk[2], chk[3]]) as usize;
+                        for &chk in po_bytes[o_beg * 4..o_end * 4].as_chunks::<4>().0 {
+                            let idx = u32::from_le_bytes(chk) as usize;
                             if idx >= num_pix {
                                 oob.store(true, Ordering::Relaxed);
                                 return local;
@@ -945,12 +950,14 @@ pub fn emc_sum_axis0<'py>(
                         }
                         let m_beg = total_multi * tid / w;
                         let m_end = total_multi * (tid + 1) / w;
-                        for (pc, cc) in pm_bytes[m_beg * 4..m_end * 4]
-                            .chunks_exact(4)
-                            .zip(cm_bytes[m_beg * 4..m_end * 4].chunks_exact(4))
+                        for (&pc, &cc) in pm_bytes[m_beg * 4..m_end * 4]
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .zip(cm_bytes[m_beg * 4..m_end * 4].as_chunks::<4>().0)
                         {
-                            let idx = u32::from_le_bytes([pc[0], pc[1], pc[2], pc[3]]) as usize;
-                            let val = i32::from_le_bytes([cc[0], cc[1], cc[2], cc[3]]) as i64;
+                            let idx = u32::from_le_bytes(pc) as usize;
+                            let val = i32::from_le_bytes(cc) as i64;
                             if idx >= num_pix {
                                 oob.store(true, Ordering::Relaxed);
                                 return local;
@@ -969,17 +976,22 @@ pub fn emc_sum_axis0<'py>(
                 }
             }
         } else {
-            for chk in po_bytes.chunks_exact(4) {
-                let idx = u32::from_le_bytes([chk[0], chk[1], chk[2], chk[3]]) as usize;
+            for &chk in po_bytes.as_chunks::<4>().0 {
+                let idx = u32::from_le_bytes(chk) as usize;
                 if idx >= num_pix {
                     oob.store(true, Ordering::Relaxed);
                     return;
                 }
                 out[idx] += 1;
             }
-            for (pc, cc) in pm_bytes.chunks_exact(4).zip(cm_bytes.chunks_exact(4)) {
-                let idx = u32::from_le_bytes([pc[0], pc[1], pc[2], pc[3]]) as usize;
-                let val = i32::from_le_bytes([cc[0], cc[1], cc[2], cc[3]]) as i64;
+            for (&pc, &cc) in pm_bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(cm_bytes.as_chunks::<4>().0)
+            {
+                let idx = u32::from_le_bytes(pc) as usize;
+                let val = i32::from_le_bytes(cc) as i64;
                 if idx >= num_pix {
                     oob.store(true, Ordering::Relaxed);
                     return;

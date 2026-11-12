@@ -533,24 +533,33 @@ def test_binary_emc_file_and_bytesio_full_parity(
 
 @pytest.mark.skipif(not HAS_EMC_FAST, reason="emcfile_fast.emc not installed")
 def test_emc_atomic_overwrite_cache_invalidation_and_empty_file(tmp_path: Path) -> None:
+    import sys
+
     path = tmp_path / "mutable.emc"
     p1 = ef.patterns(np.array([[0, 1, 3, 0], [2, 0, 1, 0]], dtype=np.int32))
     p2 = ef.patterns(
         np.array([[5, 0, 0, 1], [0, 4, 1, 2], [1, 1, 0, 0]], dtype=np.int32)
     )
+    p3 = ef.patterns(np.array([[1, 2, 0, 0]], dtype=np.int32))
 
+    # Unpinned cache overwrite works on all platforms (including Windows)
     p1.write(path, overwrite=True)
-    s1 = ef.open_patterns(path)
-    with s1.open() as pinned_reader:
-        assert pinned_reader.sum() == p1.sum()
-        # Overwrite path atomically while pinned_reader holds old inode open
-        p2.write(path, overwrite=True)
-        assert pinned_reader.shape == p1.shape
-        _assert_patterns_identical(pinned_reader[:], p1)
-        # Newly opened reader must see p2, never stale p1 cache
+    _assert_patterns_identical(ef.open_patterns(path)[:], p1)
+    p2.write(path, overwrite=True)
+    _assert_patterns_identical(ef.open_patterns(path)[:], p2)
+
+    if sys.platform != "win32":
         s2 = ef.open_patterns(path)
-        assert s2.shape == p2.shape
-        _assert_patterns_identical(s2[:], p2)
+        with s2.open() as pinned_reader:
+            assert pinned_reader.sum() == p2.sum()
+            # Overwrite path atomically while pinned_reader holds old inode open
+            p3.write(path, overwrite=True)
+            assert pinned_reader.shape == p2.shape
+            _assert_patterns_identical(pinned_reader[:], p2)
+            # Newly opened reader must see p3, never stale cache
+            s3 = ef.open_patterns(path)
+            assert s3.shape == p3.shape
+            _assert_patterns_identical(s3[:], p3)
 
     # Empty 0-pattern .emc file roundtrip and sum
     empty_path = tmp_path / "empty.emc"
