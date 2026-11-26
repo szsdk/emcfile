@@ -8,7 +8,8 @@ name = "emcfile_fast"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.30.1"
+# Py_buffer is part of the stable ABI starting with Python 3.11.
+pyo3 = { version = "0.30.1", features = ["abi3-py311"] }
 numpy = "0.30.0"
 rayon = "1.12.0"
 zstd-safe = { version = "8.2.0", default-features = false }

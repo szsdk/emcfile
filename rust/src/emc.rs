@@ -1102,10 +1102,7 @@ pub fn emc_write_binary<'py>(
                 }
             }
         }
-        if !buf.is_empty() && !raw_target.write_all(&buf) {
-            return false;
-        }
-        true
+        buf.is_empty() || raw_target.write_all(&buf)
     });
 
     // Keep borrowed arrays and file object alive until py.detach completes.

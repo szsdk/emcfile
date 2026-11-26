@@ -7,7 +7,7 @@ and rendering of detector data onto a regular image grid.
 
 ## Installation
 
-`emcfile` requires Python 3.10 or later.
+`emcfile` requires Python 3.11 or later.
 
 ```bash
 pip install emcfile
@@ -341,7 +341,7 @@ uv run mypy src/emcfile
 uv run pre-commit run --all-files
 ```
 
-CI runs Ruff and the test suite on Python 3.10 through 3.14, with both core
+CI runs Ruff and the test suite on Python 3.11 through 3.14, with both core
 dependencies and the `fast` extra. Tests requiring optional HDF5 codecs or
 Parquet support skip in the core environment. As a library, this repository does not commit
 `uv.lock`; CI resolves dependencies from `pyproject.toml` on each clean checkout.
@@ -349,6 +349,7 @@ The lockfile generated locally by uv remains ignored. CI uploads JUnit and
 coverage reports for each test job.
 Dependabot checks the pinned GitHub Actions weekly and groups updates into
 one pull request.
+
 To run the complete suite locally:
 
 ```bash
@@ -369,3 +370,10 @@ act push -j test --matrix python-version:3.13 --matrix dependencies:core \
 `act` 0.2.89 cannot handle the upload-artifact v7 API: tests can pass locally
 while the report-upload step fails with an unknown `mime_type` field.
 Validate artifact uploads on GitHub Actions until `act` supports this API.
+
+### Release wheels
+
+Publishing a GitHub release builds and attaches `emcfile-fast` wheels for
+Linux and macOS on x86-64 and ARM64, and Windows on x86-64. Each wheel uses the
+`cp311-abi3` tag for standard CPython 3.11 and later. The **Release wheels**
+workflow can also be run manually to build and verify wheels as workflow artifacts.
