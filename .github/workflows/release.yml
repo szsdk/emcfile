@@ -177,10 +177,39 @@ jobs:
           fi
           gh release upload --repo "$GITHUB_REPOSITORY" --clobber -- "$RELEASE_TAG" "${all_wheels[@]}"
 
-  publish:
-    name: Publish wheels to PyPI
+  publish-fast:
+    name: Publish emcfile-fast to PyPI
     if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish_to_pypi)
-    needs: [emcfile, wheels]
+    needs: wheels
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi-fast
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.12.23"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: wheel-emcfile-fast-*
+          path: dist
+          merge-multiple: true
+      - name: Publish emcfile-fast wheels to PyPI
+        run: |
+          shopt -s nullglob
+          fast_wheels=(dist/emcfile_fast-*-cp311-abi3-*.whl)
+          if [[ ${#fast_wheels[@]} -ne 5 ]]; then
+            echo "Expected 5 emcfile-fast wheels, found: ${fast_wheels[*]}" >&2
+            exit 1
+          fi
+          uv publish --trusted-publishing always --check-url https://pypi.org/simple/ "${fast_wheels[@]}"
+
+  publish:
+    name: Publish emcfile to PyPI
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish_to_pypi)
+    needs: [emcfile, publish-fast]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: pypi
@@ -193,15 +222,14 @@ jobs:
           version: "0.12.23"
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          pattern: wheel-*
+          name: wheel-emcfile
           path: dist
-          merge-multiple: true
-      - name: Publish distributions to PyPI
+      - name: Publish emcfile wheel to PyPI
         run: |
           shopt -s nullglob
-          all_wheels=(dist/*.whl)
-          if [[ ${#all_wheels[@]} -ne 6 ]]; then
-            echo "Expected 6 wheels (1 emcfile + 5 emcfile-fast), found: ${all_wheels[*]}" >&2
+          core_wheels=(dist/emcfile-*-py3-none-any.whl)
+          if [[ ${#core_wheels[@]} -ne 1 ]]; then
+            echo "Expected 1 emcfile wheel, found: ${core_wheels[*]}" >&2
             exit 1
           fi
-          uv publish --trusted-publishing always --check-url https://pypi.org/simple/ "${all_wheels[@]}"
+          uv publish --trusted-publishing always --check-url https://pypi.org/simple/ "${core_wheels[@]}"

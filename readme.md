@@ -393,8 +393,9 @@ Validate artifact uploads on GitHub Actions until `act` supports this API.
 Publishing a GitHub release builds the pure-Python `emcfile` wheel (`py3-none-any`)
 and `emcfile-fast` `cp311-abi3` wheels for Linux and macOS on x86-64 and ARM64,
 and Windows on x86-64. All six wheels are attached to the GitHub release and
-published to PyPI via Trusted Publishing (`pypi` environment). Both `emcfile`
-and `emcfile-fast` must register `.github/workflows/release.yml` (environment
-`pypi`) as a PyPI Trusted Publisher. The **Release wheels** workflow can also
-be run manually to verify wheels as workflow artifacts, or with
-`publish_to_pypi: true` to publish the current commit's wheels to PyPI.
+published to PyPI via Trusted Publishing (`emcfile-fast` first via environment
+`pypi-fast`, then `emcfile` via environment `pypi`). Register
+`.github/workflows/release.yml` as a PyPI Trusted Publisher with environment
+`pypi` for `emcfile` and `pypi-fast` for `emcfile-fast`. The **Release wheels**
+workflow can also be run manually to verify wheels as workflow artifacts, or
+with `publish_to_pypi: true` to publish the current commit's wheels to PyPI.
