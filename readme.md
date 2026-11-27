@@ -10,6 +10,8 @@ and rendering of detector data onto a regular image grid.
 `emcfile` requires Python 3.11 or later.
 
 ```bash
+uv add emcfile
+# or
 pip install emcfile
 ```
 
@@ -18,7 +20,22 @@ For standard-HDF5 Zstd, Parquet (`.parquet`/`.pq`), and the Rust-accelerated
 fast paths (`emcfile-fast` + `hdf5plugin`), install:
 
 ```bash
+uv add 'emcfile[fast]'
+# or
 pip install 'emcfile[fast]'
+```
+
+To install pre-built wheels directly from a GitHub release instead of PyPI,
+point `uv` at the release's asset listing in `pyproject.toml`:
+
+```toml
+[project]
+dependencies = ["emcfile[fast]"]
+
+[[tool.uv.index]]
+name = "emcfile-release"
+url = "https://github.com/szsdk/emcfile/releases/expanded_assets/v0.2.0"
+format = "flat"
 ```
 
 ## Quick start
@@ -373,7 +390,11 @@ Validate artifact uploads on GitHub Actions until `act` supports this API.
 
 ### Release wheels
 
-Publishing a GitHub release builds and attaches `emcfile-fast` wheels for
-Linux and macOS on x86-64 and ARM64, and Windows on x86-64. Each wheel uses the
-`cp311-abi3` tag for standard CPython 3.11 and later. The **Release wheels**
-workflow can also be run manually to build and verify wheels as workflow artifacts.
+Publishing a GitHub release builds the pure-Python `emcfile` wheel (`py3-none-any`)
+and `emcfile-fast` `cp311-abi3` wheels for Linux and macOS on x86-64 and ARM64,
+and Windows on x86-64. All six wheels are attached to the GitHub release and
+published to PyPI via Trusted Publishing (`pypi` environment). Both `emcfile`
+and `emcfile-fast` must register `.github/workflows/release.yml` (environment
+`pypi`) as a PyPI Trusted Publisher. The **Release wheels** workflow can also
+be run manually to verify wheels as workflow artifacts, or with
+`publish_to_pypi: true` to publish the current commit's wheels to PyPI.

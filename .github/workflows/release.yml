@@ -4,11 +4,84 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      publish_to_pypi:
+        description: "Publish built wheels to PyPI"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
+  emcfile:
+    name: emcfile / py3-none-any
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.12.23"
+          python-version: "3.13"
+      - name: Verify package versions match
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          uv run --no-project python - <<'PY'
+          import os
+          from pathlib import Path
+          import tomllib
+
+          root = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          rust_py = tomllib.loads(Path("rust/pyproject.toml").read_text(encoding="utf-8"))
+          cargo = tomllib.loads(Path("rust/Cargo.toml").read_text(encoding="utf-8"))
+
+          versions = {
+              "pyproject.toml": root["project"]["version"],
+              "rust/pyproject.toml": rust_py["project"]["version"],
+              "rust/Cargo.toml": cargo["package"]["version"],
+          }
+          if len(set(versions.values())) != 1:
+              raise SystemExit(f"Package version mismatch: {versions}")
+
+          version = versions["pyproject.toml"]
+          expected_fast_dep = f"emcfile-fast=={version}"
+          fast_deps = root["project"]["optional-dependencies"]["fast"]
+          if expected_fast_dep not in fast_deps:
+              raise SystemExit(
+                  f"Expected {expected_fast_dep!r} in [project.optional-dependencies].fast, got {fast_deps!r}"
+              )
+
+          if os.environ.get("EVENT_NAME") == "release":
+              tag = os.environ["RELEASE_TAG"]
+              if tag.removeprefix("v") != version:
+                  raise SystemExit(f"Release tag {tag!r} does not match package version {version!r}")
+          PY
+      - name: Build pure-Python wheel
+        run: uv build --package emcfile --wheel --out-dir dist
+      - name: Smoke-test wheel in an isolated environment
+        shell: bash
+        run: |
+          shopt -s nullglob
+          wheels=(dist/emcfile-*-py3-none-any.whl)
+          if [[ ${#wheels[@]} -ne 1 ]]; then
+            echo "Expected one py3-none-any wheel, found: ${wheels[*]}" >&2
+            exit 1
+          fi
+          uv venv /tmp/emcfile-wheel-smoke
+          uv pip install --python /tmp/emcfile-wheel-smoke/bin/python "${wheels[0]}"
+          /tmp/emcfile-wheel-smoke/bin/python -c "import numpy as np, emcfile as ef; assert ef.patterns(np.array([[0, 1]], dtype=np.int32)).shape == (1, 2)"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheel-emcfile
+          path: dist/emcfile-*-py3-none-any.whl
+          if-no-files-found: error
+          overwrite: true
+
   wheels:
     name: emcfile-fast / ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -72,7 +145,7 @@ jobs:
           PY
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: emcfile-fast-${{ matrix.target }}
+          name: wheel-emcfile-fast-${{ matrix.target }}
           path: dist/*-cp311-abi3-*.whl
           if-no-files-found: error
           overwrite: true
@@ -80,7 +153,7 @@ jobs:
   attach:
     name: Attach wheels to the GitHub release
     if: github.event_name == 'release'
-    needs: wheels
+    needs: [emcfile, wheels]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -88,11 +161,47 @@ jobs:
     steps:
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          pattern: emcfile-fast-*
+          pattern: wheel-*
           path: wheels
           merge-multiple: true
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload --repo "$GITHUB_REPOSITORY" --clobber -- "$RELEASE_TAG" wheels/*.whl
+        run: |
+          shopt -s nullglob
+          all_wheels=(wheels/*.whl)
+          if [[ ${#all_wheels[@]} -ne 6 ]]; then
+            echo "Expected 6 wheels (1 emcfile + 5 emcfile-fast), found: ${all_wheels[*]}" >&2
+            exit 1
+          fi
+          gh release upload --repo "$GITHUB_REPOSITORY" --clobber -- "$RELEASE_TAG" "${all_wheels[@]}"
+
+  publish:
+    name: Publish wheels to PyPI
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish_to_pypi)
+    needs: [emcfile, wheels]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.12.23"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - name: Publish distributions to PyPI
+        run: |
+          shopt -s nullglob
+          all_wheels=(dist/*.whl)
+          if [[ ${#all_wheels[@]} -ne 6 ]]; then
+            echo "Expected 6 wheels (1 emcfile + 5 emcfile-fast), found: ${all_wheels[*]}" >&2
+            exit 1
+          fi
+          uv publish --trusted-publishing always --check-url https://pypi.org/simple/ "${all_wheels[@]}"

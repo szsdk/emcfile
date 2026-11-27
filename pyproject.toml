@@ -3,6 +3,8 @@ name = "emcfile"
 version = "0.2.0"
 description = "Utilities for EMC photon patterns and detector geometry"
 readme = "readme.md"
+license = "MIT"
+license-files = ["LICENSE.txt"]
 requires-python = ">=3.11"
 dependencies = [
     "h5py>=3.11.0",
@@ -11,9 +13,12 @@ dependencies = [
     "typing-extensions>=4.12.2",
 ]
 
+[project.urls]
+Repository = "https://github.com/szsdk/emcfile"
+
 [project.optional-dependencies]
 fast = [
-    "emcfile-fast",
+    "emcfile-fast==0.2.0",
     "hdf5plugin>=5.0.0",
 ]
 
